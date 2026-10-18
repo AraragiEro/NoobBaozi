@@ -1,0 +1,140 @@
+{
+ "attackers": [
+  {
+   "character_id": 2123772302,
+   "corporation_id": 98829436,
+   "damage_done": 2014,
+   "final_blow": true,
+   "security_status": 1.7,
+   "ship_type_id": 22456,
+   "weapon_type_id": 2889
+  }
+ ],
+ "killmail_id": 139255945,
+ "killmail_time": "2026-10-18T13:27:07Z",
+ "solar_system_id": 31000455,
+ "victim": {
+  "character_id": 2118811553,
+  "corporation_id": 98485802,
+  "damage_taken": 2014,
+  "items": [
+   {
+    "flag": 21,
+    "item_type_id": 33178,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 29,
+    "item_type_id": 25861,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 28,
+    "item_type_id": 28756,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 20,
+    "item_type_id": 33197,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 30028,
+    "quantity_dropped": 8,
+    "singleton": 0
+   },
+   {
+    "flag": 93,
+    "item_type_id": 31238,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 23,
+    "item_type_id": 6001,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 12,
+    "item_type_id": 1405,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 13,
+    "item_type_id": 8748,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 27,
+    "item_type_id": 11577,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 87,
+    "item_type_id": 31872,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 11,
+    "item_type_id": 1405,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 19,
+    "item_type_id": 33180,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 92,
+    "item_type_id": 31201,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 28,
+    "item_type_id": 30488,
+    "quantity_dropped": 8,
+    "singleton": 0
+   }
+  ],
+  "position": {
+   "x": 45121537799.802826,
+   "y": 512851974313.48047,
+   "z": -154364806756.75687
+  },
+  "ship_type_id": 11172
+ },
+ "zkb": {
+  "locationID": 40374409,
+  "hash": "287cfc228184044e262802ffd67011c1524856ab",
+  "fittedValue": 58748950.66,
+  "droppedValue": 6122989.94,
+  "destroyedValue": 54196532.75,
+  "totalValue": 60319522.69,
+  "totalDroppableValue": 43862891.13,
+  "points": 1,
+  "npc": false,
+  "solo": true,
+  "awox": false,
+  "labels": [
+   "tz:au",
+   "cat:6",
+   "solo",
+   "pvp",
+   "loc:w-space",
+   "isk:under1b"
+  ]
+ }
+}

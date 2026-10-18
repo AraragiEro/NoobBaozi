@@ -445,8 +445,10 @@ def check_invariants(facts: CaseFacts, eng: EngineFacts) -> list[Defect]:
                                   f"混合={float(total):.3f}，差={abs(float(total)-arithmetic)/arithmetic:.2%}",
                                   "该样本层抗性接近均匀：混合与算术平均天然接近，不足以区分口径（非缺陷）"))
         if math.isclose(float(total), harmonic, rel_tol=1e-6):
-            defects.append(Defect("不变式失败", "blocker", facts.name, "I3",
-                                  "≠ 四系调和平均（仅单层时两者才相等）",
+            # 四系共振率均匀时（如 Gnosis），混合 EHP = 算术 = 调和，三者天然相等：
+            # 这是**样本性质**，不是实现缺陷（同 I3 算术那条的处理）。
+            defects.append(Defect("不变式失败", "low", facts.name, "I3",
+                                  "≠ 四系调和平均（用于区分口径）",
                                   f"混合={float(total):.6f} == 调和={harmonic:.6f}",
                                   "红线 N6 的反向错误：把混合 EHP 记成调和平均"))
 
@@ -1084,6 +1086,14 @@ def check_modes(case: str, payload: dict, facts: CaseFacts, supported: list[dict
         "dps_base": facts.ship.get(-12),
         "align_time_s": facts.ship.get(-1),
     }
+    # 全部武器都是智能炸弹时，Sharpshooter 模式不放大其伤害（模式接对，值本就相等）
+    weapon_families = {w.get("family") for w in (payload.get("views", payload)
+                                                 .get("firepower", {})
+                                                 .get("overview", {})
+                                                 .get("weapons") or [])
+                       if isinstance(w, dict)}
+    smartbomb_only = bool(weapon_families) and weapon_families <= {"smartbomb"}
+
     for name, (key, direction) in MODE_DIRECTION.items():
         entry = by_name.get(name)
         if entry is None:
@@ -1091,6 +1101,11 @@ def check_modes(case: str, payload: dict, facts: CaseFacts, supported: list[dict
         value = entry.get(key)
         baseline = base.get(key)
         if not is_number(value) or baseline is None:
+            continue
+        # 基准为 0 时「必须更大」没有意义：没有可被放大的伤害（空弹/只有智能炸弹等）。
+        if math.isclose(float(baseline), 0.0, abs_tol=1e-9):
+            continue
+        if smartbomb_only and direction == "gt":
             continue
         better = float(value) > float(baseline) if direction == "gt" else float(value) < float(baseline)
         if not better:
@@ -1111,6 +1126,7 @@ def check_modes(case: str, payload: dict, facts: CaseFacts, supported: list[dict
                                   "模式可被引擎重算", f"{type(exc).__name__}: {exc}"))
             continue
         pairs = (("ehp_mixed", -43), ("dps_base", -12), ("align_time_s", -1))
+        baseline_dps = float(facts.ship.get(-12) or 0.0)
         for key, attr_id in pairs:
             value = entry.get(key)
             want = recomputed.get(attr_id)
@@ -1500,6 +1516,83 @@ def check_fighter_chain(case: str, payload: dict, facts: "CaseFacts") -> list[De
     return defects
 
 
+UNKNOWN_REASON_VALUES = ("input_incomplete", "not_applicable", "ambiguous",
+                         "engine_omits", "unclassified")
+"""`unknown_reasons` 的合法取值（T-35）。`unclassified` 是硬门：出现即缺陷。"""
+
+
+def check_unknown_reasons(case: str, payload: dict, spec: dict) -> list[Defect]:
+    """`unknown_reasons` 稀疏平行表校验（方案 A）。
+
+    规则：
+    1. 每个视角都必须有该表（可以是 `{}`）；
+    2. 键必须 ⊆ provenance 表，且对应路径的 provenance **必须是 `unknown`**
+       （reason 只解释"为什么不知道"，不能挂在有值的路径上）；
+    3. 取值必须 ∈ 五类；
+    4. `unclassified` **出现即缺陷**（硬门）——那表示"不知道且不知道为什么不知道"；
+    5. 每条 `unknown` 路径都必须有原因。
+    """
+    defects: list[Defect] = []
+    views = payload.get("views", payload)
+    for view_name in spec["views"]:
+        node = views.get(view_name) if isinstance(views, dict) else None
+        if not isinstance(node, dict):
+            continue
+        overview, table = resolve_view_entry(views, view_name)
+        if overview is None:
+            continue
+        reasons = node.get("unknown_reasons")
+        if reasons is None:
+            defects.append(Defect(
+                "字段缺失", "high", case, f"{view_name}.unknown_reasons",
+                "稀疏平行表（可为 {}）", "缺该键",
+                "T-35 契约：每个视角都要有 unknown_reasons"))
+            continue
+        if not isinstance(reasons, dict):
+            defects.append(Defect(
+                "字段缺失", "high", case, f"{view_name}.unknown_reasons",
+                "dict", type(reasons).__name__))
+            continue
+        table = table or {}
+        unclassified = []
+        for path, reason in reasons.items():
+            if path not in table:
+                defects.append(Defect(
+                    "provenance 错误", "medium", case, f"{view_name}.unknown_reasons.{path}",
+                    "键存在于 provenance 表", "该路径不在 provenance 表里",
+                    "reason 必须挂在实际存在的叶子上"))
+                continue
+            if table[path] != "unknown":
+                defects.append(Defect(
+                    "provenance 错误", "medium", case, f"{view_name}.unknown_reasons.{path}",
+                    "只挂在 provenance == unknown 的路径",
+                    f"该路径 provenance = {table[path]!r}",
+                    "reason 不能解释一个其实有值的字段"))
+                continue
+            if reason not in UNKNOWN_REASON_VALUES:
+                defects.append(Defect(
+                    "provenance 错误", "medium", case, f"{view_name}.unknown_reasons.{path}",
+                    f"∈ {list(UNKNOWN_REASON_VALUES)}", repr(reason)))
+                continue
+            if reason == "unclassified":
+                unclassified.append(path)
+        if unclassified:
+            defects.append(Defect(
+                "provenance 错误", "high", case, f"{view_name}.unknown_reasons",
+                "无 unclassified（T-35 硬门）",
+                f"{len(unclassified)} 条：{sorted(unclassified)[:5]}",
+                "unclassified = 不知道且不知道为什么不知道，必须归因后清零"))
+        unknown_paths = {path for path, value in table.items() if value == "unknown"}
+        missing = sorted(unknown_paths - set(reasons))
+        if missing:
+            defects.append(Defect(
+                "字段缺失", "high", case, f"{view_name}.unknown_reasons",
+                "每条 unknown 路径都有原因",
+                f"{len(missing)} 条缺原因：{missing[:5]}",
+                "T-35：unknown 必须可解释"))
+    return defects
+
+
 def check_provenance_instances(case: str, payload: dict, spec: dict,
                                oracle: "ProvenanceOracle") -> list[Defect]:
     """T-27 实例规则 + 数组元素口径。
@@ -1854,8 +1947,16 @@ def check_units(case: str, views: dict, facts: CaseFacts) -> list[Defect]:
             # (1) 泛化扫描：仅对**带单位后缀**的字段名生效。
             # 否则 `count: 1`、`damage_split.explosive: 1.0` 这类计数/比率
             # 会撞上某个 ×1000 属性的舍入巧合，制造假「单位错误」。
-            unit_like = leaf_name.endswith(("_s", "_rad_s", "_au_s", "_mps", "_m",
-                                            "_pct", "_kg", "_m3"))
+            # 泛化扫描只对**已知秒类叶子名**生效：
+            #  - `_m`（米）会与毫秒属性撞车（f41 FAX：optimal_m=12000 vs cycleTime 12000ms）
+            #  - `capacitor.recharge_s` 也曾被误挂到属性 51（扫描 4000 vs 4000ms）
+            # 注意：`recharge_s` 已由语义表映射到属性 55，泛化扫描再拿属性 51 撞会误报
+            # （f41 FAX 的 recharge 4000 s 恰好等于某模块 4000 ms 的 scanSpeed）。
+            unit_like = leaf_name in (
+                "align_time_s", "warp_speed_au_s", "tracking_rad_s",
+                "cycle_time_s", "ammo_cycle_s", "ammo_endurance_s", "paste_endurance_s",
+                "depletes_in_s", "reload_time_s",
+            )
             if not flagged and unit_like:
                 for attr_id, probe in probes.items():
                     if _rounding_match(value, probe.raw) and not _rounding_match(value, probe.physical):
@@ -2254,6 +2355,7 @@ def main(argv: list[str] | None = None) -> int:
             defects.extend(check_feasible(case_name, payload_views, facts))
             defects.extend(check_fighter_chain(case_name, payload_views, facts))
             defects.extend(check_provenance_instances(case_name, payload_views, spec, oracle))
+            defects.extend(check_unknown_reasons(case_name, payload_views, spec))
             defects.extend(check_view_structure(case_name, payload_views, spec, facts,
                                                 oracle, confidence_oracle))
             # modes 块（§10.2）：结构 + 方向 + 数值（对最小探针配装再对 fixture 期望值）

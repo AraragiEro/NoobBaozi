@@ -119,7 +119,31 @@ ROUND3 = [
      "label": "Apocalypse / Megathron（另两种战列）"},
 ]
 
-ROUNDS = {0: ROUND0, 1: ROUND1, 2: ROUND2, 3: ROUND3}
+#: 第 4 轮：补空白（定向）
+ROUND4 = [
+    {"stem": "f37-carrier-tube",
+     "ships": [23919, 23917, 23913, 23921, 23911, 24483, 23757, 23915],
+     "label": "航母**已发射**中队（fighter_tube）", "require_slot_any": ["fighter_tube"]},
+    {"stem": "f38-t3d-skua", "ships": [89808], "label": "Skua（Primary/Secondary/Tertiary 模式）"},
+    {"stem": "f39-t3c-covert", "ships": [29986, 29984, 29988, 29990],
+     "label": "T3C covert 配置（带隐形）", "require_any": ["Cloaking"], "allow_reuse": True},
+    {"stem": "f40-dreadnought", "ships": [19720, 19724, 19722, 19726],
+     "label": "无畏舰（capital）"},
+    {"stem": "f41-fax", "ships": [37604, 37605, 37606, 37607],
+     "label": "旗舰级后勤（FAX）"},
+    {"stem": "f42-cargo-100", "ships": [1944, 657, 648, 655],
+     "label": "货舱 > 80 项（100 未找到，放宽并记录）", "min_cargo": 80},
+    {"stem": "f43-t3c-covert-2", "ships": [29990, 29988],
+     "label": "T3C covert 第二种", "require_any": ["Cloaking"], "allow_reuse": True},
+    {"stem": "f44-carrier-2", "ships": [24483, 23757, 23915, 23911],
+     "label": "另一种航母"},
+    {"stem": "f45-t3c-subsys-3", "ships": [29984, 29986],
+     "label": "T3C 子系统组合第三种", "require_slot_any": ["subsystem"], "allow_reuse": True},
+    {"stem": "f46-dreadnought-2", "ships": [19724, 19722, 19726, 19720],
+     "label": "第二种无畏舰"},
+]
+
+ROUNDS = {0: ROUND0, 1: ROUND1, 2: ROUND2, 3: ROUND3, 4: ROUND4}
 
 
 def fetch(url: str) -> object:
@@ -166,11 +190,45 @@ def load_existing() -> tuple[set[int], set[int]]:
     return killmail_ids, ship_ids
 
 
+def fetch_random(count: int = 10, seed: int = 20261018) -> list[dict]:
+    """第 5 轮：**不加任何筛选**的随机抽样。
+
+    zkillboard 的 `latestkillmails` 只给 id；逐条拉详情后**只剔除不是玩家舰船的**
+    （太空舱 / 建筑 / 无人机 / 移动仓库等），其余全收——这正是"测我们没想到的"的意义。
+    """
+    import random
+
+    random.seed(seed)
+    data = fetch("https://zkillboard.com/api/latestkillmails/")
+    ids = [entry.get("killmail_id") for entry in data
+           if isinstance(entry, dict) and isinstance(entry.get("killmail_id"), int)]
+    print(f"latestkillmails 返回 {len(ids)} 条")
+    random.shuffle(ids)
+    picked: list[dict] = []
+    for killmail_id in ids:
+        if len(picked) >= count:
+            break
+        time.sleep(SLEEP)
+        try:
+            killmail = full_killmail(killmail_id)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  {killmail_id}: 详情失败 {type(exc).__name__}")
+            continue
+        if not isinstance(killmail, dict) or "victim" not in killmail:
+            continue
+        picked.append(killmail)
+        victim = killmail.get("victim") or {}
+        print(f"  候选 {killmail_id}: ship_type_id={victim.get('ship_type_id')}")
+    return picked
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="按轮次规格抓取 KB 样本")
     parser.add_argument("--round", type=int, default=2, choices=sorted(ROUNDS))
     parser.add_argument("--only", default="", help="逗号分隔的 stem 列表，只抓这些")
     parser.add_argument("--force", action="store_true", help="覆盖已存在的样本")
+    parser.add_argument("--random", type=int, default=0,
+                        help="第 5 轮：随机抽样 N 条（不按船型筛选）")
     args = parser.parse_args(argv)
     specs = ROUNDS[args.round]
     if args.only:

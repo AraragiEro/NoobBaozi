@@ -125,3 +125,14 @@ Invoke-Expression "$PY evefit/acceptance/fixtures/prepare_expected.py"
 | f34-no-charge.json | Maller / Cruiser | 武器空弹（ammo_name=null） |
 | f35-t3d-jackdaw.json | Jackdaw / T3D | modes 命名 |
 | f36-battleship-apoc.json | Apocalypse / Battleship | 另一种战列 |
+
+## 第 4–6 轮（f37–f66）
+
+- **第 4 轮（定向补空白）**：`fetch_fixtures.py --round 4`
+  —— T3C covert（f39/f43/f45）、无畏（f40/f46）、FAX（f41）、航母机库满载（f44, fighter_bay=27）、
+  货舱 80+（f42）。**f37（发射管载机）与 f38（Skua）在 7 日窗口内无样本**。
+- **第 5 轮（随机抽样）**：`fetch_random_samples.py` —— 10 条不加筛选的真实 killmail（f47–f56）。
+- **第 6 轮（合成构造）**：`make_synthetic_fixtures.py` —— 10 条 EFT（f57–f66）：
+  双推进、空配装、全槽位、无推进、无改装件、混搭坦、智能炸弹、注射器无药、武器空弹、单模块。
+  注意：`超载态 / 极端货舱 / 极端无人机` 在 EFT 里**无法表达**（引擎拒绝 cargo/drone 段）。
+

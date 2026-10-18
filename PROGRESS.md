@@ -297,6 +297,12 @@
 224. **未登记 ≠ 一定落 `unknown`**：容器登记（`weapons: None`）会让元素路径提前 `assumed`。**判断污染必须看「路径 → 有没有任何登记」，不能只看精确键。**
 225. 新守门判据的额外落点：`resources.upgrade_space.{slots_checked,upgradeable_count,blocked_by_resource}` 是 `OVERVIEW_DOWNGRADES` 产出的**摘要叶子**，天然不在 `FIELD_SOURCES`（三态由 `SUMMARY_PROVENANCE` 覆盖）—— 覆盖率断言必须认它，否则误报。
 226. 预算：主样本 **16,001 → 15,657（−344）**，余量回到 7.3%，`BUDGET_CHARS = 17,000` 未上调。
+227. **第 4–6 轮完成 → 六轮验收收官**：**64 样本 × 44 字段 = 2816/2816 = 100%**；medium+ 缺陷 **0**；26 条 low 观察。`pytest 538 passed`、`enforce 0 DIFF`。
+228. **第 5 轮「随机抽样 10 条」：全过、0 缺陷** —— Raptor / Gnosis ×2 / Slasher / Crusader / Helios / Merlin / Cormorant / Legion / Armageddon，**不经任何筛选**。这是最有力的证据：**这些配装不是我们设计的**。
+229. **reason 分布（64 样本）**：`not_applicable` 1176 / `ambiguous` 73 / `input_incomplete` 1 / `engine_omits` 0 / **`unclassified` 0**。结构校验：表存在、key ⊆ `provenance`、只挂 `unknown`、**0 缺 / 0 多**。
+230. 第 4 轮 8/10：**航母「已发射中队」与 Skua 在 7 日窗口内无战损样本** → 缺口诚实记录（有样本即可补验）。已验到：Legion/Loki/Tengu 的 covert 与第三种子系统组合、Revelation/Moros（无畏，EHP 91.9 万 / DPS 12167）、Apostle（FAX，EHP 172.9 万）、Nidhoggur（`fighter_bay.count=27`）、Badger（货舱 80+）。
+231. 第 6 轮合成：双推进 / 空配装 / 全槽位 / 无推进 / 无改装 / 混搭坦 / 纯智能炸弹 / 注射器无药 / 武器空弹 / 单模块。**超载与损伤态 killmail 与 EFT 都表达不了**（引擎直接拒绝非法弹药）→ **结构性不可测**，不是没测。
+232. **验收员本轮自己误报 7 次并全修**：① I3「混合==调和」在 Gnosis 四系共振均匀时天然成立（blocker → low）；② 通用单位扫描把米/秒与毫秒原值撞上（白名单限定已知秒类叶子）；③ Sharpshooter 方向检查对智能炸弹/空弹无意义（基准 0 时跳过）；④ 自建 EFT 把货舱/无人机行放进模块段（3 个 blocker）。
 
 ---
 

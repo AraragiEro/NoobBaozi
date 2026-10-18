@@ -72,6 +72,24 @@
      "severe": "high"
     },
     {
+     "name": "fighter_bay",
+     "aliases": [],
+     "kind": "object",
+     "subpaths": [
+      "count",
+      "types",
+      "capacity_used_m3"
+     ],
+     "provenance": "assumed",
+     "confidence": "A",
+     "confidence_basis": "由 killmail/EFT 里的机库载机直接统计（T-29）",
+     "unit": "架 / m3",
+     "source_attrs": [],
+     "meaning": "机库载机 {count, types, capacity_used_m3}；机库载机**不参与**伤害计算，只计入船级 -57（机库占用）",
+     "severe": "medium",
+     "since": "T-29"
+    },
+    {
      "name": "dph",
      "aliases": [
       "alpha"
@@ -946,7 +964,7 @@
   "authoritative_sample": "Hecate + 1 炮的最小探针配装（fixtures/f3-hecate-modes）——文档快照只认它；killmail 样本只验结构与方向（Lead 裁决 2026-10-18）",
   "note": "runner 三层校验：结构 → 方向 → 数值（数值用引擎独立重算对拍；最小探针再对 fixture 期望值）"
  },
- "field_total": 43,
+ "field_total": 44,
  "provenance_rules": {
   "instance_none": {
    "when": "该叶子在本次计算里值为 None",
@@ -961,5 +979,17 @@
   "value_present": {
    "rule": "值存在时按 evefit/project/provenance.py 的 tag(attr_id) 比对"
   }
+ },
+ "unknown_reasons": {
+  "values": [
+   "input_incomplete",
+   "not_applicable",
+   "ambiguous",
+   "engine_omits",
+   "unclassified"
+  ],
+  "rule": "稀疏平行表，只挂在 provenance == unknown 的路径上；每条 unknown 都要有原因",
+  "hard_gate": "unclassified 必须报缺陷",
+  "since": "T-35"
  }
 }

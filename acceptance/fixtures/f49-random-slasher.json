@@ -1,0 +1,105 @@
+{
+ "attackers": [
+  {
+   "character_id": 1750894174,
+   "corporation_id": 1813352634,
+   "damage_done": 1100,
+   "final_blow": true,
+   "security_status": 5,
+   "ship_type_id": 622,
+   "weapon_type_id": 2937
+  }
+ ],
+ "killmail_id": 139255862,
+ "killmail_time": "2026-10-18T13:25:03Z",
+ "solar_system_id": 30004863,
+ "victim": {
+  "alliance_id": 99003214,
+  "character_id": 2124441872,
+  "corporation_id": 98743698,
+  "damage_taken": 1100,
+  "items": [
+   {
+    "flag": 12,
+    "item_type_id": 1405,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 19,
+    "item_type_id": 5973,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 93,
+    "item_type_id": 31159,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 20,
+    "item_type_id": 5445,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 92,
+    "item_type_id": 31159,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 22,
+    "item_type_id": 4027,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 11,
+    "item_type_id": 1405,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 94,
+    "item_type_id": 31153,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 21,
+    "item_type_id": 5403,
+    "quantity_dropped": 1,
+    "singleton": 0
+   }
+  ],
+  "position": {
+   "x": 437846305804.70734,
+   "y": 37296172578.093735,
+   "z": -1688111016630.679
+  },
+  "ship_type_id": 585
+ },
+ "zkb": {
+  "locationID": 40307863,
+  "hash": "4ebca303df8e317bb5fb9665ca3117f0c38dd48e",
+  "fittedValue": 2257692.53,
+  "droppedValue": 1069371.66,
+  "destroyedValue": 1188320.87,
+  "totalValue": 2257692.53,
+  "totalDroppableValue": 1069371.66,
+  "points": 4,
+  "npc": false,
+  "solo": true,
+  "awox": false,
+  "labels": [
+   "tz:au",
+   "cat:6",
+   "solo",
+   "pvp",
+   "loc:nullsec",
+   "isk:under1b"
+  ]
+ }
+}

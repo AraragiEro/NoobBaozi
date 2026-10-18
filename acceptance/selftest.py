@@ -83,6 +83,11 @@ def _good_payload(facts: ra.CaseFacts, oracle) -> dict:
             "with_reload": tv(ship.get(-13) or 0.0, unit="hp/s", source_attr=-13),
         },
         "dph": tv(volley, unit="hp", source_attr=-11),
+        "fighter_bay": {
+            "count": tv(0, unit="架"),
+            "types": tv([]),
+            "capacity_used_m3": tv(0.0, unit="m3"),
+        },
         "damage_split": {
             "em": tv(0.0),
             "explosive": tv(0.0),
@@ -328,6 +333,25 @@ def _strip_typed(node, prefix: str, table: dict, inherited: str = "measured"):
     return node
 
 
+def _fill_unknown_reasons(payload: dict) -> dict:
+    """给合成 payload 的每个视角补 unknown_reasons（T-35 契约）。
+
+    所有 provenance == unknown 的路径统一填 `not_applicable` —— 这是"合规样例"的姿态：
+    每条 unknown 都有原因，且没有 `unclassified`。
+    """
+    views = payload.get("views") or {}
+    for view_name, node in views.items():
+        if not isinstance(node, dict):
+            continue
+        table = node.get("provenance") or {}
+        if not isinstance(table, dict):
+            continue
+        node["unknown_reasons"] = {
+            path: "not_applicable" for path, value in table.items() if value == "unknown"
+        }
+    return payload
+
+
 def _bare_payload(payload: dict) -> dict:
     """把合规样例转成形态 A（裸值 + 平行表 + **稀疏** confidence 表）。
 
@@ -412,6 +436,28 @@ BARE_MUTATIONS = (
     ("形态A：recharge_s 写毫秒原值", mutation_bare_ms_raw),
     ("形态A：damage_split 百分比口径", mutation_bare_damage_split_percent),
 )
+
+
+# ---------------------------------------------------------------------------
+# T-35：unknown_reasons 稀疏平行表的自证 payload
+# ---------------------------------------------------------------------------
+
+
+def _reasons_payload(reason="not_applicable", drop_reason=False, extra_path=None):
+    """一个视角：provenance=unknown 的路径 + 对应 reason（可为空/缺/非法）。"""
+    table = {"dps.drone": "unknown", "dps.fighter": "unknown"}
+    reasons = {}
+    if not drop_reason:
+        reasons = {"dps.drone": reason}
+        if reason != "SKIP":
+            reasons["dps.fighter"] = "not_applicable"
+    if extra_path:
+        reasons[extra_path] = "not_applicable"
+    return {"views": {"firepower": {
+        "overview": {"dps": {"drone": None, "fighter": None}},
+        "provenance": table,
+        "unknown_reasons": reasons,
+    }}}
 
 
 # ---------------------------------------------------------------------------
@@ -713,7 +759,7 @@ def main() -> int:
     conf_oracle = ra.ConfidenceOracle()
     print(f"  provenance 权威表: {'可用 ' + oracle.source if oracle.available else '未就绪 → 仅结构校验'}")
     print(f"  confidence 权威表: {'可用 ' + conf_oracle.source + '（默认 ' + conf_oracle.default + '）' if conf_oracle.available else '未就绪 → 仅合法性校验'}")
-    good = _good_payload(facts, oracle)
+    good = _fill_unknown_reasons(_good_payload(facts, oracle))
     defects = ra.check_view_structure("f1", good, spec, facts, oracle, conf_oracle)
     print(f"  缺陷条数 = {len(defects)}")
     for defect in defects:
@@ -742,7 +788,7 @@ def main() -> int:
     print("=" * 78)
     print("B2) 形态 A（裸值 + 平行 provenance 表）—— 渲染层的实际形态")
     print("=" * 78)
-    bare = _bare_payload(good)
+    bare = _fill_unknown_reasons(_bare_payload(good))
     bare_total = sum(len(entry["provenance"]) for entry in bare["views"].values())
     print(f"  平行表条目总数 = {bare_total}（每个 overview 叶子一条）")
     bare_defects = ra.check_view_structure("f1", bare, spec, facts, oracle, conf_oracle)
@@ -869,6 +915,27 @@ def main() -> int:
 
     print()
     print("=" * 78)
+    print("B6) unknown_reasons 稀疏平行表（T-35）")
+    print("=" * 78)
+    reasons_ok = not ra.check_unknown_reasons("f1", _reasons_payload(), spec)
+    print(f"  合规（每条 unknown 有原因、取值合法）：缺陷 0 条  {'✅' if reasons_ok else '❌'}")
+    miss = ra.check_unknown_reasons("f1", _reasons_payload(drop_reason=True), spec)
+    miss_ok = any(d.category == "字段缺失" for d in miss)
+    print(f"  漏原因：命中 {[d.category for d in miss] or '（未命中）'}  {'✅' if miss_ok else '❌'}")
+    unclass = ra.check_unknown_reasons("f1", _reasons_payload(reason="unclassified"), spec)
+    unclass_ok = any(d.category == "provenance 错误" and "unclassified" in d.expected
+                     for d in unclass)
+    print(f"  unclassified 混入：命中 {[d.category for d in unclass] or '（未命中）'}  "
+          f"{'✅' if unclass_ok else '❌'}")
+    stray = ra.check_unknown_reasons("f1", _reasons_payload(extra_path="dps.base"), spec)
+    stray_ok = any("dps.base" in d.where for d in stray)
+    print(f"  reason 挂在有值路径：命中 {[d.category for d in stray] or '（未命中）'}  "
+          f"{'✅' if stray_ok else '❌'}")
+    reasons_mut_ok = miss_ok and unclass_ok and stray_ok
+    reasons_all_ok = reasons_ok and reasons_mut_ok
+
+    print()
+    print("=" * 78)
     print("C) 形状样例落盘（给实现方对照）：形态A 与形态B 各一份")
     print("=" * 78)
     sample_path = HERE / "out" / "views-样例.json"
@@ -894,13 +961,15 @@ def main() -> int:
     print("=" * 78)
     passed = (baseline_ok and all_ok and bare_ok and bare_mutations_ok
               and conf_ok and repair_ok and repair_mut_ok
-              and feasible_ok and feasible_mut_ok and dph_ok and grade_ok)
+              and feasible_ok and feasible_mut_ok and dph_ok and grade_ok
+              and reasons_all_ok)
     print(f"自测结论：{'全部通过' if passed else '存在失败项'}"
           f"（形态B 合规零缺陷={baseline_ok} / 形态B 注入全中={all_ok} / "
           f"形态A 合规零缺陷={bare_ok} / 形态A 注入全中={bare_mutations_ok} / "
           f"稀疏confidence 注入全中={conf_ok} / repair 合规={repair_ok} / repair 注入全中={repair_mut_ok} / "
           f"feasible 合规={feasible_ok} / feasible 注入全中={feasible_mut_ok} / "
-          f"dph=null 契约={dph_ok} / provenance 升降级={grade_ok}）")
+          f"dph=null 契约={dph_ok} / provenance 升降级={grade_ok} / "
+          f"unknown_reasons={reasons_all_ok}）")
     print("=" * 78)
     return 0 if passed else 1
 

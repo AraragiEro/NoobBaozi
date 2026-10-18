@@ -1,0 +1,385 @@
+{
+ "attackers": [
+  {
+   "damage_done": 142732,
+   "faction_id": 500003,
+   "final_blow": true,
+   "security_status": 0,
+   "ship_type_id": 56648
+  }
+ ],
+ "killmail_id": 139257086,
+ "killmail_time": "2026-10-18T14:08:34Z",
+ "solar_system_id": 30003822,
+ "victim": {
+  "alliance_id": 99011973,
+  "character_id": 94892202,
+  "corporation_id": 98676166,
+  "damage_taken": 142732,
+  "items": [
+   {
+    "flag": 5,
+    "item_type_id": 13994,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 11,
+    "item_type_id": 22291,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 30,
+    "item_type_id": 24493,
+    "quantity_dropped": 26,
+    "singleton": 0
+   },
+   {
+    "flag": 92,
+    "item_type_id": 31796,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 21,
+    "item_type_id": 2281,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 28,
+    "item_type_id": 25715,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 33,
+    "item_type_id": 58966,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 24,
+    "item_type_id": 4435,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 93,
+    "item_type_id": 31360,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 27,
+    "item_type_id": 25715,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 4260,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 22,
+    "item_type_id": 41218,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 94,
+    "item_type_id": 31372,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 30834,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 177,
+    "item_type_id": 45625,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 177,
+    "item_type_id": 45613,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 30488,
+    "quantity_destroyed": 31,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 13995,
+    "quantity_dropped": 2,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 6173,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 31606,
+    "quantity_dropped": 2,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 3504,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 33475,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 29,
+    "item_type_id": 24493,
+    "quantity_dropped": 26,
+    "singleton": 0
+   },
+   {
+    "flag": 31,
+    "item_type_id": 25715,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 32,
+    "item_type_id": 24493,
+    "quantity_dropped": 26,
+    "singleton": 0
+   },
+   {
+    "flag": 34,
+    "item_type_id": 11578,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 35794,
+    "quantity_destroyed": 2,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 24490,
+    "quantity_dropped": 856,
+    "singleton": 0
+   },
+   {
+    "flag": 23,
+    "item_type_id": 13994,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 126,
+    "item_type_id": 45589,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 128,
+    "item_type_id": 45614,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 27,
+    "item_type_id": 24493,
+    "quantity_dropped": 26,
+    "singleton": 0
+   },
+   {
+    "flag": 20,
+    "item_type_id": 15766,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 13,
+    "item_type_id": 22291,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 28,
+    "item_type_id": 24493,
+    "quantity_dropped": 26,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 13997,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 2679,
+    "quantity_dropped": 2504,
+    "singleton": 0
+   },
+   {
+    "flag": 30,
+    "item_type_id": 25715,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 13996,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 448,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 35795,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 2038,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 31,
+    "item_type_id": 24493,
+    "quantity_destroyed": 26,
+    "singleton": 0
+   },
+   {
+    "flag": 29,
+    "item_type_id": 25715,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 32,
+    "item_type_id": 25715,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 30832,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 31600,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 24493,
+    "quantity_dropped": 3442,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 24492,
+    "quantity_dropped": 3612,
+    "singleton": 0
+   },
+   {
+    "flag": 127,
+    "item_type_id": 45601,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 35790,
+    "quantity_dropped": 2,
+    "singleton": 0
+   },
+   {
+    "flag": 12,
+    "item_type_id": 22291,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 4787,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 125,
+    "item_type_id": 45626,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 19,
+    "item_type_id": 19207,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 35659,
+    "quantity_dropped": 1,
+    "singleton": 0
+   }
+  ],
+  "position": {
+   "x": 759948889142.3458,
+   "y": -111999722529.05998,
+   "z": 279784994021.9229
+  },
+  "ship_type_id": 29984
+ },
+ "zkb": {
+  "locationID": 40242072,
+  "hash": "0e4fa86e3d16fe945f0f9bc619c576821ee3b24c",
+  "fittedValue": 657504961.97,
+  "droppedValue": 337745883.79,
+  "destroyedValue": 455885010.8,
+  "totalValue": 793630894.59,
+  "totalDroppableValue": 391554664.17,
+  "points": 1,
+  "npc": true,
+  "solo": false,
+  "awox": false,
+  "labels": [
+   "tz:ru",
+   "cat:6",
+   "#:1",
+   "npc",
+   "loc:lowsec",
+   "isk:under1b"
+  ]
+ }
+}
