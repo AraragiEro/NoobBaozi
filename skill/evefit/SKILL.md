@@ -12,19 +12,13 @@ description: 读取并理解 EVE Online 配装（EFT / DNA / killmail）。通�
 ## 什么时候用
 
 - 用户贴了一份配装（EFT / DNA / zkillboard 链接 / killmail JSON），想了解它
-- 问「这套打得动吗 / 为什么死了 / 哪里有问题 / 能不能装下」
-- 问「谁在打这个星系 / 这个公司最近损失了什么 / 最近 Sleipnir 死在哪」（先找战报，见下面的路由）
+- 问「这套打得动吗 / 为什么死了 / 哪里有问题 / 能不能装下 / 谁在打这个星系」
 
 **不该用它做的事**（这三类别指望它，也别替它圆场）：
 
 - **不生成配装、不推荐改法** —— 它只复述输入，不会替你设计一套
 - **不写战报叙事、不给生死判词、不预测战斗结果**
 - **不做评分与排名** —— `unknown` 就是 `unknown`，不许补成 0 或常识值
-
-## 路由：先找战报，还是先看一条战报
-
-「谁在打这个星系 / 这公司最近损失了什么 / 最近某船死在哪」→ 先用 `zkb_search` 筛出 `killmail_id`，再对那条要上下文。条件可复合（AND：星系 + 船型 + 时间同时给就是同时满足）；时间**只能用 `past_seconds`**（`startTime` / `endTime` 已被 zkb 停用，传了会 `invalid_argument`）；单页最多 200 条、更早的靠 `page` 往回翻；有 1.2 s 限流（`both` 至少 2.4 s），别在循环里逐条查。
-它返回的是**列表**：`count` 是整页条数、`kills[]` 默认只截断到 50 条（**别说「只有 50 条」**）；列表里没有完整配装，明细挑一个 `killmail_id` 再取。
 
 ## 怎么连
 
@@ -46,4 +40,4 @@ stdio 形态、客户端 JSON、`/health`、错误语义等细节见 `evefit/mcp
 
 **② 顶层数值可能对应不可达状态。** 多件推进模块同时启用时，`speed_mps` / `signature_radius_m` 是**叠加值**，不一定是玩家能达到的状态：用 `mobility.propulsion_states.single` 看「只开某一个」的真实值，`state_exclusive` flag 会提示这种情况。转述时两件事一起说，别只念顶层数。
 
-**③ 不要自己打开 zkillboard / ESI 网页。** 单条战报的上下文由 `fit_killmail` 给，列表检索走上面那条路由，配装数值由六维度工具给。拿不到的值工具会给 `null`（原因写在 `warnings` / `unknown_reasons` 里）—— 如实转述，不要用网页正文去补。
+**③ 不要自己打开 zkillboard / ESI 网页。** 单条战报的上下文由 `fit_killmail` 给，列表检索由 `zkb_search` 给，配装数值由六维度工具给。拿不到的值工具会给 `null`（原因写在 `warnings` / `unknown_reasons` 里）—— 如实转述，不要用网页正文去补。
