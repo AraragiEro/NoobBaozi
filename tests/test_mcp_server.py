@@ -696,6 +696,11 @@ def test_fit_killmail_schema_and_wording() -> None:
     assert "包含受害者与攻击者（Top 伤害）的驾驶员 / 军团 / 联盟名字" in spec["description"], (
         "T-52：description 必须写明名字已给（否则 agent 会自己去查 ESI）"
     )
+    # T-53：蛋的口径必须写在 description 里（agent 只会读这里，不会读 README）
+    for fact in ("蛋（Capsule）", "已失去自己的船", "船归属不可信"):
+        assert fact in spec["description"], f"description 必须写明「{fact}」"
+    for field in ("damaging_count", "zero_damage_count", "capsule_count"):
+        assert field in spec["description"], f"description 必须写清 {field}（否则 agent 读不懂计数）"
     schema = spec["inputSchema"]
     assert schema["required"] == ["fit"]
     assert set(schema["properties"]) == {

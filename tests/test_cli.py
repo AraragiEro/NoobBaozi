@@ -373,6 +373,22 @@ def test_killmail_human_output_is_readable(
     assert "|" not in out, "不要花哨表格"
 
 
+def test_killmail_human_output_shows_capsule_and_zero_damage(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T-53：攻击者行给四个计数、Capsule 桶标「记录船」、末尾一行蛋警告。"""
+    _offline_system(monkeypatch)
+    code, out, err = _run_cli(["killmail", "--fit-file", str(KILLMAIL_ZKB_PATH)], capsys)
+    assert code == cli.EXIT_OK, err
+    assert "count=79 · 有伤害 57 · 零伤害 22 · 记录船是蛋 3" in out, out
+    assert "Capsule × 4 = 1162921" in out, "蛋桶的伤害照旧打印（不扣）"
+    assert "（记录船，非实际输出船）" in out, "蛋桶后面必须有人话标注"
+    assert out.count("（记录船，非实际输出船）") == 1, "只有蛋桶该带这个标注"
+    last = out.splitlines()[-1]
+    assert "警告:" in last and "蛋" in last, f"末尾该有一行蛋警告，实际是：{last!r}"
+    assert "蛋装不了武器" in last and "已被摧毁的船" in last, last
+
+
 def test_killmail_rejects_a_fit_without_a_battle(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

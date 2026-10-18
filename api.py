@@ -1498,6 +1498,44 @@ _RATIO_DIGITS: int = 3
 DAMAGE_CHECK_MATCH: str = "matches_victim"
 DAMAGE_CHECK_MISMATCH: str = "mismatch"
 
+CAPSULE_TYPE_ID: int = 670
+"""`Capsule`（蛋）的 `type_id` —— **蛋不能装任何装备**，所以蛋不可能打出武器伤害。
+
+实测（killmail 139239127，2026-10-19）：79 个 attackers 里有 **3 个** `ship_type_id == 670`，
+伤害 1086009 / 76069 / 843（合计 1162921）。其中 `character_id 2121910483` 的损失记录显示
+2026-10-17T22:21:40Z 在星系 30002537 就丢了 ship 29340（Osprey Navy Issue），而受害者战报
+时间是 22:31:32Z、**同一星系** —— 即他在这场交火里先丢了自己的船，之后以蛋的状态还在场；
+ESI 把他那一刻的「记录船」写成了蛋，那 108 万伤害实际来自他**已被摧毁的船**。
+
+所以口径是：**蛋的伤害数字是真的，但船归属不可信**；蛋出现在 attackers 里 = 该玩家在这场
+交火中已经失去了自己的船。
+"""
+
+CAPSULE_GROUP: str = "Capsule"
+"""SDE 里 `CAPSULE_TYPE_ID` 所属组的组名（`by_ship_group` 就是按组名分桶的）。
+
+**坑（实测 139239127）**：`Capsule` 组里有**两种** type —— `670`（`Capsule`）与 `33328`
+（`Capsule - Genolution 'Auroral' 197-variant`）。所以 `by_ship_group` 的 Capsule 行
+`count=4`（多出来的那个是 33328、伤害 0），而 `capsule_count` 严格按 `type_id == 670` 是
+**3** —— 两个数字都对，只是数的是**条目**与**严格同型**。`ship_attribution` 按**组**判定，
+所以 33328 那一行也会被标成 `capsule`（它同样是蛋，同样装不了武器）。
+"""
+
+SHIP_ATTRIBUTION_NORMAL: str = "normal"
+SHIP_ATTRIBUTION_CAPSULE: str = "capsule"
+"""`by_ship_group[].ship_attribution` 的两个取值（**全表一致**：每行都给这个键）。
+
+选「每行都带、默认 `normal`」而不是「只有 capsule 行才有」：`by_ship_group` 是列表，
+形状稳定才不需要调用方 `in` 判断（多一个键的代价远小于「有时有有时没有」）。
+"""
+
+CAPSULE_ATTACKER_WARNING: str = (
+    "{count} 名攻击者的记录船是 Capsule（蛋）。蛋无法装备任何武器，其伤害来自该玩家在同一次"
+    "交火中被摧毁的船；出现蛋说明这些玩家在这场交火里已经失去了自己的船。按船型统计时请勿把"
+    "蛋当作实际输出船。"
+)
+"""`attackers.capsule_count > 0` 时追加到 `result.warnings` 的那一条（三个事实全部写明）。"""
+
 _UNIVERSE_LOCK = threading.Lock()
 _UNIVERSE_NAMES: dict[int, str | None] = {}
 _UNIVERSE_SYSTEMS: dict[int, dict] = {}
@@ -1948,8 +1986,12 @@ def _buckets(
     key_of: Callable[[dict], object],
     key_name: str,
     damage_total: int | None,
+    row_extra: Callable[[object], dict] | None = None,
 ) -> list[dict]:
-    """按 `key_of` 分桶 → `[{<key_name>, count, damage, damage_pct}]`（按伤害降序）。"""
+    """按 `key_of` 分桶 → `[{<key_name>, count, damage, damage_pct}]`（按伤害降序）。
+
+    `row_extra` 给每一行补字段（入参是**桶键**，所以同一桶的补法必然一致）；不传就不补。
+    """
     grouped: dict[object, dict] = {}
     for attacker in attackers:
         key = key_of(attacker)
@@ -1962,11 +2004,49 @@ def _buckets(
             "count": bucket["count"],
             "damage": bucket["damage"],
             "damage_pct": _share(bucket["damage"], damage_total),
+            **(row_extra(key) if row_extra is not None else {}),
         }
         for key, bucket in grouped.items()
     ]
     rows.sort(key=lambda row: (-row["damage"], str(row[key_name] or "")))
     return rows
+
+
+def _ship_attribution(key: object, capsule_groups: "set[object]") -> str:
+    """`by_ship_group` 的一行是不是「蛋」桶（**船归属不可信**）。
+
+    `key` 是组名：正常情况下 SDE 给的就是 `CAPSULE`（`Capsule`）；`capsule_groups` 是
+    「由 `ship_type_id == 670` 反查出来的组名」兜底（SDE 索引不可用时组名全是 `None`，
+    这时**只有**组名真的为 `None` 的桶才可能命中，不会波及有名字的桶）。
+    """
+    if key == CAPSULE_GROUP or (key is not None and key in capsule_groups):
+        return SHIP_ATTRIBUTION_CAPSULE
+    return SHIP_ATTRIBUTION_NORMAL
+
+
+def _attacker_counts(attackers: list[dict]) -> dict:
+    """`attackers` 里的四个计数（都是**人数**，不是伤害）。
+
+    - `count`：攻击者条目数（= 挂名人数）；
+    - `damaging_count`：`damage_done > 0` 的人数（**真的打出过伤害**的人）；
+    - `zero_damage_count`：`damage_done == 0` 的人数（挂名没输出；实测 139239127 有 22 个）；
+    - `capsule_count`：`ship_type_id == 670` 的人数（**不管伤害是否为 0**）。
+
+    `damage_done` 缺失按 0 计（与 `damage_total` 同一口径）。ESI 的 `damage_done` 非负，
+    所以 `damaging_count + zero_damage_count == count`；万一来个负值，它既不算「有伤害」也
+    不算「零伤害」，等式会**露馅**而不是被吞掉（不静默改数据）。
+    """
+    damages = [_as_int(attacker.get("damage_done")) or 0 for attacker in attackers]
+    return {
+        "count": len(attackers),
+        "damaging_count": sum(1 for damage in damages if damage > 0),
+        "zero_damage_count": sum(1 for damage in damages if damage == 0),
+        "capsule_count": sum(
+            1
+            for attacker in attackers
+            if _as_int(attacker.get("ship_type_id")) == CAPSULE_TYPE_ID
+        ),
+    }
 
 
 BY_PILOT_ROWS: int = 10
@@ -1984,6 +2064,10 @@ def _pilot_buckets(
     一个驾驶员在同一条战报里通常只有一条 attacker 记录，但模板化舰队战出现过同一角色
     多条目 —— 所以按 `character_id` 合并（合并的是**同一个人的伤害**，不是不同的人）。
     `character_id` 缺失时合并键是 `None`：那一 bucket 的 `character` 给 `null`，不编。
+
+    `recorded_ship_is_capsule` 描述的是**这一行打出来的 `ship` 块**（`type_id == 670`）：
+    蛋装不了武器，所以这种行的伤害来自该玩家已被摧毁的船 —— 船归属不可信，但**伤害不扣**。
+    合并多条记录时 `ship` 取第一条，标记跟着同一个 `ship` 走（永远与显示的那块一致）。
     """
     grouped: dict[object, dict] = {}
     for attacker in attackers:
@@ -2012,6 +2096,7 @@ def _pilot_buckets(
             "corporation": bucket["identity"]["corporation"],
             "alliance": bucket["identity"]["alliance"],
             "ship": bucket["ship"],
+            "recorded_ship_is_capsule": bucket["ship"].get("type_id") == CAPSULE_TYPE_ID,
             "damage": bucket["damage"],
             "damage_pct": _share(bucket["damage"], damage_total),
             "final_blow": bucket["final_blow"],
@@ -2031,8 +2116,9 @@ def _attacker_block(
     index: Index | None,
     names: dict[int, str],
 ) -> dict:
-    """`attackers` 块：人数 / 总伤害 / 校验 / 最终一击 / 三个分桶 / 安全等级分布。"""
+    """`attackers` 块：人数 / 有伤害人数 / 零伤害人数 / 蛋人数 / 总伤害 / 校验 / 三个分桶。"""
     damage_total = sum(_as_int(attacker.get("damage_done")) or 0 for attacker in attackers)
+    counts = _attacker_counts(attackers)
     if victim_damage is None:
         damage_check: str | None = None
         damage_diff: int | None = None
@@ -2063,14 +2149,25 @@ def _attacker_block(
         if status is not None
     ]
 
+    capsule_groups = {
+        _type_block(attacker.get("ship_type_id"), index)["group"]
+        for attacker in attackers
+        if _as_int(attacker.get("ship_type_id")) == CAPSULE_TYPE_ID
+    }
     block = {
-        "count": len(attackers),
+        **counts,
         "damage_total": damage_total,
         "damage_check": damage_check,
         "final_blow": final_block,
         "by_pilot": _pilot_buckets(attackers, damage_total, index, names),
         "by_ship_group": _buckets(
-            attackers, lambda a: _type_block(a.get("ship_type_id"), index)["group"], "group", damage_total
+            attackers,
+            lambda a: _type_block(a.get("ship_type_id"), index)["group"],
+            "group",
+            damage_total,
+            row_extra=lambda key: {
+                "ship_attribution": _ship_attribution(key, capsule_groups)
+            },
         ),
         "by_weapon_family": _buckets(
             attackers, lambda a: weapon_family(a.get("weapon_type_id"), index), "family", damage_total
@@ -2181,6 +2278,11 @@ def _killmail_report(
             f"{untracked} 个攻击者的 weapon_type_id 与自己的 ship_type_id 相同"
             "（ESI 没有记录武器）：这些按 other 计入 by_weapon_family"
         )
+    attacker_block = _attacker_block(attackers, victim_damage, index, names)
+    if attacker_block["capsule_count"]:
+        warnings.append(
+            CAPSULE_ATTACKER_WARNING.format(count=attacker_block["capsule_count"])
+        )
     return {
         "killmail": _killmail_block(killmail, system),
         "victim": {
@@ -2188,7 +2290,7 @@ def _killmail_report(
             "ship": _type_block(victim.get("ship_type_id"), index),
             **_identity_blocks(victim, names),
         },
-        "attackers": _attacker_block(attackers, victim_damage, index, names),
+        "attackers": attacker_block,
         "context": _ehp_context(ctx, victim_damage),
         "killmail_source": killmail_source,
         "warnings": warnings,
@@ -2350,15 +2452,18 @@ def fit_killmail(
                     "character": {"id", "name"},
                     "corporation": {"id", "name"},
                     "alliance": {"id", "name"}},
-         "attackers": {"count", "damage_total", "damage_check",
+         "attackers": {"count", "damaging_count", "zero_damage_count", "capsule_count",
+                       "damage_total", "damage_check",
                        "final_blow": {"character": {"id", "name"},
                                       "corporation": {...}, "alliance": {...},
                                       "ship": {...}, "weapon": {...},
                                       "security_status"},
                        "by_pilot": [{"character", "corporation", "alliance", "ship",
+                                     "recorded_ship_is_capsule",
                                      "damage", "damage_pct", "final_blow",
                                      "security_status"}],
-                       "by_ship_group": [{"group", "count", "damage", "damage_pct"}],
+                       "by_ship_group": [{"group", "count", "damage", "damage_pct",
+                                          "ship_attribution"}],
                        "by_weapon_family": [{"family", "count", "damage", "damage_pct"}],
                        "security": {"min", "max", "criminal_count"}},
          "context": {"damage_taken_vs_ehp": {"damage_taken", "ehp_mixed", "ratio",
@@ -2379,6 +2484,15 @@ def fit_killmail(
       绝不静默）；
     - `by_weapon_family` 里分不清的一律 `other`（`weapon_family()` 的启发式只认名字 /
       组名，认不出就不猜）。
+
+    **战报口径**（T-53）：`count` 是**挂名人数**，`damaging_count` / `zero_damage_count` 是
+    「真打出伤害 / 挂名零伤害」的人数（二者之和恒等于 `count`，`damage_done` 缺失按 0 计）。
+    `capsule_count` 是记录船为 `Capsule`（蛋，`type_id == 670`）的人数：**蛋装不了任何武器**，
+    所以蛋的伤害数字是真的、**船归属不可信** —— 蛋出现在攻击者里说明该玩家在这场交火中
+    已经失去了自己的船（其伤害来自被摧毁的那条船）。因此 `by_ship_group` 每行都带
+    `ship_attribution`（`"capsule"` / `"normal"`，全表一致），蛋行**不扣伤害**；`capsule_count > 0`
+    时 `warnings` 会追加一条说明。`by_pilot[].recorded_ship_is_capsule` 标出那些「记录船是蛋」
+    的驾驶员（伤害照旧保留）。
 
     **身份**（驾驶员 / 军团 / 联盟）：`character` / `corporation` / `alliance` 都是
     `{"id", "name"}`；**id 缺失 → 整个对象 `null`**（没有联盟就是 `null`）；

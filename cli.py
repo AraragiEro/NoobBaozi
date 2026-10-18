@@ -272,16 +272,21 @@ def _pilot_lines(title: str, rows: object, shown: int = _PILOT_ROWS) -> list[str
 
 
 def _bucket_lines(title: str, rows: object, key: str) -> list[str]:
-    """分桶列表 → 人话若干行（`key×count=damage(pct)`；超量只截断显示，不改数据）。"""
+    """分桶列表 → 人话若干行（`key×count=damage(pct)`；超量只截断显示，不改数据）。
+
+    `ship_attribution == "capsule"` 的行追加「（记录船，非实际输出船）」—— 蛋打不出武器
+    伤害，那个数字属于该玩家**已被摧毁的船**，只是 ESI 把记录船写成了蛋。
+    """
     if not isinstance(rows, list) or not rows:
         return [f"{_INDENT}{title}: -"]
     lines = [f"{_INDENT}{title}({len(rows)}):"]
     for row in rows[:_BUCKET_ROWS]:
         if not isinstance(row, dict):
             continue
+        mark = "（记录船，非实际输出船）" if row.get("ship_attribution") == "capsule" else ""
         lines.append(
             f"{_INDENT * 2}- {row.get(key)} × {row.get('count')} = "
-            f"{row.get('damage')} ({row.get('damage_pct')})"
+            f"{row.get('damage')} ({row.get('damage_pct')}){mark}"
         )
     if len(rows) > _BUCKET_ROWS:
         lines.append(f"{_INDENT * 2}… 另 {len(rows) - _BUCKET_ROWS} 项见 --json")
@@ -316,6 +321,9 @@ def _human_killmail(result: dict, meta: dict) -> str:
         f"{_INDENT}value: {_block_line(km.get('value'))}",
         f"{_INDENT}flags: {_block_line(km.get('flags'))} · labels: {_compact(km.get('labels'))}",
         f"{_INDENT}attackers: count={attackers.get('count')} · "
+        f"有伤害 {attackers.get('damaging_count')} · "
+        f"零伤害 {attackers.get('zero_damage_count')} · "
+        f"记录船是蛋 {attackers.get('capsule_count')} · "
         f"damage_total={attackers.get('damage_total')} · {check}",
         f"{_INDENT}final_blow: {_who(final)} — {_header(final.get('ship'))} + {weapon_head}"
         f" · security={final.get('security_status')}",
@@ -339,6 +347,12 @@ def _human_killmail(result: dict, meta: dict) -> str:
     warnings = result.get("warnings") or []
     lines.append(f"{_INDENT}warnings({len(warnings)}):")
     lines.extend(f"{_INDENT * 2}- {warn}" for warn in warnings)
+    if attackers.get("capsule_count"):
+        lines.append(
+            f"{_INDENT}警告: {attackers.get('capsule_count')} 名攻击者的记录船是蛋（Capsule）"
+            "—— 蛋装不了武器，其伤害来自该玩家已被摧毁的船（他已在这场交火里失去自己的船）；"
+            "按船型统计时不要把蛋当实际输出船"
+        )
     return "\n".join(lines)
 
 

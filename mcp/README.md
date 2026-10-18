@@ -266,7 +266,7 @@ python -c "from evefit import mcp_server as m; print(m.INSTRUCTIONS); [print(n, 
 | 工具 | 一句话 |
 |---|---|
 | `fit_parse` | 第一步：把输入归一化成结构，回显「我读懂了什么」 |
-| `fit_killmail` | 战报上下文：损失价值 / 参战方 / 伤害构成 / 星系与安全等级 / 受伤 vs EHP / **受害者与伤害 Top 的驾驶员·军团·联盟名字** |
+| `fit_killmail` | 战报上下文：损失价值 / 参战方（挂名 / 有伤害 / 零伤害 / 记录船是蛋四个计数）/ 伤害构成 / 星系与安全等级 / 受伤 vs EHP / **受害者与伤害 Top 的驾驶员·军团·联盟名字** |
 | `fit_index` | 默认入口：六维度摘要（L0）+ flags + budget |
 | `fit_view` | 单视角全字段（L1）：overview / provenance / unknown_reasons / confidence / flags |
 | `fit_get` | 按路径精确取一个值 + 它的 provenance / reason |
@@ -316,6 +316,24 @@ python -c "from evefit import mcp_server as m; print(m.INSTRUCTIONS); [print(n, 
 **`null` 的语义**：id 缺失 → 整个对象 `null`（没加联盟就是 `null`）；id 有但名字查不到
 （删号 / NPC / ESI 缺项）→ `name: null`，并在 `result.warnings` 里给一句「N 个实体名未解析」。
 工具**不编名字**，也不要你拿网页去补。
+
+### 4.4 战报口径注意（蛋 / 零伤害）
+
+- **攻击者人数 ≠ 有伤害人数**：`attackers.count` 是**挂名**人数（= ESI `attackers` 数组长度），
+  `damaging_count`（`damage_done > 0`）+ `zero_damage_count`（`damage_done == 0`）**恒等于**它。
+  实测 139239127：79 人挂名 → **57 人有伤害 / 22 人零伤害**。
+- **蛋的伤害是真的，船归属不是**：`capsule_count` = 记录船为 `Capsule`（`type_id == 670`）的人数
+  （139239127 实测 **3**）。蛋装不了任何装备，**蛋不可能打出武器伤害** —— 那个数字属于该玩家在
+  同一次交火中**已被摧毁的船**；蛋出现在攻击者里，说明**这些玩家在这场交火里已经失去了自己的船**
+  （ESI 只是把他那一刻的「记录船」写成了蛋）。所以：**不要**扣掉这部分伤害（数字是真的），也
+  **不要**把蛋当成实际输出船（归属是错的）。
+- **标记在哪**：`by_ship_group[].ship_attribution`（**全表都有**，取值 `"capsule"` / `"normal"`）、
+  `by_pilot[].recorded_ship_is_capsule`（布尔），以及 `capsule_count > 0` 时 `warnings` 里的一条。
+- **`by_ship_group` 的 Capsule 行 `count` 可能大于 `capsule_count`**：SDE 的 `Capsule` 组里有两种
+  type（`670` `Capsule` 与 `33328` `Capsule - Genolution 'Auroral' 197-variant`）。139239127 实测：
+  组内 **4** 个条目 / 伤害 1162921，而严格 `type_id == 670` 是 **3** 人（多出来那个是 33328、
+  0 伤害）。两个数字都对 —— 一个数**条目**、一个数**严格同型**；`ship_attribution` 按**组**判定，
+  所以 33328 那条也被标成 `capsule`（它同样是蛋，同样装不了武器）。
 
 ## 5. 返回契约
 

@@ -41,3 +41,5 @@ stdio 形态、客户端 JSON、`/health`、错误语义等细节见 `evefit/mcp
 **② 顶层数值可能对应不可达状态。** 多件推进模块同时启用时，`speed_mps` / `signature_radius_m` 是**叠加值**，不一定是玩家能达到的状态：用 `mobility.propulsion_states.single` 看「只开某一个」的真实值，`state_exclusive` flag 会提示这种情况。转述时两件事一起说，别只念顶层数。
 
 **③ 不要自己打开 zkillboard / ESI 网页。** 单条战报的上下文——含受害者与伤害 Top 的驾驶员 / 军团 / 联盟名字——`fit_killmail` 已给名字，不用再查 ESI；列表检索（每行也带受害者名字）由 `zkb_search` 给，配装数值由六维度工具给。拿不到的值工具会给 `null`（原因写在 `warnings` / `unknown_reasons` 里）—— 如实转述，不要用网页正文去补。
+
+**④ 战报里「记录船是蛋」不等于蛋在输出。** `Capsule`（蛋）装不了任何装备，所以蛋不可能打出武器伤害：蛋出现在攻击者里，说明该玩家在这场交火中**已经失去了自己的船**，那些伤害来自他**被摧毁的船** —— 伤害数字是真的，**船归属不可信**，按船型统计时不要拿蛋当输出船（`ship_attribution` / `recorded_ship_is_capsule` 已标）。另外「攻击者人数」也不等于「有伤害人数」：`count` 是挂名人数，另有 `damaging_count` / `zero_damage_count`，两者之和等于 `count`。

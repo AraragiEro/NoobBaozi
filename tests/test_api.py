@@ -721,6 +721,133 @@ def test_fit_killmail_is_not_vacuous_on_mismatch(monkeypatch: pytest.MonkeyPatch
     assert attackers["damage_diff"] == 1, "差值 = Σattackers - victim"
 
 
+# =============================================================================
+# 十二、战报口径（T-53）：蛋不算输出船 / 挂名人数 ≠ 有伤害人数
+# =============================================================================
+#
+# 事实背景（实测 killmail 139239127）：ESI 的 79 个 attackers 里
+#   - 22 个 `damage_done == 0`（挂名没输出）→ damaging_count 57 / zero_damage_count 22；
+#   - 3 个 `ship_type_id == 670`（Capsule，蛋），伤害 1086009 / 76069 / 843。
+# 其中 character_id 2121910483（1086009）的损失记录显示他在**同一星系、同一场交火**里
+# 早 10 分钟丢了自己的船（ship 29340 Osprey Navy Issue）—— 蛋只是 ESI 记的「当时的船」。
+# 所以：**伤害不扣，船归属标注**。
+
+CAPSULE_TYPE_ID = 670
+"""蛋的 type_id（`Capsule`）；`ship_type_id == 670` 就是「记录船是蛋」。"""
+
+
+def _killmail_result(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """ESI 原文（79 attackers / 3 个蛋 / 22 个零伤害）→ `result`（星系查询走离线桩）。"""
+    _offline_system(monkeypatch)
+    out = api.fit_killmail(KILLMAIL_ESI_PATH.read_text(encoding="utf-8"))
+    assert out["ok"] is True, out
+    return out["result"]
+
+
+def _assert_capsule_facts(result: dict) -> None:
+    """「蛋 + 零伤害」口径的全部断言（抽成函数，才能做下面那条非永真的配对断言）。"""
+    attackers = result["attackers"]
+    assert attackers["count"] == 79
+    assert attackers["damaging_count"] == 57
+    assert attackers["zero_damage_count"] == 22
+    assert attackers["capsule_count"] == 3
+    assert (
+        attackers["damaging_count"] + attackers["zero_damage_count"] == attackers["count"]
+    ), "有伤害 + 零伤害必须正好划分挂名人数"
+    assert any("蛋" in warning for warning in result["warnings"]), result["warnings"]
+
+
+def test_killmail_counts_capsule_and_zero_damage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """79 攻击者 = 57 有伤害 + 22 零伤害；3 个记录船是蛋，**伤害一分不扣**。"""
+    result = _killmail_result(monkeypatch)
+    _assert_capsule_facts(result)
+    attackers = result["attackers"]
+
+    assert attackers["damage_total"] == 6558773, "蛋的 1162921 必须还在总伤害里"
+    assert sum(row["damage"] for row in attackers["by_ship_group"]) == 6558773, (
+        "分桶的伤害之和必须等于总伤害：蛋的伤害不许为了「好看」被扣掉"
+    )
+
+    capsule_rows = [row for row in attackers["by_ship_group"] if row["group"] == "Capsule"]
+    assert len(capsule_rows) == 1, "Capsule 只有一个桶"
+    capsule_row = capsule_rows[0]
+    assert capsule_row["ship_attribution"] == "capsule", "蛋桶必须标「船归属不可信」"
+    assert capsule_row["damage"] == 1162921
+    assert capsule_row["count"] == 4, (
+        "Capsule 组里有两种 type：670（3 人）+ 33328 Genolution 变体（1 人 / 0 伤害）；"
+        "capsule_count 严格按 670 数 = 3，组内条目数是 4"
+    )
+    assert all(
+        "ship_attribution" in row for row in attackers["by_ship_group"]
+    ), "形状稳定：by_ship_group **每一行**都带 ship_attribution"
+    assert [
+        row["group"] for row in attackers["by_ship_group"] if row["ship_attribution"] == "capsule"
+    ] == ["Capsule"], "只有蛋桶是 capsule，其它桶一律 normal"
+    assert all(
+        row["ship_attribution"] == "normal"
+        for row in attackers["by_ship_group"]
+        if row["group"] != "Capsule"
+    ), "非蛋行必须是 normal（全表一致，不留例外）"
+
+    warning = next(warn for warn in result["warnings"] if "蛋" in warn)
+    for fact in ("无法装备", "被摧毁的船", "已经失去了自己的船"):
+        assert fact in warning, f"蛋警告必须写明「{fact}」：{warning}"
+
+
+def test_killmail_by_pilot_marks_capsule_recorded_ship(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`by_pilot` 里记录船是蛋的人带 `recorded_ship_is_capsule: true`，伤害照旧保留。"""
+    result = _killmail_result(monkeypatch)
+    pilots = result["attackers"]["by_pilot"]
+    assert all("recorded_ship_is_capsule" in row for row in pilots), "形状稳定：每行都有这个键"
+
+    capsule_pilots = [row for row in pilots if row["recorded_ship_is_capsule"]]
+    assert len(capsule_pilots) == 1, (
+        "Top10 里只有 1 个蛋（1086009）：另两个蛋 76069 / 843 伤害太低，没进榜"
+    )
+    woof = capsule_pilots[0]
+    assert woof["ship"]["type_id"] == CAPSULE_TYPE_ID
+    assert woof["ship"]["group"] == "Capsule"
+    assert woof["character"]["id"] == 2121910483, (
+        "就是那个 2026-10-17T22:21:40Z 在 30002537 丢了 29340（Osprey Navy Issue）、"
+        "10 分钟后以蛋的状态还在场的人"
+    )
+    assert woof["damage"] == 1086009, "标记归标记，伤害数字照旧（那是他被摧毁的船打的）"
+
+    others = [row for row in pilots if not row["recorded_ship_is_capsule"]]
+    assert others, "Top10 里剩下的人都不该被标成蛋"
+    assert all(row["ship"]["type_id"] != CAPSULE_TYPE_ID for row in others), (
+        "标记必须与这一行打出来的 ship 一致：ship 不是 670 就不许标 true"
+    )
+
+
+def test_capsule_counts_are_not_vacuous(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**配对断言**：`capsule_count` 恒 0、`damaging_count` 恒等于 `count` → 上面的断言必须红。
+
+    走的是真实链路（改 `_attacker_counts` → 清结果缓存 → 重新组装整条战报），所以它同时
+    证明「那些断言读的是线上算出来的数」，不是测试自己编的常量。
+    """
+    text = KILLMAIL_ESI_PATH.read_text(encoding="utf-8")
+    _offline_system(monkeypatch)
+    real = api._attacker_counts
+
+    def without_capsule(attackers: list[dict]) -> dict:
+        return {**real(attackers), "capsule_count": 0}
+
+    def all_damaging(attackers: list[dict]) -> dict:
+        counts = real(attackers)
+        return {**counts, "damaging_count": counts["count"], "zero_damage_count": 0}
+
+    monkeypatch.setattr(api, "_attacker_counts", without_capsule)
+    api.clear_caches()
+    with pytest.raises(AssertionError):
+        _assert_capsule_facts(api.fit_killmail(text)["result"])
+
+    monkeypatch.setattr(api, "_attacker_counts", all_damaging)
+    api.clear_caches()
+    with pytest.raises(AssertionError):
+        _assert_capsule_facts(api.fit_killmail(text)["result"])
+
+
 def test_fit_killmail_merges_zkb_and_esi(monkeypatch: pytest.MonkeyPatch) -> None:
     """联网形态：zkillboard 给价值块、ESI 给伤害详情，**两个都拉**再合并。"""
     zkb_payload = json.loads(KILLMAIL_ZKB_PATH.read_text(encoding="utf-8"))

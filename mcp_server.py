@@ -551,16 +551,18 @@ _TOOL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
     ),
     "fit_killmail": (
         "战报上下文（谁打的、损失多少、挨了多少伤害）",
-        "配装看完了，想知道这套为什么死、被谁打、值多少钱时用它：回答「这条战报的上下文是"
-        "什么」。返回损失价值（fitted/dropped/destroyed/total）、参战方（人数 / 总伤害 / "
-        "Σdamage 与 victim.damage_taken 的校验 / 最终一击 / 按舰级与武器族的分桶 / 安全等级"
-        "分布）、星系与安全等级，以及「挨了多少伤害 vs 自身 EHP」。"
-        "**包含受害者与攻击者（Top 伤害）的驾驶员 / 军团 / 联盟名字**（id 与 name 一起给；"
-        "查不到就是 null，不编）。"
-        "**分析一条战报时，先 fit_parse 看配装，再 fit_killmail 拿上下文；不要自己去打开 "
+        "配装看完后想知道这套为什么死、被谁打、值多少钱时用它：回答「这条战报的上下文是"
+        "什么」。返回损失价值（fitted/dropped/destroyed/total）、参战方（count 挂名 + "
+        "damaging_count 有伤害 + zero_damage_count 零伤害 + capsule_count 记录船是蛋；"
+        "damage_total/damage_check、最终一击、按舰级与武器族分桶、安全等级）、星系与"
+        "「挨多少伤害 vs 自身 EHP」。"
+        "**包含受害者与攻击者（Top 伤害）的驾驶员 / 军团 / 联盟名字**（查不到就是 null，不编）。"
+        "**分析战报时，先 fit_parse 看配装，再 fit_killmail 拿上下文；不要自己去打开 "
         "zkillboard 网页。** 限制：只接受 killmail（JSON / {killmail_id, hash} / killmail "
-        "链接），EFT / DNA 会得到 not_a_killmail；拿不到的值一律 null（不猜），"
-        "damage_check 不等时给 mismatch + damage_diff（数据质量信号）；只给事实，不给生死结论。",
+        "链接），EFT / DNA 会得到 not_a_killmail；拿不到的值一律 null，"
+        "damage_check 不等时给 mismatch + damage_diff；蛋（Capsule）在攻击者里说明该玩家"
+        "已失去自己的船，其伤害来自被摧毁的船，船归属不可信（ship_attribution / "
+        "recorded_ship_is_capsule）；只给事实，不给生死结论。",
     ),
     "fit_index": (
         "六维度摘要（L0，默认入口）",
