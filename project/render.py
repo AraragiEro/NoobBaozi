@@ -1083,6 +1083,69 @@ def render_detail(
     }
 
 
+# =============================================================================
+# 八、输出分层（L0 / L1 / 按路径取数）—— **实现在 `project/summary.py`**
+# =============================================================================
+#
+# 为什么是「薄封装 + 函数内 import」而不是在本文件里实现：
+#
+# 1. 三个入口全部**复用上面已有的构建路径**（`_collect_flags` / `_view_entry` /
+#    `_meta` / `state_sensitive_attrs`），所以 L0/L1 与 `render_overview` 的数值
+#    不可能漂移；本文件不新增任何计算。
+# 2. 组装逻辑放在 `project/summary.py`（第一阶段唯一的新文件），本文件只**追加导出**，
+#    `render_overview` / `render_detail` 的行为一个字都没改（验收基线不得漂移）。
+# 3. 函数内 import：`summary` 在模块级 import 本文件，模块级互相 import 会形成环
+#    （谁先被 import 谁不完整）。放函数体内只在实际调用时解析，两个方向都安全。
+
+
+def render_index(ctx: ViewContext) -> dict:
+    """L0 摘要（实测 1,884–1,965 字符）：六视角各 3–5 个数 + 精简 flag + provenance 计数。
+
+    契约与字段清单见 `evefit/docs/输出分层与工具集-v1.md` §3，实现见
+    `evefit.project.summary.render_index`。**不含** `evidence` / 逐叶子三张平行表 /
+    逐模块列表 / 512 条技能明细；`meta` 压缩成 `{sde_build, engine_version,
+    spec_version, skill_tier, module_states, damage_profile, mode}`（`skill_tier` 只给
+    `{name, count, hash}`）。模式对比（`modes`）不在 L0，走 `render_overview()["modes"]`。
+
+    Args:
+        ctx: 视角上下文（与 `render_overview` 同一份；变体缓存共用）。
+
+    Returns:
+        `{"ship", "meta", "<六视角>", "flags", "provenance_counts", "budget"}`。
+    """
+    from evefit.project.summary import render_index as _impl
+
+    return _impl(ctx)
+
+
+def render_view(ctx: ViewContext, view_name: str) -> dict:
+    """L1 单视角：`{overview, provenance, unknown_reasons, confidence, flags}`（含 evidence）。
+
+    **只构建被请求的那一个视角**，不重算六视角再丢弃；返回值与
+    `render_overview(ctx)["views"][view_name]` 逐字节相同（overview 未降级时）。
+    实现见 `evefit.project.summary.render_view`。
+
+    Raises:
+        ValueError: 视角名未注册（消息里列出可用视角）。
+    """
+    from evefit.project.summary import render_view as _impl
+
+    return _impl(ctx, view_name)
+
+
+def get_path(ctx: ViewContext, path: str) -> dict:
+    """按稳定路径取数：`{value, provenance, reason?, source_view}`。
+
+    路径表达式在 L0/L1 里一致（`mobility.speed_mps` / `firepower.weapons[].name` /
+    `constraints.tier_violations[0].kind`）；先按 L0 语义、再落回 L1；
+    **路径不存在返回 `value=None` + `hint`**（不抛异常）。实现见
+    `evefit.project.summary.get_path`。
+    """
+    from evefit.project.summary import get_path as _impl
+
+    return _impl(ctx, path)
+
+
 __all__ = [
     "BUDGET_CHARS",
     "OVERVIEW_DOWNGRADES",
@@ -1090,7 +1153,10 @@ __all__ = [
     "SUMMARY_PROVENANCE",
     "TRUNCATABLE_LISTS",
     "TRUNCATE_TO",
+    "get_path",
     "render_detail",
+    "render_index",
     "render_overview",
+    "render_view",
     "state_sensitive_attrs",
 ]
