@@ -4,10 +4,18 @@
 
 > 可疑点**不设绝对阈值**——快慢取决于同一场战斗里的其他人，属场景相对判断。
 
-所以本模块的判定只有两种形状：
+所以本模块的判定只有三种形状：
 
 1. **「是否有」**：是否为空（无推进模块、无无人机）、是否为负（余量缺口）、是否不稳定；
-2. **「相对倍数」**：信号半径开关比、抗性最低/最高比、dph/dps 与武器周期比、余量与总量比。
+2. **「相对倍数」**：信号半径开关比、抗性最低/最高比、dph/dps 与武器周期比、余量与总量比；
+3. **「是否自相矛盾」**（T-22 / 字段规格 §0.6，输入保真）：有弹药却零伤害、按全 active
+   算装不下却仍全额计费——这类矛盾永远意味着**输入或状态有问题**，与模块类型无关，所以
+   判据写成矛盾而不是「检测 Abyssal/mutated 类型」（后者会随版本增加而失效）：
+
+   - `weapon_damage_zero`：有带弹药的武器，但 `-11` 齐射伤害为 0 → 对应 `dph = null`；
+   - `resource_over_budget_unflyable`：CPU/PG/标定任一余量为负 → 对应 `feasible = false`。
+
+   这两条**只给事实与提示**，不做求解（不会自动把模块降级成 offline 去凑预算）。
 
 倍数常量集中在本文件顶部，全部注明「相对量，非绝对门槛」，并且**只用于判断"明显"**，
 不用于给出「够快 / 够硬 / 够用」这类判词。规则开关与文案在
@@ -37,6 +45,7 @@ from typing import Callable
 from evefit.config import attributes as _a
 from evefit.config import paths as _paths
 from evefit.project import units
+from evefit.project.views import shared as _shared
 from evefit.project.views.base import SLOT_CARGO, ViewContext, ship_attributes
 
 RULES_PATH: Path = _paths.PROJECT_ROOT / "config" / "diagnostics.json"
@@ -59,6 +68,39 @@ DPH_DPS_FACTOR: float = 1.5
 
 _OPEN_STATES: frozenset[str] = frozenset({"active", "overload"})
 """算「启用」的 state 集合（overload 也是启用，只是带过载）。"""
+
+
+# =============================================================================
+# 输入保真（T-22 / 字段规格 §0.6）：判据是**自相矛盾**，不是模块类型穷举
+# =============================================================================
+
+
+def _armed_weapon_parts(facts: _Facts) -> dict | None:
+    """扫描**带弹药的挂架武器**，返回 `{armed, volley_sum, names}`。
+
+    与 `views/firepower._dph()` 用**同一个记录源**（`views/shared.weapon_records()`）：
+    视图据此把 `dph` 判成 `null`，本模块据此发 `weapon_damage_zero` flag，
+    两边的「有带弹药的武器」判据不会分叉（`armed = charge_type_id 有值`，不看类型）。
+    """
+    records = _shared.weapon_records(facts.ctx)
+    armed = [
+        record
+        for record in records
+        if record.get("slot_type") in _shared.WEAPON_SLOT_TYPES
+        and record.get("charge_type_id") is not None
+    ]
+    if not armed:
+        return None
+    return {
+        "armed": len(armed),
+        "volley_sum": sum(
+            record["volley"]
+            for record in records
+            if record.get("slot_type") in _shared.WEAPON_SLOT_TYPES
+            and record.get("volley")
+        ),
+        "names": [record.get("name") or f"type_id {record.get('type_id')}" for record in armed],
+    }
 
 
 # =============================================================================
@@ -271,6 +313,77 @@ def _rule_resource_overflow(facts: _Facts) -> dict | None:
         "power_load": units.fmt(_num(facts.attrs, _a.ATTR_POWER_LOAD) or 0.0),
         "power_free": units.fmt(power_free),
         "power_deficit": units.fmt(max(0.0, -power_free)),
+    }
+
+
+def _rule_resource_over_budget_unflyable(facts: _Facts) -> dict | None:
+    """资源超预算 → 当前占用**按全 active 计算**，部分模块在真实游戏中不可能在线。
+
+    T-22 / 字段规格 §0.6 的第二类不完整输入（**状态未知**）。判据仍是自相矛盾：
+    三项余量（`-9` CPU / `-10` PG / `-69` 标定）**任一为负**就说明「按全 active 装不下」。
+    本规则**只给事实与提示**，不判定该关哪个模块（降级是求解，不在本期）。
+
+    实测背景（f4 / Loki）：`cpu.load 10572.1` vs 真实可飞 **472.1**；差的是 covert cloak
+    的 10000 罚值，而唯一能免罚的子系统躺在 flag 177 舱里（见 `engine/normalize.py`
+    的舱内提示）。数字没读错，是**「状态没落地」**。
+    """
+    cpu_free = _num(facts.attrs, _a.ATTR_CPU_FREE)
+    power_free = _num(facts.attrs, _a.ATTR_POWER_FREE)
+    calibration_free = _num(facts.attrs, _a.ATTR_CALIBRATION_FREE)
+    if cpu_free is None or power_free is None or calibration_free is None:
+        return None  # 任一余量未知 → 不下「飞不起来」的结论（N4）
+
+    over_budget = {
+        "cpu": max(0.0, -cpu_free),
+        "powergrid": max(0.0, -power_free),
+        "calibration": max(0.0, -calibration_free),
+    }
+    if not any(value > 0.0 for value in over_budget.values()):
+        return None
+
+    open_modules = sum(
+        1 for _pos, item in facts.fitted() if item.get("state") in _OPEN_STATES
+    )
+    return {
+        "cpu_output": units.fmt(_num(facts.attrs, _a.ATTR_CPU_OUTPUT) or 0.0),
+        "cpu_load": units.fmt(_num(facts.attrs, _a.ATTR_CPU_LOAD) or 0.0),
+        "cpu_free": units.fmt(cpu_free),
+        "cpu_deficit": units.fmt(over_budget["cpu"]),
+        "power_output": units.fmt(_num(facts.attrs, _a.ATTR_POWER_OUTPUT) or 0.0),
+        "power_load": units.fmt(_num(facts.attrs, _a.ATTR_POWER_LOAD) or 0.0),
+        "power_free": units.fmt(power_free),
+        "power_deficit": units.fmt(over_budget["powergrid"]),
+        "calibration_free": units.fmt(calibration_free),
+        "calibration_deficit": units.fmt(over_budget["calibration"]),
+        # 「按全 active 算」的直接证据：多少件模块处于开启态（state 由导入规则推定）
+        "open_state_modules": open_modules,
+    }
+
+
+def _rule_weapon_damage_zero(facts: _Facts) -> dict | None:
+    """有带弹药的武器，但齐射伤害（`-11`）为 0 → 输入不完整（突变数据缺失）。
+
+    T-22 / 字段规格 §0.6 的第一类不完整输入（**突变数据缺失**）。killmail **不暴露**
+    Abyssal/mutated 的 `mutation`，引擎只能按「未变异」算：f4 的 Abyssal BCS（type 49738）
+    把 5 门 HML 的逐件 `-21`/`-12` 与舰船级 `-11` **一起压成 0**（实测摘掉该件后
+    `-11` 从 0 → 1427.588）。
+
+    判据是**自相矛盾**（有弹药却零伤害），不是「检测 Abyssal 类型」：后者会随版本失效，
+    前者永远意味着输入或状态有问题。对应视图行为：`firepower.dph` 输出 `null`。
+    """
+    parts = _armed_weapon_parts(facts)
+    if parts is None:
+        return None
+    dph = _num(facts.attrs, _a.ATTR_DAMAGE_ALPHA)
+    if dph is None or dph > 0.0:
+        return None
+
+    return {
+        "armed_weapons": parts["armed"],
+        "volley_sum_hp": units.fmt(parts["volley_sum"]),
+        "dph_hp": units.fmt(dph),
+        "dps_hp_s": units.fmt(_num(facts.attrs, _a.ATTR_DAMAGE_DPS) or 0.0),
+        "weapons": parts["names"][:3],
     }
 
 
@@ -487,7 +600,10 @@ def _rule_repaired_but_unstable(facts: _Facts) -> dict | None:
         "repair_rates": positive,
         "repair_layers": "、".join(f"{name} {value} hp/s" for name, value in positive.items()),
         "cap_stable_pct": units.fmt(_num(facts.attrs, _a.ATTR_CAP_STABLE_PCT) or 0.0),
-        "cap_depletes_in_s": units.fmt(depletes) if depletes is not None else None,
+        # 哨兵归一口径只写一份：`-7` 的 `-1.0` 是「永不耗尽」，不是秒数（T-22 / D6）
+        "cap_depletes_in_s": _shared.depletes_in_s(
+            _num(facts.attrs, _a.ATTR_CAP_STABLE_PCT), depletes
+        ),
     }
 
 
@@ -567,13 +683,17 @@ def _rule_cap_sensitive(facts: _Facts) -> dict | None:
         "module_type_id": module.get("type_id"),
         "stable_pct_before": units.fmt(_num(facts.attrs, _a.ATTR_CAP_STABLE_PCT) or 0.0),
         "stable_pct_after": units.fmt(stable_pct),
-        "cap_depletes_in_s_before": units.fmt(depletes) if depletes is not None else None,
+        # 同上：`-7` 的 `-1.0` 是哨兵（永不耗尽），不是秒数（T-22 / D6）
+        "cap_depletes_in_s_before": _shared.depletes_in_s(
+            _num(facts.attrs, _a.ATTR_CAP_STABLE_PCT), depletes
+        ),
         "candidates_checked": checked,
     }
 
 
 _HANDLERS: dict[str, Callable[[_Facts], dict | None]] = {
     "resource_overflow": _rule_resource_overflow,
+    "resource_over_budget_unflyable": _rule_resource_over_budget_unflyable,
     "resource_slack": _rule_resource_slack,
     "empty_hardpoint": _rule_empty_hardpoint,
     "drone_bandwidth_idle": _rule_drone_bandwidth_idle,
@@ -582,6 +702,7 @@ _HANDLERS: dict[str, Callable[[_Facts], dict | None]] = {
     "resist_hole": _rule_resist_hole,
     "repaired_but_unstable": _rule_repaired_but_unstable,
     "alpha_dph_ratio": _rule_alpha_dph_ratio,
+    "weapon_damage_zero": _rule_weapon_damage_zero,
     "cap_sensitive": _rule_cap_sensitive,
 }
 

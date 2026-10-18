@@ -70,6 +70,7 @@ ATTR_MED_SLOTS: int = 13                 # medSlots
 ATTR_LOW_SLOTS: int = 12                 # lowSlots
 ATTR_RIG_SLOTS: int = 1137               # rigSlots
 ATTR_UPGRADE_SLOTS_LEFT: int = 1154      # upgradeSlotsLeft —— rig 槽剩余（PROGRESS §3）
+ATTR_MAX_SUBSYSTEMS: int = 1367          # maxSubSystems —— T3C 船体的子系统槽总量（SDE displayName = `Subsystem Slots`；Loki = 5）
 ATTR_TURRET_SLOTS_LEFT: int = 102        # turretSlotsLeft —— 炮台挂点剩余
 ATTR_LAUNCHER_SLOTS_LEFT: int = 101      # launcherSlotsLeft —— 发射器挂点剩余
 ATTR_DRONE_BANDWIDTH: int = 1271         # droneBandwidth（Mbit/s；PROGRESS §3 确认）
@@ -113,6 +114,7 @@ ATTR_CHARGE_GROUP_2: int = 605           # chargeGroup2（可装弹药组 2）
 ATTR_AOE_VELOCITY: int = 653             # aoeVelocity（m/s；导弹应用，字段规格 §1 未建模）
 ATTR_AOE_CLOUD_SIZE: int = 654           # aoeCloudSize（m；导弹爆炸半径）
 ATTR_AOE_FALLOFF: int = 655              # aoeFalloff（m；esi 无 unit，推定同 aoeCloudSize）
+ATTR_EXPLOSION_DELAY: int = 281          # explosionDelay —— 导弹最大飞行时间（**存储毫秒**；SDE displayName = `Maximum Flight Time`）
 
 # 弹药四系伤害 + 射程乘子（读弹药物件，不读武器）
 ATTR_EM_DAMAGE: int = 114                # emDamage
@@ -290,6 +292,7 @@ ATTRIBUTES: dict[int, tuple[str, str | None, int | None]] = {
     ATTR_LOW_SLOTS: ("lowSlots", "count", 122),
     ATTR_RIG_SLOTS: ("rigSlots", "count", 122),
     ATTR_UPGRADE_SLOTS_LEFT: ("upgradeSlotsLeft", "count", 122),
+    ATTR_MAX_SUBSYSTEMS: ("maxSubSystems", "count", None),
     ATTR_TURRET_SLOTS_LEFT: ("turretSlotsLeft", "count", 141),
     ATTR_LAUNCHER_SLOTS_LEFT: ("launcherSlotsLeft", "count", 141),
     ATTR_DRONE_BANDWIDTH: ("droneBandwidth", "Mbit/s", 128),
@@ -326,6 +329,7 @@ ATTRIBUTES: dict[int, tuple[str, str | None, int | None]] = {
     ATTR_AOE_VELOCITY: ("aoeVelocity", "m/s", 10),
     ATTR_AOE_CLOUD_SIZE: ("aoeCloudSize", "m", 1),
     ATTR_AOE_FALLOFF: ("aoeFalloff", "m", None),
+    ATTR_EXPLOSION_DELAY: ("explosionDelay", "s", 101),
     ATTR_EM_DAMAGE: ("emDamage", "hp", 113),
     ATTR_EXPLOSIVE_DAMAGE: ("explosiveDamage", "hp", 113),
     ATTR_KINETIC_DAMAGE: ("kineticDamage", "hp", 113),
@@ -433,7 +437,10 @@ ATTRIBUTES: dict[int, tuple[str, str | None, int | None]] = {
 #   1985 stanceSwitchTime  实测 10000    → 10 s（字段规格 §10 亦标注「（ms）」）
 #   160  trackingSpeed     实测 391.6687 → 0.3916687 rad/s
 #   620  optimalSigRadius  实测 40000    → 40 m
-# 前八项是"存储毫秒"，后两项是"存储值被放大 1000 倍"，语义不同故分开登记。
+#   281  explosionDelay   **索引库核实**（T-23）：`attributes.unit_id = 101`
+#                        （`dogmaUnits.name = Milliseconds`）→ 存储值是毫秒，×0.001 得秒；
+#                        数值本身未在样本上复测（本样本没有导弹），故只登记语义、不改别的
+# 前九项是"存储毫秒"，后两项是"存储值被放大 1000 倍"，语义不同故分开登记。
 # `-3` 是**派生负 ID**（引擎 pass 4 输出，SDE/ESI 查不到名字与单位），它进缩放表
 # 的唯一依据是实测（PROGRESS §3 第 65 条），不是 ESI unit_id。
 # =============================================================================
@@ -446,6 +453,7 @@ SCALE_BY_ATTR: dict[int, float] = {
     ATTR_SHIELD_RECHARGE_RATE: SCALE_MILLI,     # 479  —— spec §0.3（PROGRESS §3 硬结论 5）
     ATTR_CAPACITOR_RECHARGE_RATE: SCALE_MILLI,  # 55   —— spike/smoke3.py 实测 280000 → 280 s
     ATTR_STANCE_SWITCH_TIME: SCALE_MILLI,       # 1985 —— spec §10 标注「（ms）」+ ESI unit_id 101
+    ATTR_EXPLOSION_DELAY: SCALE_MILLI,          # 281  —— T-23 索引库核实 unit_id 101（Milliseconds；显示名 Maximum Flight Time）
     ATTR_TRACKING_SPEED: SCALE_KILO,            # 160  —— spec §0.3 + spike/weapon_attrs.py（391.67）
     ATTR_OPTIMAL_SIG_RADIUS: SCALE_KILO,        # 620  —— spec §0.3 + spike/weapon_attrs.py（实测 40000）
 }

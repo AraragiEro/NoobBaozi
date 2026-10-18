@@ -31,6 +31,7 @@ from evefit.config import attributes as A
 from evefit.config.paths import db_path
 from evefit.engine.adapter import Engine
 from evefit.engine.assumptions import default_assumptions, derive_skill_tier
+from evefit.project import diagnostics as D
 from evefit.project import units
 from evefit.project.views import build_view
 from evefit.project.views.base import BASE, ViewContext
@@ -179,20 +180,40 @@ def test_three_views_shape_and_empty_flags(views: dict[str, dict]) -> None:
 
 
 def test_field_sources_reachable_and_registered(views: dict[str, dict]) -> None:
-    """每个 key 都能在 overview 里走到；非 None 来源必须是**已登记**属性常量。"""
+    """每个 key 都能在 overview 里走到；非 None 来源必须是**已登记**属性常量。
+
+    两类例外（都是本轮 T-20 引入的，且**各配一条更强的断言**，不是放宽）：
+
+    1. `CONDITIONAL_SOURCES`（`resources` 的子系统槽）：只在 T3C 船上有叶子。本样本是
+       Hecate（无子系统槽），所以这里反过来断言它**不可达**——「条件字段不得在无该槽位的
+       船上凭空出现」比原来的无条件可达更强的约束；正向断言在
+       `test_resources_subsystem_slots_only_on_t3c` 里用 Loki 样本做。
+    2. `PENDING_ATTRIBUTES`：`config/attributes.py` 本轮只读，`maxSubSystems(1367)` 只能在
+       视角模块里以具名常量 + 「待登记」注释声明。这里只放行**模块里显式登记的那几个值**，
+       裸写数字照样抓得住。
+    """
     import evefit.project.views.constraints as C
     import evefit.project.views.resources as R
     import evefit.project.views.stability as S
 
     for module, name in ((R, "resources"), (C, "constraints"), (S, "stability")):
         overview = views[name]["overview"]
+        conditional = getattr(module, "CONDITIONAL_SOURCES", frozenset())
+        pending = set((getattr(module, "PENDING_ATTRIBUTES", {}) or {}).values())
         for dotted, attribute_id in _field_sources(module).items():
+            if dotted in conditional:
+                assert not _reachable(overview, dotted), (
+                    f"{name}: 条件字段 {dotted!r} 不该出现在没有该槽位的船上"
+                )
+                continue
             assert _reachable(overview, dotted), f"{name}: FIELD_SOURCES 的 {dotted!r} 在 overview 里不可达"
             if attribute_id is None:
                 continue
             assert isinstance(attribute_id, int), f"{name}.{dotted}: 来源必须是 int 或 None"
-            # 红线 N12：来源必须是常量表里的常量（不是裸写的数字）
-            assert attribute_id in A.ATTRIBUTES, f"{name}.{dotted}: 属性 {attribute_id} 未在常量表登记"
+            # 红线 N12：来源必须是常量表里的常量（或本模块显式登记的待登记常量）
+            assert attribute_id in A.ATTRIBUTES or attribute_id in pending, (
+                f"{name}.{dotted}: 属性 {attribute_id} 未在常量表登记"
+            )
 
 
 def test_no_absolute_verdict_wording(views: dict[str, dict]) -> None:
@@ -599,3 +620,324 @@ def test_no_index_still_builds_three_views(engine: Engine, sample_fit: dict) -> 
     stability = build_view("stability", no_index)["overview"]
     assert stability["external_dependency"]["remote_rep"] is None
     assert stability["consumables"]["paste_endurance_s"] is None
+
+# =============================================================================
+# 七、真实样本对照（T-20：D5 / D6 / X2）
+# =============================================================================
+
+ACCEPTANCE_FIXTURES = EVEFIT_ROOT / "acceptance" / "fixtures"
+"""验收样本（**只读**：`acceptance/` 不在本任务写入范围内）。"""
+
+T3C_SAMPLE = "f4-non-hecate.json"
+"""T3C（Loki）样本：唯一带子系统槽的样本，D5/D6/X2 都靠它暴露。"""
+
+MISSILE_SAMPLE = "f5-no-mwd.json"
+"""纯导弹船（Drake + 6×HAM）：D5 的第二个暴露者，且无子系统槽。"""
+
+REAL_SAMPLES = ("f1-hecate-killmail.eft", T3C_SAMPLE, MISSILE_SAMPLE)
+
+
+def _load_real_fit(engine: Engine, index, name: str) -> dict:
+    """按后缀读验收样本并补技能档（与验收命令同一条构造路径）。"""
+    path = ACCEPTANCE_FIXTURES / name
+    if path.suffix == ".eft":
+        fit = engine.load_eft(path.read_text(encoding="utf-8"))
+    else:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, list):
+            raw = raw[0]
+        raw.pop("zkb", None)
+        fit = dogma.load_killmail(raw)
+    fit["character"] = {"skills": derive_skill_tier(fit, engine, index=index)}
+    return fit
+
+
+@pytest.fixture(scope="module")
+def real_ctx(engine: Engine, index):
+    """样本名 → `ViewContext`。"""
+
+    def factory(name: str) -> ViewContext:
+        fit = _load_real_fit(engine, index, name)
+        return ViewContext(
+            engine=engine,
+            index=index,
+            fit=fit,
+            assumptions=default_assumptions(fit, engine, index=index),
+            meta=engine.meta(),
+        )
+
+    return factory
+
+
+# ---- D6：电容耗尽时长的哨兵归一 -------------------------------------------
+
+
+def test_depletes_in_s_normalizer_covers_three_cases() -> None:
+    """`shared.depletes_in_s()` 三种情形（D6 的核心口径，单独锁一遍）。
+
+    1. 电容稳定（`stable_pct > 0`）→ `None`，不管引擎给的是 -1.0 还是别的；
+    2. 引擎给负数（任何负数都是「不耗尽」哨兵，不只 -1.0）→ `None`；
+    3. 否则照实给秒数（过 `units.fmt`，3 位小数）。
+    """
+    from evefit.project.views import shared as views_shared
+
+    # 1) 稳定：f4 实测 stable 60.969 / 引擎 -7 = -1.0
+    assert views_shared.depletes_in_s(60.9688, -1.0) is None
+    assert views_shared.depletes_in_s(0.5, 12.0) is None
+    # 2) 不稳定但引擎仍是负数（哨兵的任何取值）→ None
+    assert views_shared.depletes_in_s(0.0, -1.0) is None
+    assert views_shared.depletes_in_s(0.0, -42.0) is None
+    assert views_shared.depletes_in_s(None, -1.0) is None
+    # 3) 不稳定 + 正数 → 照实（f1 实测 38.4）
+    assert views_shared.depletes_in_s(0.0, 38.4) == 38.4
+    assert views_shared.depletes_in_s(0.0, 38.4000001) == 38.4
+    assert views_shared.depletes_in_s(None, 511.0762) == 511.076
+
+
+def test_stability_depletes_is_null_when_capacitor_is_stable(views: dict[str, dict], real_ctx) -> None:
+    """D6：稳定样本 `depletes_in_s is None`；不稳定样本仍是**正数**（f1 ≈ 38.4）。
+
+    实测（-72 stable / -7 原始值）：
+    f3 96.801 / -1.0、f4 60.969 / -1.0、f5 38.505 / -1.0、f6 100.0 / -1.0 —— 四个样本
+    都是「稳定 + 哨兵」，旧实现原样输出 `-1.0`（agent 会读成「负一秒」）。
+    """
+    f1 = views["stability"]["overview"]["capacitor"]
+    assert f1["stable_pct"] == 0.0, "f1 是**不稳定**样本（stable_pct 0）"
+    assert f1["depletes_in_s"] is not None and f1["depletes_in_s"] > 0.0
+    assert math.isclose(f1["depletes_in_s"], 38.4, rel_tol=1e-3)
+
+    for name in ("f3-hecate-modes.eft", T3C_SAMPLE, MISSILE_SAMPLE, "f6-minimal-fit.json"):
+        capacitor = build_view("stability", real_ctx(name))["overview"]["capacitor"]
+        assert capacitor["stable_pct"] is not None and capacitor["stable_pct"] > 0.0, name
+        assert capacitor["depletes_in_s"] is None, f"{name}: 电容稳定时必须给 None"
+
+
+def test_stability_cap_sensitivity_depletes_uses_same_normalizer(real_ctx) -> None:
+    """同一份哨兵归一也覆盖 `cap_sensitivity[].depletes_in_s`（摘掉模块后变稳定）。"""
+    sensitivity = build_view("stability", real_ctx(T3C_SAMPLE))["overview"]["cap_sensitivity"]
+
+    assert sensitivity, "f4 应有敏感度条目"
+    for entry in sensitivity:
+        assert entry["stable_pct"] is not None
+        if entry["stable_pct"] > 0.0:
+            assert entry["depletes_in_s"] is None, f"{entry['module']}: 稳定后不得给 -1.0"
+        else:
+            assert entry["depletes_in_s"] is None or entry["depletes_in_s"] > 0.0
+
+
+# ---- X2：子系统槽位 --------------------------------------------------------
+
+
+def test_resources_subsystem_slots_only_on_t3c(views: dict[str, dict], real_ctx) -> None:
+    """X2：T3C 的 `slots` 含 `subsystem`（Loki 实测 used 4 / total 5）；非 T3C 不含。
+
+    正反两向都断言（比「只验 T3C 有」更强）：
+    - f4（Loki）：`slots.subsystem = {used: 4, total: 5}`、`empty_slots.subsystem = 1`，
+      且三个条件字段在 overview 里**可达**（`FIELD_SOURCES` 有映射）；
+    - f1（Hecate，T3D）/ f5（Drake）：键集合仍是四类，`empty_slots` 同步不多一类。
+    """
+    import evefit.project.views.resources as R
+
+    f4 = build_view("resources", real_ctx(T3C_SAMPLE))["overview"]
+    assert "subsystem" in f4["slots"], "T3C 必须体现子系统槽"
+    assert f4["slots"]["subsystem"] == {"used": 4, "total": 5}, "Loki：4 个已装 / 5 个槽位"
+    assert f4["empty_slots"]["subsystem"] == 1
+    for dotted in R.CONDITIONAL_SOURCES:
+        assert _reachable(f4, dotted), f"T3C 样本上条件字段 {dotted!r} 必须可达"
+
+    assert set(f4["slots"]) == {"high", "medium", "low", "rig", "subsystem"}
+    assert set(f4["empty_slots"]) == set(f4["slots"])
+
+    for name in ("f1-hecate-killmail.eft", MISSILE_SAMPLE, "f6-minimal-fit.json"):
+        overview = build_view("resources", real_ctx(name))["overview"]
+        assert "subsystem" not in overview["slots"], f"{name}: 非 T3C 不得凭空多一类槽位"
+        assert "subsystem" not in overview["empty_slots"]
+        assert set(overview["slots"]) == {"high", "medium", "low", "rig"}
+
+
+def test_t3c_subsystem_total_comes_from_ship_attribute(real_ctx) -> None:
+    """总量来自船体 `maxSubSystems(1367)`，不是常量或按已装数量反推。"""
+    import evefit.project.views.resources as R
+
+    ctx = real_ctx(T3C_SAMPLE)
+    total = ctx.attrs(BASE)[R.ATTR_MAX_SUBSYSTEMS]
+    used = sum(
+        1 for item in ctx.items(BASE) if item.get("slot_type") == R.SUBSYSTEM_SLOT_TYPE
+    )
+    overview = build_view("resources", ctx)["overview"]
+
+    assert int(round(total)) == 5
+    assert used == 4
+    assert overview["slots"]["subsystem"] == {"used": used, "total": int(round(total))}
+
+
+def test_stability_ammo_endurance_is_not_none_on_missile_ships(real_ctx) -> None:
+    """D5 的不稳定视角侧：导弹船（f4/f5）的 `consumables` 必须给值，并带模块名/发数。"""
+    for name, module in (
+        (T3C_SAMPLE, "Heavy Missile Launcher II"),
+        (MISSILE_SAMPLE, "Heavy Assault Missile Launcher II"),
+    ):
+        consumables = build_view("stability", real_ctx(name))["overview"]["consumables"]
+        assert consumables["ammo_endurance_s"] is not None, name
+        assert consumables["ammo_module"] == module
+        assert consumables["ammo_rounds"] >= 1
+        assert consumables["ammo_cycle_s"] is not None and consumables["ammo_cycle_s"] > 0.0
+
+
+# =============================================================================
+# 八、资源可行性（T-22 / 字段规格 §0.6 的第二类：状态未知）
+# =============================================================================
+#
+# 判据是**自相矛盾**：按全 active 算装不下（任一余量为负）→ `feasible = False`。
+# 视图**不做求解**：模块状态与 CPU/PG 数值一个都不改（降级 offline 不在本期）。
+
+
+def test_resources_feasible_false_when_over_budget(real_ctx) -> None:
+    """f4（Loki）：CPU 超一万 → `feasible is False`，缺口就是 `-cpu.free`。
+
+    实测（§0.6 的第二类不完整输入）：`cpu.load 10572.1` vs 真实可飞 **472.1** ——
+    差的 10000 是 covert cloak 的罚值（能免罚的子系统躺在 flag 177 舱里）。
+    数字没读错，是「状态没落地」。
+    """
+    overview = build_view("resources", real_ctx(T3C_SAMPLE))["overview"]
+
+    assert overview["feasible"] is False
+    assert overview["cpu"]["load"] == 10572.1, "理论值必须原样保留（不许自动降级模块）"
+    assert overview["cpu"]["free"] < 0.0
+    assert overview["over_budget"]["cpu"] == round(-overview["cpu"]["free"], 3)
+    assert overview["over_budget"]["cpu"] > 10000.0
+    # PG 没超就是真 0（不是 None，也不是「有余量」的另一种说法）
+    assert overview["powergrid"]["free"] > 0.0
+    assert overview["over_budget"]["powergrid"] == 0.0
+
+
+def test_resources_feasible_true_when_all_three_have_slack(real_ctx) -> None:
+    """f3（Hecate 三模式配装）：CPU / PG / 标定三项余量都 ≥ 0 → `feasible is True`。
+
+    反面断言同一条规则：`over_budget` 两项都必须是 `0.0`（只在 False 时非零）。
+    """
+    overview = build_view("resources", real_ctx("f3-hecate-modes.eft"))["overview"]
+
+    assert overview["cpu"]["free"] >= 0.0
+    assert overview["powergrid"]["free"] >= 0.0
+    assert overview["calibration"]["free"] >= 0.0
+    assert overview["feasible"] is True
+    assert overview["over_budget"] == {"cpu": 0.0, "powergrid": 0.0}
+
+
+@pytest.mark.parametrize("name", REAL_SAMPLES)
+def test_resources_over_budget_only_meaningful_when_infeasible(real_ctx, name: str) -> None:
+    """`feasible` 与 `over_budget` 必须自洽（三个真实样本各验一次）。
+
+    注意 f1 是**实测超预算**样本（CPU 余量 −11.0 / PG −3.6）：全 4 技能档下这艘 Hecate
+    就是装不下，所以断言的是「与余量同号」而不是某个固定布尔值——把 f1 写成 `True`
+    等于伪造事实（见 T-22 报告的「偏离」一节）。
+    """
+    ctx = real_ctx(name)
+    overview = build_view("resources", ctx)["overview"]
+    attrs = ctx.attrs(BASE)
+
+    frees = (
+        attrs[A.ATTR_CPU_FREE],
+        attrs[A.ATTR_POWER_FREE],
+        attrs[A.ATTR_CALIBRATION_FREE],
+    )
+    assert overview["feasible"] is all(value >= 0.0 for value in frees)
+
+    for key, free in (
+        ("cpu", attrs[A.ATTR_CPU_FREE]),
+        ("powergrid", attrs[A.ATTR_POWER_FREE]),
+    ):
+        deficit = overview["over_budget"][key]
+        assert deficit == units.fmt(max(0.0, -free)), (name, key)
+        if overview["feasible"] is True:
+            assert deficit == 0.0, f"{name}: 可行时 {key} 不得报缺口"
+        if deficit > 0.0:
+            assert overview["feasible"] is False, f"{name}: 有缺口就不可能 feasible"
+
+
+def test_resources_over_budget_flag_is_emitted(real_ctx) -> None:
+    """超预算时 `resources` 必须带一条 `resource_over_budget_unflyable`（解释「为什么假」）。"""
+    ctx = real_ctx(T3C_SAMPLE)
+    flags = {flag["id"]: flag for flag in D.evaluate(ctx)}
+
+    assert "resource_over_budget_unflyable" in flags, sorted(flags)
+    flag = flags["resource_over_budget_unflyable"]
+    assert flag["view"] == "resources"
+    assert flag["message"] == (
+        "资源超预算：当前占用按全 active 计算，部分模块在真实游戏中不可能在线"
+    )
+    evidence = flag["evidence"]
+    assert evidence["cpu_load"] > evidence["cpu_output"]
+    assert evidence["cpu_deficit"] > 0.0
+    assert evidence["open_state_modules"] >= 1
+
+    # 反面：三项余量都为正的样本不产出这条 flag
+    feasible_ctx = real_ctx("f3-hecate-modes.eft")
+    assert "resource_over_budget_unflyable" not in {
+        flag["id"] for flag in D.evaluate(feasible_ctx)
+    }
+
+
+def test_resources_feasible_is_none_when_free_values_missing() -> None:
+    """余量缺失 → `feasible = None`（未知不下结论），`over_budget` 也保持 `None`。
+
+    红线 N4：`None >= 0` 在 Python 里是 False，但「不知道」不等于「超预算」——
+    这里必须显式给 `None`，否则会凭空造出「飞不起来」的判词。
+    """
+    resources = build_view("resources", _StubContext())["overview"]
+
+    assert resources["feasible"] is None
+    assert resources["over_budget"] == {"cpu": None, "powergrid": None}
+
+
+# =============================================================================
+# 九、诊断证据不得直出哨兵值（T-22 的第四件）
+# =============================================================================
+
+
+class _SentinelStubContext(_StubContext):
+    """带「电容不稳定 + 引擎哨兵 -1.0」的桩：模拟 §0.6 那类自相矛盾的原始数据。"""
+
+    ATTR_ARMOR_REPAIR_RATE = A.ATTR_ARMOR_REPAIR_RATE
+    ATTR_CAP_STABLE_PCT = A.ATTR_CAP_STABLE_PCT
+    ATTR_CAP_DEPLETES_IN = A.ATTR_CAP_DEPLETES_IN
+
+    def __init__(self, stable_pct: float, depletes: float) -> None:
+        super().__init__()
+        self._attrs = {
+            A.ATTR_ARMOR_REPAIR_RATE: 20.0,
+            A.ATTR_CAP_STABLE_PCT: stable_pct,
+            A.ATTR_CAP_DEPLETES_IN: depletes,
+        }
+
+    def attrs(self, variant: str = BASE) -> dict[int, float]:  # noqa: ARG002 - 桩
+        return dict(self._attrs)
+
+
+def test_diagnostics_evidence_never_emits_the_cap_sentinel() -> None:
+    """`-7 capDepletesIn = -1.0` 是「永不耗尽」的哨兵，**不是秒数**（D6 / T-22）。
+
+    证据必须走 `shared.depletes_in_s()`：不稳定（`-72 = 0`）但引擎给 `-1.0` 时给 `None`，
+    正数照实。旧实现会把 `-1.0` 原样放进 evidence，读起来像「负一秒」。
+    """
+    flags = {flag["id"]: flag for flag in D.evaluate(_SentinelStubContext(0.0, -1.0))}
+
+    assert "repaired_but_unstable" in flags, "前提：有修复速率且电容不稳定"
+    evidence = flags["repaired_but_unstable"]["evidence"]
+    assert evidence["cap_depletes_in_s"] is None, evidence
+    assert evidence["cap_stable_pct"] == 0.0
+
+    # 照实路径不被削掉：不稳定 + 正数 → 原样（过 units.fmt）
+    positive = {flag["id"]: flag for flag in D.evaluate(_SentinelStubContext(0.0, 38.4))}
+    assert positive["repaired_but_unstable"]["evidence"]["cap_depletes_in_s"] == 38.4
+
+
+@pytest.mark.parametrize("name", REAL_SAMPLES)
+def test_diagnostics_evidence_has_no_negative_seconds(real_ctx, name: str) -> None:
+    """真实样本的 `cap_depletes_in_s*` 证据只能是 `None` 或**正**秒数（回归闸门）。"""
+    for flag in D.evaluate(real_ctx(name)):
+        for key, value in flag["evidence"].items():
+            if "depletes" not in key:
+                continue
+            assert value is None or value > 0.0, f"{name}: {flag['id']}.{key} = {value!r}"

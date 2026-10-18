@@ -16,6 +16,10 @@
 7. T-13 补登 3 个常量（1272 `droneBandwidthUsed` / 56 `chargeRate` / 73 `duration`）
    并修正 `-3 derivedCycleTime` 的单位标注：三个正 ID 与索引库真名 + `unit_id` 对拍，
    `73` / `-3` 进缩放表（毫秒，`4800.0 → 4.8`），常量数 141 → 144、缩放 8 → 10。
+8. T-23 补登 2 个常量（1367 `maxSubSystems` / 281 `explosionDelay`）：两个正 ID 与索引库
+   真名 + `unit_id` + displayName 对拍（`Subsystem Slots` / `Maximum Flight Time`），
+   `281` 进缩放表（毫秒，`7000.0 → 7.0`），`1367` **不缩放**（槽位件数），
+   常量数 144 → 146、缩放 10 → 11、毫秒 8 → 9。
 
 测试规范：无网络、无磁盘 fixture；只用标准库 + pytest（开发规范 §1 / §5.1 T1）。
 """
@@ -156,6 +160,7 @@ def test_millisecond_attributes_match_the_measured_list() -> None:
         attributes.ATTR_SHIELD_RECHARGE_RATE,      # 479
         attributes.ATTR_CAPACITOR_RECHARGE_RATE,  # 55
         attributes.ATTR_STANCE_SWITCH_TIME,       # 1985
+        attributes.ATTR_EXPLOSION_DELAY,          # 281  （T-23：索引库核实 unit_id 101 Milliseconds）
     }
     got = {
         attr_id
@@ -163,7 +168,7 @@ def test_millisecond_attributes_match_the_measured_list() -> None:
         if math.isclose(scale, attributes.SCALE_MILLI, rel_tol=REL_TOL)
     }
     assert got == expected
-    assert len(got) == 8, f"毫秒项应为 8 个（6 → +73 → +(-3)），实际 {sorted(got)}"
+    assert len(got) == 9, f"毫秒项应为 9 个（8 → +281），实际 {sorted(got)}"
 
 
 def test_kilo_attributes_match_the_measured_list() -> None:
@@ -301,9 +306,9 @@ def test_audit_counts_are_self_consistent() -> None:
         [attr_id for attr_id in attributes.ATTRIBUTES if attribute_dict.is_scaled(attr_id)]
     )
     assert report["milli_count"] + report["kilo_count"] == report["scaled_count"]
-    assert report["milli_count"] == 8
+    assert report["milli_count"] == 9  # T-23：8 → 9（+281 explosionDelay）
     assert report["kilo_count"] == 2
-    assert report["scaled_count"] == 10
+    assert report["scaled_count"] == 11  # T-23：10 → 11
 
 
 def test_audit_reports_no_problems() -> None:
@@ -528,10 +533,15 @@ def test_audit_constant_count_grew_by_exactly_the_new_fighter_ids() -> None:
     report = attribute_dict.audit()
     assert report["consistent"] is True
     assert report["attribute_count"] == report["constant_count"]
-    assert report["constant_count"] == BASELINE_CONSTANT_COUNT + T07_ADDED_CONSTANT_COUNT + T13_ADDED_CONSTANT_COUNT
-    # T-07 补的全是"不缩放"的项；T-13 之后缩放表 = 8 毫秒 + 2 ×1000（增量见最后一节）
-    assert report["scaled_count"] == 10
-    assert report["milli_count"] == 8
+    assert report["constant_count"] == (
+        BASELINE_CONSTANT_COUNT
+        + T07_ADDED_CONSTANT_COUNT
+        + T13_ADDED_CONSTANT_COUNT
+        + T23_ADDED_CONSTANT_COUNT
+    )
+    # T-07 补的全是"不缩放"的项；T-13 / T-23 之后缩放表 = 9 毫秒 + 2 ×1000
+    assert report["scaled_count"] == 11
+    assert report["milli_count"] == 9
     assert report["kilo_count"] == 2
 
 
@@ -660,27 +670,134 @@ def test_t13_scale_table_grew_by_two_millisecond_entries() -> None:
         for attr_id, scale in attributes.SCALE_BY_ATTR.items()
         if math.isclose(scale, attributes.SCALE_MILLI, rel_tol=REL_TOL)
     }
-    # 6 → 8：新增 73 / -3
-    assert len(milli) == 8, f"毫秒项应为 8，实际 {len(milli)}：{sorted(milli)}"
+    # 6 → 8（T-13 新增 73 / -3）；T-23 再 +281 → 9
+    assert len(milli) == 9, f"毫秒项应为 9，实际 {len(milli)}：{sorted(milli)}"
     assert attributes.ATTR_MODULE_DURATION in milli
     assert attributes.ATTR_DERIVED_CYCLE_TIME in milli
     # 两个新项都必须在元数据表里（否则 audit 的 unknown_scale_values / 孤儿检查会漏）
     assert attributes.ATTR_MODULE_DURATION in attributes.ATTRIBUTES
     assert attributes.ATTR_DERIVED_CYCLE_TIME in attributes.ATTRIBUTES
-    assert len(attributes.SCALE_BY_ATTR) == 10
+    assert len(attributes.SCALE_BY_ATTR) == 11  # T-13 的 10 + T-23 的 281
 
 
 def test_t13_audit_counts_and_consistency() -> None:
     report = attribute_dict.audit()
     assert report["consistent"] is True
-    assert report["constant_count"] == T13_TOTAL_CONSTANT_COUNT == 144
+    assert report["constant_count"] == T13_TOTAL_CONSTANT_COUNT + T23_ADDED_CONSTANT_COUNT == 146
     assert report["attribute_count"] == report["constant_count"]
-    # 常量 +3（1272 / 56 / 73），缩放 +2（73 / -3）：8 → 10，毫秒 6 → 8
-    assert report["scaled_count"] == 10
-    assert report["milli_count"] == 8
+    # T-13 增量：常量 +3（1272 / 56 / 73）、缩放 +2（73 / -3）；T-23 再 +1 缩放（281）
+    assert report["scaled_count"] == 11
+    assert report["milli_count"] == 9
     assert report["kilo_count"] == 2
     assert report["duplicate_values"] == []
     assert report["orphan_constants"] == []
     assert report["orphan_rows"] == []
     assert report["unknown_scale_values"] == []
+
+
+# ---------------------------------------------------------------------------
+# 9. T-23：补 2 个属性常量（1367 `maxSubSystems` / 281 `explosionDelay`）
+#
+# 覆盖：
+# 1. 两个常量值唯一、为整数、都有元数据行；
+# 2. **正 ID 的真名 / `unit_id` 与 SDE 索引库逐字对拍**（1367 → maxSubSystems / None；
+#    281 → explosionDelay / 101 = Milliseconds），不符即失败（防串号）；
+# 3. `281` 必须进 `SCALE_BY_ATTR`（毫秒）：`to_physical(281, 7000.0) == 7.0`；
+#    1367 是件数，**不得**进缩放表（槽位总量不需要换算）；
+# 4. 语义锚：displayName 分别是 `Subsystem Slots` / `Maximum Flight Time`（索引库实测）。
+# ---------------------------------------------------------------------------
+
+#: T-23 补登的 2 个常量 ↔ ID（名称以 SDE 索引库为准，见下方对拍测试）。
+T23_CONSTANTS: dict[str, int] = {
+    "ATTR_MAX_SUBSYSTEMS": 1367,
+    "ATTR_EXPLOSION_DELAY": 281,
+}
+
+T23_ADDED_CONSTANT_COUNT = 2
+"""T-23 补进 1367 / 281 两个常量（146 = 144 + 2）。"""
+
+#: 正 ID 在索引库里的真名 / `unit_id` / displayName（2026-10-18 实测，SDE build 3607705）。
+T23_INDEX_FACTS: dict[int, tuple[str, int | None, str]] = {
+    1367: ("maxSubSystems", None, "Subsystem Slots"),
+    281: ("explosionDelay", 101, "Maximum Flight Time"),
+}
+
+
+def test_t23_constants_are_unique_ints_with_metadata_rows() -> None:
+    values = [getattr(attributes, name) for name in T23_CONSTANTS]
+    for name, expected in T23_CONSTANTS.items():
+        got = getattr(attributes, name)
+        assert got == expected, f"{name} 期望 {expected}，实际 {got}"
+        assert isinstance(got, int) and not isinstance(got, bool), f"{name} 不是整数"
+        assert got in attributes.ATTRIBUTES, f"{name}={got} 没有元数据行（audit 会报孤儿常量）"
+    assert len(set(values)) == T23_ADDED_CONSTANT_COUNT
+    all_values = [getattr(attributes, name) for name in CONSTANT_NAMES]
+    for value in values:
+        assert all_values.count(value) == 1, f"{value} 在常量表里出现了 {all_values.count(value)} 次"
+
+
+def test_t23_new_ids_match_the_index_names_and_units() -> None:
+    """1367 / 281 的**真名 / `unit_id` / displayName** 必须与索引库一致（防串号）。
+
+    索引库不可用（未 ingest / 路径缺失）时 `pytest.skip`，不把环境问题当失败。
+    """
+    from evefit.config.paths import db_path
+    from evefit.sde.index import Index
+
+    try:
+        index = Index.open(db_path())
+    except Exception as exc:  # noqa: BLE001 —— 索引缺失是环境问题，跳过而非失败
+        pytest.skip(f"SDE 索引库不可用，跳过 T-23 防串号对拍：{exc}")
+
+    try:
+        for attr_id, (expected_name, expected_unit_id, expected_display) in T23_INDEX_FACTS.items():
+            row = index.attribute(attr_id)
+            assert row is not None, f"{attr_id} 不在 SDE 属性表里（SDE 版本漂移？）"
+            assert row["name"] == expected_name, (
+                f"{attr_id} 在索引库里叫 {row['name']!r}，期望 {expected_name!r}（串号？）"
+            )
+            assert row["display_name"] == expected_display
+            # 常量表的 canon 名必须与索引库同名
+            assert attribute_dict.name_of(attr_id) == expected_name
+            assert attribute_dict.unit_id_of(attr_id) == expected_unit_id, (
+                f"{attr_id} 的 unit_id 期望 {expected_unit_id}，实际 {attribute_dict.unit_id_of(attr_id)}"
+            )
+    finally:
+        index.close()
+
+
+def test_t23_units_follow_the_physical_unit_convention() -> None:
+    # 1367 = 槽位件数（unit_id None，沿用 count 标签）；281 = 存储毫秒 → 物理秒
+    assert attribute_dict.unit_of(attributes.ATTR_MAX_SUBSYSTEMS) == "count"
+    assert attribute_dict.unit_of(attributes.ATTR_EXPLOSION_DELAY) == "s"
+    assert attributes.UNIT_LABELS[101] == "s"
+
+
+def test_t23_explosion_delay_is_milliseconds_and_subsystems_are_not_scaled() -> None:
+    # 281：Scourge Light Missile 实测 5000 ms → 5 s（导弹射程 = 37 × 该秒数）
+    got = attribute_dict.to_physical(attributes.ATTR_EXPLOSION_DELAY, 7000.0)
+    assert isinstance(got, float)
+    assert _close(got, 7.0), got
+    assert attribute_dict.is_scaled(attributes.ATTR_EXPLOSION_DELAY) is True
+    assert math.isclose(
+        attribute_dict.scale_of(attributes.ATTR_EXPLOSION_DELAY),
+        attributes.SCALE_MILLI,
+        rel_tol=REL_TOL,
+    )
+    # 1367 是槽位数（Loki = 5），**不得**缩放 —— 缩放会让槽位变成 0.005
+    assert attribute_dict.is_scaled(attributes.ATTR_MAX_SUBSYSTEMS) is False
+    assert _exactly(attribute_dict.to_physical(attributes.ATTR_MAX_SUBSYSTEMS, 5), 5.0)
+
+
+def test_t23_audit_counts_and_consistency() -> None:
+    report = attribute_dict.audit()
+    assert report["consistent"] is True
+    assert report["constant_count"] == report["attribute_count"] == 146
+    assert report["scaled_count"] == 11
+    assert report["milli_count"] == 9
+    assert report["kilo_count"] == 2
+    assert report["unit_label_mismatches"] == []
+    assert report["duplicate_values"] == []
+    assert report["orphan_constants"] == []
+    assert report["orphan_rows"] == []
 

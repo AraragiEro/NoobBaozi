@@ -736,3 +736,149 @@ def test_candidates_end_to_end_with_real_index(no_index: None) -> None:
     assert error["failed_at"] == "module_name"
     assert TYPO_MODULE_REAL in error["candidates"], error
     assert result["fit"] is None
+
+
+# =============================================================================
+# 十一、killmail 的「舱内物品」提示（T-22 / 字段规格 §0.6）
+# =============================================================================
+#
+# 背景（PROGRESS §3 第 137 条，实测）：`load_killmail` 只还原**槽位 flag** 上的物品，
+# f4（Loki）的 `Loki Defensive - Covert Reconfiguration`（type 45595）躺在
+# **flag 177（SubSystemBay 子系统舱）** 里 → 被丢掉了，而它是唯一能免掉 covert cloak
+# 那 10000 CPU 罚值的子系统。丢掉它之后 `resources` 把「真实不可能在线」的 cloak
+# 当实占用（`cpu.load 10572.1` vs 真实可飞 472.1）。
+#
+# 本任务只做**提示**：还原结果一个字不改（那件装备仍然不装）。
+
+ACCEPTANCE_FIXTURES = EVE_ROOT / "acceptance" / "fixtures"
+T3C_KILLMAIL_PATH = ACCEPTANCE_FIXTURES / "f4-non-hecate.json"
+MISSILE_KILLMAIL_PATH = ACCEPTANCE_FIXTURES / "f5-no-mwd.json"
+
+SUBSYSTEM_BAY_FLAG = 177
+"""`SubSystemBay` —— 子系统**存放**舱（不是已装槽位 125–128）。"""
+
+BAY_ITEM_TYPE_ID = 45595
+"""f4 舱内那件 `Loki Defensive - Covert Reconfiguration`。"""
+
+BAY_WARNING_PREFIX = "子系统舱内另有 1 件可用模块（flag 177 等不在已装槽位），其效果未计入："
+
+
+def _killmail_payload(path: Path) -> str:
+    """读验收 killmail 样本成**原始文本**（走 `normalize_fit` 的 JSON 分支）。"""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, list):
+        data = data[0]
+    data.pop("zkb", None)
+    return json.dumps(data, ensure_ascii=False)
+
+
+def _bay_flags(payload: str) -> list[int]:
+    """原始 killmail 里所有**非槽位 flag**（用于证明「提示的前提真的存在」）。"""
+    data = json.loads(payload)
+    flags = sorted(
+        {
+            item["flag"]
+            for item in data["victim"]["items"]
+            if isinstance(item.get("flag"), int) and item["flag"] not in normalize.SLOT_FLAGS
+        }
+    )
+    return flags
+
+
+def test_killmail_with_subsystem_bay_item_warns(no_index: None) -> None:
+    """f4：舱内有 1 件子系统模块 → warnings 必须显式说出来（不得静默丢弃）。"""
+    payload = _killmail_payload(T3C_KILLMAIL_PATH)
+
+    # 前提自检：这条样本真的有舱内物品，且落在这个用例声称的 flag 上
+    assert _bay_flags(payload) == [SUBSYSTEM_BAY_FLAG]
+
+    result = normalize_fit(payload)
+
+    assert result["errors"] == []
+    assert result["source_format"] == "killmail"
+    assert STATE_WARNING in result["warnings"]
+    bay_warnings = [
+        warning for warning in result["warnings"] if warning.startswith(BAY_WARNING_PREFIX)
+    ]
+    assert len(bay_warnings) == 1, result["warnings"]
+    # 没有索引时不编造名字：退回 `type_id N`
+    assert bay_warnings[0] == f"{BAY_WARNING_PREFIX}type_id {BAY_ITEM_TYPE_ID}"
+
+    # 反面：**还原结果一个字不改**（那件装备仍然不装，引擎行为没被这层碰过）
+    fitted_types = [item.get("type_id") for item in result["fit"]["items"]]
+    assert BAY_ITEM_TYPE_ID not in fitted_types
+    assert len(fitted_types) == len(adapter.load_killmail(json.loads(payload))["items"])
+
+
+def test_bay_warning_names_follow_injected_index() -> None:
+    """注入索引后提示里给**名字**（不猜）；索引不可用时退回 `type_id N`。"""
+
+    class _NamingIndex:
+        """鸭子类型索引：`get_type` 给名字、`search_types` 满足 `set_index()` 的接口检查。"""
+
+        def search_types(self, query: str, limit: int = 10) -> list[dict]:  # noqa: ARG002 - 桩
+            return []
+
+        def get_type(self, type_id: int) -> dict:
+            assert type_id == BAY_ITEM_TYPE_ID
+            return {"type_id": type_id, "name": "Loki Defensive - Covert Reconfiguration"}
+
+    class _BrokenIndex:
+        def search_types(self, query: str, limit: int = 10) -> list[dict]:  # noqa: ARG002 - 桩
+            raise RuntimeError("索引库已关闭")
+
+        def get_type(self, type_id: int) -> dict:  # noqa: ARG002 - 桩
+            raise RuntimeError("索引库已关闭")
+
+    payload = _killmail_payload(T3C_KILLMAIL_PATH)
+
+    normalize.clear_index()
+    normalize.set_index(_NamingIndex())
+    try:
+        named = normalize_fit(payload)
+    finally:
+        normalize.clear_index()
+
+    bay = [warning for warning in named["warnings"] if warning.startswith(BAY_WARNING_PREFIX)]
+    assert bay and bay[0].endswith("Loki Defensive - Covert Reconfiguration"), named["warnings"]
+
+    normalize.set_index(_BrokenIndex())
+    try:
+        broken = normalize_fit(payload)
+    finally:
+        normalize.clear_index()
+
+    # 名字查询失败不得让归一化失败，也不得编造名字
+    assert broken["errors"] == []
+    assert [w for w in broken["warnings"] if w.startswith(BAY_WARNING_PREFIX)] == [
+        f"{BAY_WARNING_PREFIX}type_id {BAY_ITEM_TYPE_ID}"
+    ]
+
+
+def test_killmail_without_bay_items_has_no_bay_warning(no_index: None) -> None:
+    """f5：所有物品都在已装槽位 → 不得凭空多一条「舱内」提示。"""
+    payload = _killmail_payload(MISSILE_KILLMAIL_PATH)
+    assert _bay_flags(payload) == []
+
+    result = normalize_fit(payload)
+
+    assert result["source_format"] == "killmail"
+    assert result["warnings"] == [STATE_WARNING]
+
+
+def test_bay_warning_is_not_a_parse_error(no_index: None) -> None:
+    """提示只是提示：`errors` 必须为空、`fit` 必须有值（不是失败路径）。"""
+    result = normalize_fit(_killmail_payload(T3C_KILLMAIL_PATH))
+
+    assert result["errors"] == []
+    assert result["fit"] is not None
+    assert result["fit"]["ship"]["type_id"] is not None
+
+
+def test_structured_fit_gets_no_bay_warning(no_index: None) -> None:
+    """structured fit 没有 killmail 的 flag 结构 → 不加舱内提示（口径只对 killmail 成立）。"""
+    fit = {"ship": {"type_id": HECATE}, "items": [{"type_id": DAMAGE_CONTROL_II}]}
+    result = normalize_fit(json.dumps(fit))
+
+    assert result["source_format"] == "structured"
+    assert all("舱内" not in warning for warning in result["warnings"])

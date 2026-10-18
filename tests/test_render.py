@@ -76,6 +76,15 @@ CONFIDENCE_OUTPUT_STATES = frozenset({"A", "C", "E"})
 HECATE = 35683
 """样本船（T3D，三模式）。"""
 
+CONFESSOR = 34317
+"""T-23 取样船（T3D，三模式）—— 验收报告里「modes 缺失」的那艘，用来钉住非 Hecate 情形。"""
+
+SVIPUL = 34562
+"""T-23 取样船（T3D，三模式），与 Confessor 同组。"""
+
+HECATE_MODE_TOKENS: tuple[str, ...] = ("Defense", "Propulsion", "Sharpshooter")
+"""T3D 三模式的短名（渲染层输出；完整名是 `<ShipName> <Mode> Mode`）。"""
+
 RIFTER = 587
 """非 T3D（无模式）对照船：用来证明「没有模式就不空转」。"""
 
@@ -385,8 +394,9 @@ def test_provenance_covers_string_leaves(overview: dict, ctx: ViewContext) -> No
 def test_provenance_marks_unmapped_and_unknowable_as_unknown(overview: dict) -> None:
     """没有映射 / 映射到不可知属性 → `unknown`（红线 N4：默认兜底，不猜、不拿默认值冒充）。"""
     firepower = overview["views"]["firepower"]
-    # 弹药四系伤害：弹药属性不在引擎 `calculate` 输出里 → 属性级 unknown（PROGRESS §3 61）
-    assert firepower["provenance"]["damage_split.em"] == "unknown"
+    # 已装填弹药的 114/116/117/118 会出现在装备级 attributes 里（发射器并入装填弹药属性）
+    # → 属性级 measured；旧结论「弹药属性不在 calculate 输出」对已装填弹药不成立
+    assert firepower["provenance"]["damage_split.em"] == "measured"
 
     # 未登记字段同样兜底 unknown（`tier_violations[].kind` 还没被 FIELD_SOURCES 收编）
     constraints = overview["views"]["constraints"]
@@ -773,6 +783,82 @@ def test_hecate_exposes_three_named_modes(overview: dict, index) -> None:
             assert isinstance(value, float) and value > 0, f"{entry['mode_name']}.{field}={value!r}"
             # 输出层按字段规格 round(..., 3)
             assert value == round(value, render.MODE_DIGITS), f"{field} 没取到 3 位"
+
+
+def test_confessor_and_svipul_also_expose_three_named_modes(
+    engine: Engine, index
+) -> None:
+    """**T-23 回归**：非 Hecate 的 T3D（Confessor 34317 / Svipul 34562）也必须给 3 条模式。
+
+    背景：验收报告曾报「f10/f11 的 `modes[*]` 缺失 = 6 条 high」，根因是**验收器**的模式名
+    归一化写死 `"Hecate "`（假缺陷，产品侧从来没断）。这条把产品侧的承诺钉死：
+    两艘船各 3 条、名字就是 `Defense / Propulsion / Sharpshooter`（船名前缀必须被剥掉）、
+    `mode_id` 与索引层一致，且**默认预算下 modes 不被降级清空**。
+    """
+    for ship_id, eft_text, expected in (
+        (
+            CONFESSOR,
+            "[Confessor, t3d modes]\nLight Neutron Blaster II, Void S\nDamage Control II\n1MN Afterburner II",
+            [(34319, "Defense"), (34321, "Sharpshooter"), (34323, "Propulsion")],
+        ),
+        (
+            SVIPUL,
+            "[Svipul, t3d modes]\n200mm AutoCannon II, EMP S\nDamage Control II\n1MN Afterburner II",
+            [(34564, "Defense"), (34566, "Propulsion"), (34570, "Sharpshooter")],
+        ),
+    ):
+        ship_name = eft_text[1 : eft_text.index(",")]
+        fit = engine.load_eft(eft_text)
+        fit["character"] = {"skills": derive_skill_tier(fit, engine, index=index)}
+        ship_ctx = ViewContext(
+            engine=engine,
+            index=index,
+            fit=fit,
+            assumptions=default_assumptions(fit, engine, index=index),
+            meta=engine.meta(),
+        )
+        rendered = render.render_overview(ship_ctx)
+        modes = rendered["modes"]
+
+        # 索引层能查到 → 渲染层就必须输出（不许中间某一层悄悄丢掉）
+        assert [(row["type_id"], row["name"]) for row in index.modes_for_ship(ship_id)] == [
+            (mode_id, f"{ship_name} {name} Mode") for mode_id, name in expected
+        ]
+        assert len(modes) == 3, f"{ship_name} 的 modes 长度 {len(modes)}：{modes}"
+        # id → 短名 的映射逐条对齐（串船 / 串模式都会在这里炸）
+        assert [(entry["mode_id"], entry["mode_name"]) for entry in modes] == expected
+        assert {entry["mode_name"] for entry in modes} == set(HECATE_MODE_TOKENS)
+        # 默认预算下 modes 不得被降级清空（清空会伪装成「这船没有模式」）
+        assert rendered["budget"]["degraded"] is False
+
+        by_name = {entry["mode_name"]: entry for entry in modes}
+        for entry in modes:
+            assert set(entry) == MODE_KEYS
+            for field in MODE_FIELDS:
+                assert isinstance(entry[field], float), f"{ship_name}.{entry['mode_name']}.{field}"
+        # 方向性（两条对所有 T3D 都成立）：Defense 更硬、Propulsion 更快对齐
+        assert by_name["Defense"]["ehp_mixed"] > by_name["Propulsion"]["ehp_mixed"]
+        assert by_name["Propulsion"]["align_time_s"] < by_name["Defense"]["align_time_s"]
+
+
+def test_mode_name_stripping_does_not_depend_on_a_hardcoded_ship() -> None:
+    """`_mode_name` 必须**只按传入的船名**剥前缀 —— 任何船名都得工作（T-23 根因钉住）。
+
+    验收器那次的假缺陷就是「写死 `Hecate `」：换一艘船名就判「缺模式」。产品侧这条
+    纯函数是同一类风险的另一半，所以用三个形状不同的船名钉住（含「船名是模式词前缀」
+    这种最容易剥错的形态）。
+    """
+    cases = (
+        ("Hecate Defense Mode", "Hecate", "Defense"),
+        ("Confessor Sharpshooter Mode", "Confessor", "Sharpshooter"),
+        ("Svipul Propulsion Mode", "Svipul", "Propulsion"),
+        ("Anhinga Primary Mode", "Anhinga", "Primary"),
+        ("X Xray Mode", "X", "Xray"),  # 船名是模式词的前缀：只能剥一次
+    )
+    for raw, ship_name, expected in cases:
+        assert render._mode_name(raw, ship_name) == expected, (raw, ship_name)
+    # 船名给不出来时只去 ` Mode` 后缀，**不改写词**
+    assert render._mode_name("Hecate Defense Mode", None) == "Hecate Defense"
 
 
 def test_mode_effects_point_in_the_expected_direction(mode_ctx: ViewContext) -> None:

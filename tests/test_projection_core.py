@@ -4,9 +4,11 @@
 
 1. `units.physical` 对 51 / 160 / 1985 的换算（2.226068 / 0.39167 / 10.0），
    并证明它**没有另写一套缩放表**（逐项与 `attribute_dict.to_physical` 对拍）；
-2. `provenance.tag` 三态抽样：263→measured、-43→assumed、-70→unknown、未知 ID→unknown；
-   并钉住**实测表**的三条结构性质：measured ∩ assumed 为空、负 ID 常量不得 measured、
-   `audit()` 必须自报 `derived_at` / `sample`；
+2. `provenance.tag` 三态抽样：12→measured、-43→assumed、-70→unknown、未知 ID→unknown；
+   并钉住**实测表**的结构性质：measured ∩ assumed 为空、负 ID 常量不得 measured、
+   `audit()` 必须自报 `derived_at` / `sample(s)`；
+2b. **T-14 多样本推导的护栏**：工具的技能档必须 `all4+min_required` 且技能数 > 100
+   （否则 `RuntimeError`），且 `1367/281/1272/-14/-55…-62` 这 12 个属性不得再落 `unknown`；
 3. **默认 unknown 红线（N4）**：随便造一个不存在的属性 ID，必须 `unknown`；
 4. `provenance.typed` 的 `TypedValue` 字段齐全、value 去噪；
 5. `ViewContext.attrs("base")` 的 key 是 int、value 是 float（且已是物理单位）；
@@ -202,11 +204,14 @@ def test_fmt_rejects_non_finite_and_bad_digits() -> None:
 def test_tag_three_states_sampling() -> None:
     """四类 ID 的三态抽样 —— 值来自 `tools/derive_provenance.py` 的实测表。
 
-    这四条是**实测结论**，不是拍脑袋：263 三轴不变（measured）；-43 随技能档与
-    伤害剖面变（assumed）；-70 恒 0 属不可知（unknown，手工覆盖）；表外 ID 默认
-    unknown。SDE / 引擎升级后重跑脚本，这条会随表一起变。
+    这四条是**实测结论**，不是拍脑袋：`12 lowSlots` 三轴不变（measured）；`-43 ehp`
+    随技能档与伤害剖面变（assumed）；`-70` 恒 0 属不可知（unknown，手工覆盖）；表外 ID
+    默认 unknown。SDE / 引擎 / 样本升级后重跑脚本，这条会随表一起变。
+
+    **T-14 更正**：`263 shieldCapacity` 现在是 `assumed` —— 技能档修好后（512 技能，
+    含 `Shield Management`），它随技能轴 780 → 650。旧表判 measured 是缺陷 A 的产物。
     """
-    assert P.tag(A.ATTR_SHIELD_CAPACITY) == "measured"  # 263
+    assert P.tag(A.ATTR_LOW_SLOTS) == "measured"  # 12
     assert P.tag(A.ATTR_EHP) == "assumed"  # -43
     assert P.tag(P.ATTR_MAX_TARGETS_UNVERIFIED) == "unknown"  # -70
     assert P.tag(UNKNOWN_ATTR_ID) == "unknown"
@@ -247,13 +252,21 @@ def test_no_negative_derived_id_is_measured() -> None:
 
 
 def test_audit_reports_derivation_provenance() -> None:
-    """`audit()` 必须自报「哪天、用哪份样本」跑出来的表（否则无法判断是否过期）。"""
+    """`audit()` 必须自报「哪天、用哪些样本」跑出来的表（否则无法判断是否过期）。"""
     audit = P.audit()
 
     assert isinstance(audit["derived_at"], str) and audit["derived_at"]
     assert audit["derived_at"] == P.DERIVED_AT
-    assert "kill.json" in audit["sample"] and "139246907" in audit["sample"]
+    # 样本口径：T-14 起至少 4 条（基础 / 子系统 / 导弹 / 战斗机+无人机），
+    # 第一条是 killmail 139246907 转存的 Hecate EFT。
+    assert "f1-hecate-killmail.eft" in audit["sample"]
+    assert "139246907" in audit["sample"]
     assert audit["sample"] == P.DERIVED_SAMPLE
+    assert len(audit["samples"]) >= 4, audit["samples"]
+    assert any("T3C" in label or "Loki" in label for label in audit["samples"])
+    assert any("Raven" in label for label in audit["samples"])
+    assert any("Nyx" in label for label in audit["samples"])
+    assert any("Templar" in label or "Gungnir" in label for label in audit["samples"])
     # 手工覆盖必须留痕：ID → 理由，且理由不得为空
     assert audit["overrides"], "至少 -70 maxTargets 那条覆盖必须在 audit 里可见"
     assert all(isinstance(why, str) and why.strip() for why in audit["overrides"].values())
@@ -276,6 +289,82 @@ def test_provenance_pins_measured_evidence() -> None:
         assert P.tag(attribute_id) == "assumed", f"{attribute_id} 实测随假设变化，不得标 measured"
 
 
+# ---- T-14 护栏：推导工具的技能档 + 多样本覆盖（防缺陷 A / B 复发）----
+
+
+def test_derive_provenance_rejects_degraded_skill_tier() -> None:
+    """缺陷 A 的护栏：技能档退化必须抛 `RuntimeError`，**不允许**静默跑在旧档上。
+
+    旧档 = `min_required_only`（`derive_skill_tier` 不传 `index` 时的静默退化，实测
+    19 个技能）；新档 = `all4+min_required`（512 个）。两种退化都要炸：档名不对、
+    档名对但技能数 `<= 100`。
+    """
+    from evefit.engine.assumptions import SKILL_TIER_NAME, SKILL_TIER_NAME_MIN_ONLY
+    from evefit.tools import derive_provenance as DP
+
+    assert DP.MIN_SKILL_TIER_SIZE == 100, "任务书口径：技能数必须 > 100"
+
+    old_tier = {type_id: 4 for type_id in range(1, 20)}  # 旧档实测 19 个技能
+    assert len(old_tier) < DP.MIN_SKILL_TIER_SIZE
+    with pytest.raises(RuntimeError, match="技能档退化"):
+        DP.require_full_skill_tier(SKILL_TIER_NAME_MIN_ONLY, old_tier)
+    with pytest.raises(RuntimeError, match="技能档退化"):
+        # 档名对但技能数只有 19 —— 同样必须炸（技能数才是「真的跑了新档」的证据）
+        DP.require_full_skill_tier(SKILL_TIER_NAME, old_tier)
+
+    DP.require_full_skill_tier(SKILL_TIER_NAME, {i: 4 for i in range(1, 513)})  # 正确档不抛
+
+
+def test_load_sample_passes_index_or_dies(engine: Engine, index) -> None:
+    """`load_sample()` 必须把 `index` 传进 `derive_skill_tier`；`index=None` 当场炸。
+
+    这一条正对着缺陷 A：签名 `derive_skill_tier(fit, engine, index=None)` 不传 `index`
+    **不报错**，只是静默退化。护栏要证明的是「退化在本工具里活不过加载」。
+    """
+    from evefit.tools import derive_provenance as DP
+
+    sample = DP.SAMPLES[0]
+    with pytest.raises(RuntimeError, match="技能档退化"):
+        DP.load_sample(engine, sample, None)  # 等价于「忘了传 index」
+
+    fit, skills, tier_name = DP.load_sample(engine, sample, index)
+    assert tier_name == "all4+min_required"
+    assert len(skills) > DP.MIN_SKILL_TIER_SIZE
+    assert fit["ship"]["type_id"] == 35683  # Hecate
+
+
+def test_derive_provenance_scans_four_samples_on_full_tier(engine: Engine, index) -> None:
+    """缺陷 B 的护栏：至少 4 条样本，每条都跑在 `all4+min_required` 档上。"""
+    from evefit.tools import derive_provenance as DP
+
+    derivation = DP.derive(engine, index)
+
+    assert len(derivation.runs) >= 4
+    assert [run.key for run in derivation.runs] == ["f1", "f4", "f15", "carrier"]
+    for run in derivation.runs:
+        assert run.skill_tier_name == "all4+min_required", run.key
+        assert run.skill_count > DP.MIN_SKILL_TIER_SIZE, run.key
+        assert run.baseline, f"{run.key} 没算出任何属性"
+
+
+def test_provenance_no_longer_unknown_for_former_sample_gaps() -> None:
+    """T-14 验收点：样本够了以后，这 12 个属性**不再**是 `unknown`。
+
+    `1367`（T3C 子系统槽）、`281`（导弹）、`1272`（无人机带宽）与战斗机/无人机族
+    （`-14/-55…-62`）过去被单样本困成 unknown —— 那是「样本不够」，不是不可知。
+    """
+    formerly_unknown = (1367, 281, 1272, -14, -58, -55, -56, -57, -59, -60, -61, -62)
+    still_unknown = [aid for aid in formerly_unknown if P.tag(aid) == "unknown"]
+    assert still_unknown == [], f"这些属性应当是 measured / assumed：{still_unknown}"
+    assert all(P.tag(aid) in {"measured", "assumed"} for aid in formerly_unknown)
+
+    # 手工覆盖保留：-70 maxTargets 仍是 unknown（理由写在 `_MANUAL_OVERRIDES`）
+    assert P.tag(-70) == "unknown"
+    assert -70 in P.audit()["overrides"]
+    # 两态互斥（红线：tag() 的结果不得取决于判断顺序）
+    assert P.MEASURED_ATTRS & P.ASSUMED_ATTRS == frozenset()
+
+
 
 def test_typed_returns_full_contract_fields() -> None:
     """I6：任何数值都带 provenance；字段集合与契约逐字一致。
@@ -292,13 +381,14 @@ def test_typed_returns_full_contract_fields() -> None:
 
 
 def test_typed_measured_and_unit_passthrough() -> None:
-    shield = P.typed(A.ATTR_SHIELD_CAPACITY, 650.0)
-    assert shield["provenance"] == "measured"
-    assert shield["unit"] == "hp"
-    assert math.isclose(shield["value"], 650.0, rel_tol=1e-12)
+    # `283 droneCapacity`：四个样本里出现且三轴不变 → measured，单位 m3 原样透传。
+    drone_capacity = P.typed(A.ATTR_DRONE_CAPACITY, 50.0)
+    assert drone_capacity["provenance"] == "measured"
+    assert drone_capacity["unit"] == "m3"
+    assert math.isclose(drone_capacity["value"], 50.0, rel_tol=1e-12)
 
     # 单位确实给不出时必须留空，不得猜一个（红线 N4 的同一条精神）。
-    # 1997 modeEmResistancePostDiv：本样本无 mode → 实测扫不到 → unknown，单位也留空。
+    # 1997 modeEmResistancePostDiv：四个样本都没有 mode → 实测扫不到 → unknown，单位也留空。
     unnamed_unit = P.typed(A.ATTR_MODE_EM_RESISTANCE_POST_DIV, 100.0)
     assert unnamed_unit["unit"] is None
     assert unnamed_unit["provenance"] == "unknown"

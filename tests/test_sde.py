@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from evefit.config import attributes as A
 from evefit.config.paths import db_path
 from evefit.sde.index import DEFAULT_SCALE, Index
 
@@ -34,6 +35,8 @@ from evefit.sde.index import DEFAULT_SCALE, Index
 MODE_GROUP_ID = 1306
 HECATE_TYPE_ID = 35683
 CONFESSOR_TYPE_ID = 34317
+#: Svipul（T3D）—— 与 Confessor 同组；T-23 起专门钉住「非 Hecate 的 T3D 也有模式」。
+SVIPUL_TYPE_ID = 34562
 #: Hecate 的三个模式 type（快照：与 SDE build 绑定，改了要按规范 §6.2 走 changelog）。
 HECATE_MODE_IDS = (35686, 35687, 35688)
 HECATE_MODE_TOKENS = ("Defense", "Propulsion", "Sharpshooter")
@@ -43,6 +46,9 @@ MODE_GROUP_MEMBER_COUNT = 18
 ATTR_SIGNATURE_RADIUS = 552
 #: 属性样本：79 scanSpeed（无 displayName → 回退 name；unit=Milliseconds）。
 ATTR_SCAN_SPEED = 79
+#: T-23 登记的两个常量（值必须与 `config/attributes.py` 一致；这里直接用常量，不写裸数字）。
+ATTR_MAX_SUBSYSTEMS = A.ATTR_MAX_SUBSYSTEMS  # 1367 maxSubSystems
+ATTR_EXPLOSION_DELAY = A.ATTR_EXPLOSION_DELAY  # 281 explosionDelay（存储毫秒）
 #: dogmaUnits 里 101 = Milliseconds（displayName 写的是 s）。
 UNIT_MILLISECONDS = 101
 
@@ -250,6 +256,54 @@ def test_modes_for_confessor_is_exactly_three_modes(ix: Index) -> None:
         assert any(token in name for name in names), (token, names)
 
 
+def test_modes_for_svipul_is_exactly_three_modes(ix: Index) -> None:
+    """Svipul（34562）与 Confessor 同组：**非 Hecate 的 T3D 也必须能查到 3 个模式**。
+
+    T-23 的取证：验收报过「f10/f11 的 modes 缺失 6 条 high」，根因是验收器的
+    模式名归一化写死 `"Hecate "`（假缺陷），产品侧从来没断。这条把产品侧钉死。
+    """
+    modes = ix.modes_for_ship(SVIPUL_TYPE_ID)
+    assert len(modes) == 3, [mode["name"] for mode in modes]
+    names = [mode["name"] for mode in modes]
+    for token in HECATE_MODE_TOKENS:
+        assert any(token in name for name in names), (token, names)
+    # 每条模式的完整名都必须以**本船名**开头（命名约定反解的产物，不是 Hecate 的残留）
+    assert all(name.startswith("Svipul ") for name in names), names
+
+
+def test_every_mode_ship_resolves_to_its_own_three_modes(ix: Index, raw_conn: sqlite3.Connection) -> None:
+    """`modes` 表里的 6 艘船，每艘的 3 个模式都必须**反解到它自己**（不串船）。
+
+    检查三件事，缺一即失败：
+    1. 每艘船恰好 3 条，且 `modes_for_ship()` 与表里的 `mode_type_id` 集合一致；
+    2. 每条模式的全名以该船名开头、以 ` Mode` 结尾（`_mode_name` 的剥名前提）；
+    3. 模式 type 全部躺在 group 1306 且 `published=false`（与 Hecate 同口径）。
+    """
+    rows = raw_conn.execute(
+        "SELECT m.ship_type_id, m.mode_type_id, t.name, t.group_id, t.published"
+        "  FROM modes m JOIN types t ON t.type_id = m.mode_type_id"
+        " ORDER BY m.ship_type_id, m.mode_type_id"
+    ).fetchall()
+    assert rows, "modes 表为空（索引库没写模式？）"
+
+    expected: dict[int, set[int]] = {}
+    for ship_type_id, mode_type_id, _name, _group_id, _published in rows:
+        expected.setdefault(ship_type_id, set()).add(mode_type_id)
+
+    assert len(expected) == 6, sorted(expected)  # Confessor/Svipul/Jackdaw/Hecate/Skua/Anhinga
+    for ship_type_id, mode_ids in expected.items():
+        ship = ix.get_type(ship_type_id)
+        assert ship is not None, f"模式所属船 {ship_type_id} 不在 types 表里"
+        assert len(mode_ids) == 3, f"{ship['name']} 的模式数不是 3：{sorted(mode_ids)}"
+        got = ix.modes_for_ship(ship_type_id)
+        assert {mode["type_id"] for mode in got} == mode_ids, ship["name"]
+        for mode in got:
+            assert mode["name"].startswith(f"{ship['name']} "), (ship["name"], mode["name"])
+            assert mode["name"].endswith(" Mode"), mode["name"]
+            assert mode["group_id"] == MODE_GROUP_ID
+            assert mode["published"] is False
+
+
 def test_modes_rows_use_type_row_contract(ix: Index) -> None:
     for mode in ix.modes_for_ship(HECATE_TYPE_ID):
         assert set(mode) == {
@@ -325,6 +379,30 @@ def test_attribute_falls_back_to_name_when_display_name_missing(ix: Index) -> No
 
 def test_attribute_missing_returns_none(ix: Index) -> None:
     assert ix.attribute(10**9) is None
+
+
+def test_t23_registered_attributes_match_the_index(ix: Index) -> None:
+    """T-23 登记的两个常量必须与索引库的**真名 / displayName / 单位 / 缩放**逐项一致。
+
+    - `1367 maxSubSystems`（displayName `Subsystem Slots`，ESI 无 unit_id → unit `None`），
+      槽位件数 ⇒ **不缩放**（`scale == DEFAULT_SCALE`）；
+    - `281 explosionDelay`（displayName `Maximum Flight Time`，unit `Milliseconds`）⇒
+      索引层的 `scale` 必须来自常量表（`SCALE_MILLI`），这是 `281 必须进 SCALE_BY_ATTR`
+      这条要求在索引层的可观测证据。
+    """
+    subsystems = ix.attribute(ATTR_MAX_SUBSYSTEMS)
+    assert subsystems is not None
+    assert subsystems["name"] == "maxSubSystems"
+    assert subsystems["display_name"] == "Subsystem Slots"
+    assert subsystems["unit"] is None  # ESI 未给单位；件数语义由常量表标 "count"
+    assert subsystems["scale"] == DEFAULT_SCALE  # 不缩放
+
+    delay = ix.attribute(ATTR_EXPLOSION_DELAY)
+    assert delay is not None
+    assert delay["name"] == "explosionDelay"
+    assert delay["display_name"] == "Maximum Flight Time"
+    assert delay["unit"] == "Milliseconds"  # 存储毫秒
+    assert delay["scale"] == SCALE_MILLI  # ← 常量表登记后的实测证据（未登记时恒 1.0）
 
 
 def test_units_and_attributes_join_is_consistent(raw_conn: sqlite3.Connection) -> None:

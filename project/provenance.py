@@ -1,9 +1,9 @@
 """三态 provenance 判定（L3）—— **表由实测生成，不得手改**。
 
-> 本表由 `evefit/tools/derive_provenance.py` 的**三轴敏感性实验**实测生成。
-> 不要手改；SDE / 引擎 / 样本变更后重跑该脚本，diff 报告（
-> `evefit/tools/provenance_report.json`）再审。生成日期与样本见 `DERIVED_AT` /
-> `DERIVED_SAMPLE`（`audit()` 会回显）。
+> 本表由 `evefit/tools/derive_provenance.py` 的**多样本 × 三轴敏感性实验**实测生成，
+> 并由该脚本**重写**这三张 frozenset。不要手改表内容；SDE / 引擎 / 样本变更后重跑
+> 该脚本（它会同时重写本模块并落证据 `tools/provenance_report.json`）。
+> 生成日期与样本见 `DERIVED_AT` / `DERIVED_SAMPLES`（`audit()` 会回显）。
 
 背景（红线 N3 / N4，字段规格 §0.2，第 16 轮裁决）：
 
@@ -14,22 +14,33 @@
 - 判定必须**默认 `unknown`**：新增属性、未复测属性、表外属性一律不得被误标成
   `measured`（红线 N4：不用默认值冒充 unknown）。
 
-三态的定义（由实测落成，见下三张表）
-------------------------------------
-- `measured`：在**本次计算**里不随三轴假设变化 —— 技能档、模块状态、伤害剖面
-  都不改变它。样本实测 65 个（壳/槽位/共振率/槽位余量/热参数/技能要求 …）。
-- `assumed`：依赖上述任一假设。三类来源，各自带实测证据：
-  1. **负 ID**（引擎 pass 4 派生值）：29 个，`-1` … `-72`。派生值天然建立在
-     技能/状态/剖面之上（例：`-43 ehp` 实测 8854.96 → 纯 EM 剖面 8549.55）；
-  2. **技能轴变化**：10 个，例 `9 hp` 2343.75 → 1953.12、`265 armorHP` 840 →
-     700、`48 cpuOutput` 276 → 230、`70 agility` 5.52 → 6、`51 speed` 2304.64 →
-     2761.24（都是「全4+补最低 → 全0」）；
-  3. **状态轴变化**：2 个，`4 mass` 1550000 → 1050000（MWD 推力的质量加成）、
-     `552 signatureRadius` 385 → 70（MWD 信号膨胀）。
-- `unknown`：本样本里**不存在**（引擎没输出）或引擎根本没算的属性 —— 35 个已登记
-  常量（战斗机族、模式后除数、弹药伤害、`-14/-46/-47` …：本样本没有战斗机 /
-  没有模式 / 弹药属货舱物品 / 没有对应模块），加上 `-70 maxTargets` 的手工覆盖。
-  **表外的一切 ID 仍然默认 `unknown`**（`tag()` 的默认分支）。
+两級模型（PROGRESS §3 第 60 条，T-14 落地）
+------------------------------------------
+1. **属性级基线类**（本模块）：该属性的值是否随技能 / 状态 / 伤害剖面变化 —— 由
+   **多样本**三轴实验得出。至少在一个样本里出现、且在出现它的每个样本上三轴都不变
+   才是 `measured`；任一轴在任一出现过它的样本上变化就是 `assumed`。
+2. **实例级覆盖**（投影层）：某次计算里这个属性**没有键** → 那次计算里它是未知。
+   这一级不在本表里，也不该由本表表达 —— 否则「本样本没有 T3C 子系统」会被误解成
+   「`1367` 这个属性不可知」。
+
+三态的定义
+----------
+- `measured`：在**出现过它的每个样本**上都不随三轴假设变化（技能档、模块状态、
+  伤害剖面都不改变它）。例：槽位/槽位余量/结构层与装甲层共振率/过载热参数/技能要求/
+  `chargeRate`/`reloadTime`/`volume`/`aoeVelocity`/T3C 的 `1367 maxSubSystems`。
+- `assumed`：依赖上述任一假设。四类来源：
+  1. **负 ID**（引擎 pass 4 派生值，`-1` … `-72`）—— 一律 `assumed`，即使全部样本里
+     都没有这个键（派生值天然建立在技能 / 状态 / 剖面之上）；
+  2. **技能轴变化**（全4+补最低 → 全0）：例 `9 hp`、`11 powerOutput`、`48 cpuOutput`、
+     `51 speed`、`263 shieldCapacity`（`Shield Management`）、`265 armorHP`；
+  3. **状态轴变化**（全active → 全online）：例 `4 mass`（MWD 推力质量加成）、
+     `552 signatureRadius`（MWD 信号膨胀）、**`271`–`274` 护盾共振率**（盾抗模块
+     `active` 才给抗性 —— T-14 加样本后才暴露，Hecate 样本没有盾抗，看不到）；
+  4. **伤害剖面轴变化**：只影响负 ID 派生值（分层 EHP、有效共振等）。
+- `unknown`：**全部样本里都不存在**（引擎没输出）或引擎根本没算的属性：`120
+  weaponRangeMultiplier`、`655 aoeFalloff`、`1288/1290 requiredSkill6(*Level)`、
+  模式后除数 `1997`–`2000` / `2030`（四个样本都没有 mode），以及 `-70 maxTargets`
+  的手工覆盖。**表外的一切 ID 仍然默认 `unknown`**（`tag()` 的默认分支）。
 
 三条硬规则（与实测表一起构成不变量）
 ------------------------------------
@@ -39,19 +50,21 @@
 3. **手工覆盖必须写理由**：见 `_MANUAL_OVERRIDES`，每条都要有实测依据。
 
 已知的**轴覆盖局限**（实测取证，不影响上面的表，但必须知道）
-------------------------------------------------------------
-任务书把技能轴钉死为「`derive_skill_tier`（全 4 + 补最低）→ 全 0」，而
-`derive_skill_tier` 只覆盖**模块要求**的 19 个技能。因此「技能轴不变」只能证明
-「**在这个技能档下**不变」。`derive_provenance.py` 的第五节用轴外技能抽样取证，
-已实测到的反例（当前仍按规则落在 `measured`）：
+-----------------------------------------------------------
+技能轴的 B 变体是「全部技能 0」，A 变体是 `all4+min_required`（实测 512 个技能）；
+技能**等级上限**只有 4/5 两档。`derive_provenance.py` 的第六节用抽样技能升一级做
+取证（例：`Power Grid Management` 4→5 → `11 powerOutput` 上升），把该局限写成可
+复跑的证词 —— 但**不据此改表**。要收紧，得**先改轴的定义**再重跑，不能在表里手工拍。
 
-- `Shield Management=5` → `263 shieldCapacity` 650 → 812.5
-- `Power Grid Management=5` → `11 powerOutput` 54 → 67.5
-- `Shield Operation=5` → `479 shieldRechargeRate` 800000 → 600000
-- `Signature Analysis=5` → `564 scanResolution` 510 → 637.5
-
-要收紧这几个，得**先改轴的定义**（例如 A 变体改成「全部技能 4 级」）再重跑，
-不能在表里手工拍。这是下一个任务的事，写在这里是为了后来者不再踩一次。
+T-14 修掉的两个**静默退化**（后来者不要再犯）
+--------------------------------------------
+1. **技能档必须传 `index`**：`derive_skill_tier(fit, engine)` 不传 `index` 会退化成
+   `min_required_only`（19 个技能）且**不报错**，技能轴整条失效（旧表把 `263
+   shieldCapacity` 等判成 measured 就是这个原因）。工具现在有硬护栏：档名必须是
+   `all4+min_required` 且技能数 > 100，否则 `RuntimeError`。
+2. **单样本推导会误判 `unknown`**：只有「全部样本都没有」才是 `unknown`；`1367`
+   （T3C）、`281`（导弹）、`1272`/`-14`/`-55…-62`（无人机/战斗机）都因样本不足被
+   困成 `unknown` 过。现在四个样本覆盖基础/子系统/导弹/战斗机+无人机。
 
 投影层**不得**自行改写这三态（红线 N9：默认假设必须来自 Assumption Engine）；
 本模块只负责把「哪些属性依赖假设」这件事本身钉死，不定义任何假设的具体取值。
@@ -69,8 +82,11 @@ Provenance = contracts.Provenance
 #: 跑实验的日期（`derive_provenance.py` 写出的日期，不是模块导入时间）。
 DERIVED_AT: str = "2026-10-18"
 
-#: 实验用的样本（三轴敏感性扫描的对象）。
-DERIVED_SAMPLE: str = "spike/kill.json (killmail 139246907, Hecate)"
+#: 实验用的样本（多样本 × 三轴敏感性扫描的对象，由脚本重写）。
+DERIVED_SAMPLE: str = "f1-hecate-killmail.eft (killmail 139246907, Hecate T3D) + f4-non-hecate.json (killmail 139254056, Loki T3C) + f15-battleship-raven.json (Raven, 弹道 + 导弹) + 构造样本：Nyx + 6×Templar II + 6×Gungnir II + 3×Cenobite II + 5×Hornet II"
+
+#: 样本清单（每个样本各自跑三轴，取并集判定；由脚本重写）。
+DERIVED_SAMPLES: tuple[str, ...] = ("f1-hecate-killmail.eft (killmail 139246907, Hecate T3D)", "f4-non-hecate.json (killmail 139254056, Loki T3C)", "f15-battleship-raven.json (Raven, 弹道 + 导弹)", "构造样本：Nyx + 6×Templar II + 6×Gungnir II + 3×Cenobite II + 5×Hornet II")
 
 #: `-70` = `maxTargets`（实测恒为 0，引擎没有在算它）。字段规格未登记、
 #: `config/attributes.py` 也还没有常量（该文件本轮为只读），故常量就近定义在这里，
@@ -78,149 +94,172 @@ DERIVED_SAMPLE: str = "spike/kill.json (killmail 139246907, Hecate)"
 ATTR_MAX_TARGETS_UNVERIFIED: int = -70
 
 # =============================================================================
-# 一、measured：三轴（技能 / 状态 / 伤害剖面）都不变，且在本样本里存在
+# 一、measured：至少在一个样本里出现，且在出现它的每个样本上三轴都不变
 #
-#    实测 65 个。生成方式见模块 docstring；按属性 ID 升序排列，便于与报告 diff。
+#    **内容由 `tools/derive_provenance.py` 生成**（按属性 ID 升序，便于与报告 diff）；
+#    计数见 `audit()` 与 `tools/provenance_report.json`。
 # =============================================================================
 MEASURED_ATTRS: frozenset[int] = frozenset(
     {
-        # ---- 资源与槽位 ----
-        _a.ATTR_POWER_OUTPUT,  # 11  powerOutput（见 docstring「轴覆盖局限」）
-        _a.ATTR_LOW_SLOTS,  # 12  lowSlots
-        _a.ATTR_MED_SLOTS,  # 13  medSlots
-        _a.ATTR_HI_SLOTS,  # 14  hiSlots
-        _a.ATTR_POWER_LOAD,  # 15  powerLoad
-        _a.ATTR_LAUNCHER_SLOTS_LEFT,  # 101 launcherSlotsLeft
-        _a.ATTR_TURRET_SLOTS_LEFT,  # 102 turretSlotsLeft
-        _a.ATTR_CALIBRATION_OUTPUT,  # 1132 upgradeCapacity
-        _a.ATTR_RIG_SLOTS,  # 1137 rigSlots
-        _a.ATTR_CALIBRATION_LOAD,  # 1152 upgradeLoad
-        _a.ATTR_UPGRADE_SLOTS_LEFT,  # 1154 upgradeSlotsLeft
-        _a.ATTR_DRONE_CAPACITY,  # 283 droneCapacity
-        _a.ATTR_DRONE_BANDWIDTH,  # 1271 droneBandwidth
-        # ---- 壳层容量与共振率（正 ID）----
-        _a.ATTR_SHIELD_CAPACITY,  # 263 shieldCapacity（见 docstring「轴覆盖局限」）
-        _a.ATTR_HULL_KINETIC_RESONANCE,  # 109 kineticDamageResonance
-        _a.ATTR_HULL_THERMAL_RESONANCE,  # 110 thermalDamageResonance
-        _a.ATTR_HULL_EXPLOSIVE_RESONANCE,  # 111 explosiveDamageResonance
-        _a.ATTR_HULL_EM_RESONANCE,  # 113 emDamageResonance
-        _a.ATTR_ARMOR_EM_RESONANCE,  # 267 armorEmDamageResonance
-        _a.ATTR_ARMOR_EXPLOSIVE_RESONANCE,  # 268 armorExplosiveDamageResonance
-        _a.ATTR_ARMOR_KINETIC_RESONANCE,  # 269 armorKineticDamageResonance
-        _a.ATTR_ARMOR_THERMAL_RESONANCE,  # 270 armorThermalDamageResonance
-        _a.ATTR_SHIELD_EM_RESONANCE,  # 271 shieldEmDamageResonance
-        _a.ATTR_SHIELD_EXPLOSIVE_RESONANCE,  # 272 shieldExplosiveDamageResonance
-        _a.ATTR_SHIELD_KINETIC_RESONANCE,  # 273 shieldKineticDamageResonance
-        _a.ATTR_SHIELD_THERMAL_RESONANCE,  # 274 shieldThermalDamageResonance
-        # ---- 容量 / 体积 / 扫描 / 跃迁 ----
-        _a.ATTR_CARGO_CAPACITY,  # 38  capacity（货舱）
-        _a.ATTR_VOLUME,  # 161 volume
-        _a.ATTR_CAPACITOR_CAPACITY,  # 482 capacitorCapacity
-        _a.ATTR_CAPACITOR_RECHARGE_RATE,  # 55 rechargeRate
-        _a.ATTR_SHIELD_RECHARGE_RATE,  # 479 shieldRechargeRate（见「轴覆盖局限」）
-        _a.ATTR_SCAN_RESOLUTION,  # 564 scanResolution（见「轴覆盖局限」）
-        _a.ATTR_SCAN_SPEED,  # 79  scanSpeed
-        _a.ATTR_MAX_LOCKED_TARGETS,  # 192 maxLockedTargets
-        _a.ATTR_MAX_TARGET_RANGE,  # 76  maxTargetRange
-        _a.ATTR_WARP_SPEED_MULTIPLIER,  # 600 warpSpeedMultiplier
-        # ---- 武器 / 弹药（静态输入项）----
-        _a.ATTR_MAX_RANGE,  # 54  maxRange
-        _a.ATTR_FALLOFF,  # 158 falloff
-        _a.ATTR_OPTIMAL_SIG_RADIUS,  # 620 optimalSigRadius
-        _a.ATTR_CHARGE_SIZE,  # 128 chargeSize
-        _a.ATTR_CHARGE_GROUP_1,  # 604 chargeGroup1
-        _a.ATTR_CHARGE_GROUP_2,  # 605 chargeGroup2
-        _a.ATTR_RELOAD_TIME,  # 1795 reloadTime
-        # ---- 过载热（静态输入项）----
-        _a.ATTR_HEAT_CAPACITY_HI,  # 1178 heatCapacityHi
-        _a.ATTR_HEAT_CAPACITY_MED,  # 1199 heatCapacityMed
-        _a.ATTR_HEAT_CAPACITY_LOW,  # 1200 heatCapacityLow
-        _a.ATTR_HEAT_DISSIPATION_RATE_HI,  # 1179 heatDissipationRateHi
-        _a.ATTR_HEAT_DISSIPATION_RATE_MED,  # 1196 heatDissipationRateMed
-        _a.ATTR_HEAT_DISSIPATION_RATE_LOW,  # 1198 heatDissipationRateLow
-        _a.ATTR_HEAT_ATTENUATION_HI,  # 1259 heatAttenuationHi
-        _a.ATTR_HEAT_ATTENUATION_MED,  # 1261 heatAttenuationMed
-        _a.ATTR_HEAT_ATTENUATION_LOW,  # 1262 heatAttenuationLow
-        _a.ATTR_HEAT_GENERATION_MULTIPLIER,  # 1224 heatGenerationMultiplier
-        _a.ATTR_OVERLOAD_DAMAGE_MODIFIER,  # 1210 overloadDamageModifier
-        # ---- 被扰抗性 ----
-        _a.ATTR_ENERGY_WARFARE_RESISTANCE,  # 2045 energyWarfareResistance
-        _a.ATTR_SENSOR_DAMPENER_RESISTANCE,  # 2112 sensorDampenerResistance
-        _a.ATTR_WEAPON_DISRUPTION_RESISTANCE,  # 2113 weaponDisruptionResistance
-        _a.ATTR_STASIS_WEBIFIER_RESISTANCE,  # 2115 stasisWebifierResistance
-        # ---- 技能要求（静态值）----
-        _a.ATTR_REQUIRED_SKILL_1,  # 182 requiredSkill1
-        _a.ATTR_REQUIRED_SKILL_2,  # 183 requiredSkill2
-        _a.ATTR_REQUIRED_SKILL_3,  # 184 requiredSkill3
-        _a.ATTR_REQUIRED_SKILL_1_LEVEL,  # 277 requiredSkill1Level
-        _a.ATTR_REQUIRED_SKILL_2_LEVEL,  # 278 requiredSkill2Level
-        _a.ATTR_REQUIRED_SKILL_3_LEVEL,  # 279 requiredSkill3Level
-        # ---- 模式 ----
-        _a.ATTR_STANCE_SWITCH_TIME,  # 1985 stanceSwitchTime
+        _a.ATTR_LOW_SLOTS,  # 12  lowSlots  （4/4 个样本出现，三轴不变）
+        _a.ATTR_MED_SLOTS,  # 13  medSlots  （4/4 个样本出现，三轴不变）
+        _a.ATTR_HI_SLOTS,  # 14  hiSlots  （4/4 个样本出现，三轴不变）
+        _a.ATTR_CHARGE_RATE,  # 56  chargeRate  （3/4 个样本出现，三轴不变）
+        _a.ATTR_LAUNCHER_SLOTS_LEFT,  # 101  launcherSlotsLeft  （4/4 个样本出现，三轴不变）
+        _a.ATTR_TURRET_SLOTS_LEFT,  # 102  turretSlotsLeft  （4/4 个样本出现，三轴不变）
+        _a.ATTR_HULL_KINETIC_RESONANCE,  # 109  kineticDamageResonance  （4/4 个样本出现，三轴不变）
+        _a.ATTR_HULL_THERMAL_RESONANCE,  # 110  thermalDamageResonance  （4/4 个样本出现，三轴不变）
+        _a.ATTR_HULL_EXPLOSIVE_RESONANCE,  # 111  explosiveDamageResonance  （4/4 个样本出现，三轴不变）
+        _a.ATTR_HULL_EM_RESONANCE,  # 113  emDamageResonance  （4/4 个样本出现，三轴不变）
+        _a.ATTR_EM_DAMAGE,  # 114  emDamage  （3/4 个样本出现，三轴不变）
+        _a.ATTR_EXPLOSIVE_DAMAGE,  # 116  explosiveDamage  （3/4 个样本出现，三轴不变）
+        _a.ATTR_KINETIC_DAMAGE,  # 117  kineticDamage  （3/4 个样本出现，三轴不变）
+        _a.ATTR_THERMAL_DAMAGE,  # 118  thermalDamage  （3/4 个样本出现，三轴不变）
+        _a.ATTR_CHARGE_SIZE,  # 128  chargeSize  （2/4 个样本出现，三轴不变）
+        _a.ATTR_VOLUME,  # 161  volume  （4/4 个样本出现，三轴不变）
+        _a.ATTR_REQUIRED_SKILL_1,  # 182  requiredSkill1  （4/4 个样本出现，三轴不变）
+        _a.ATTR_REQUIRED_SKILL_2,  # 183  requiredSkill2  （4/4 个样本出现，三轴不变）
+        _a.ATTR_REQUIRED_SKILL_3,  # 184  requiredSkill3  （3/4 个样本出现，三轴不变）
+        _a.ATTR_MAX_LOCKED_TARGETS,  # 192  maxLockedTargets  （4/4 个样本出现，三轴不变）
+        _a.ATTR_ARMOR_EM_RESONANCE,  # 267  armorEmDamageResonance  （4/4 个样本出现，三轴不变）
+        _a.ATTR_ARMOR_EXPLOSIVE_RESONANCE,  # 268  armorExplosiveDamageResonance  （4/4 个样本出现，三轴不变）
+        _a.ATTR_ARMOR_KINETIC_RESONANCE,  # 269  armorKineticDamageResonance  （4/4 个样本出现，三轴不变）
+        _a.ATTR_ARMOR_THERMAL_RESONANCE,  # 270  armorThermalDamageResonance  （4/4 个样本出现，三轴不变）
+        _a.ATTR_REQUIRED_SKILL_1_LEVEL,  # 277  requiredSkill1Level  （4/4 个样本出现，三轴不变）
+        _a.ATTR_REQUIRED_SKILL_2_LEVEL,  # 278  requiredSkill2Level  （4/4 个样本出现，三轴不变）
+        _a.ATTR_REQUIRED_SKILL_3_LEVEL,  # 279  requiredSkill3Level  （3/4 个样本出现，三轴不变）
+        _a.ATTR_DRONE_CAPACITY,  # 283  droneCapacity  （4/4 个样本出现，三轴不变）
+        _a.ATTR_WARP_SPEED_MULTIPLIER,  # 600  warpSpeedMultiplier  （4/4 个样本出现，三轴不变）
+        _a.ATTR_CHARGE_GROUP_1,  # 604  chargeGroup1  （3/4 个样本出现，三轴不变）
+        _a.ATTR_CHARGE_GROUP_2,  # 605  chargeGroup2  （3/4 个样本出现，三轴不变）
+        _a.ATTR_OPTIMAL_SIG_RADIUS,  # 620  optimalSigRadius  （3/4 个样本出现，三轴不变）
+        _a.ATTR_AOE_VELOCITY,  # 653  aoeVelocity  （2/4 个样本出现，三轴不变）
+        _a.ATTR_CALIBRATION_OUTPUT,  # 1132  upgradeCapacity  （4/4 个样本出现，三轴不变）
+        _a.ATTR_RIG_SLOTS,  # 1137  rigSlots  （4/4 个样本出现，三轴不变）
+        _a.ATTR_CALIBRATION_LOAD,  # 1152  upgradeLoad  （3/4 个样本出现，三轴不变）
+        _a.ATTR_UPGRADE_SLOTS_LEFT,  # 1154  upgradeSlotsLeft  （4/4 个样本出现，三轴不变）
+        _a.ATTR_HEAT_CAPACITY_HI,  # 1178  heatCapacityHi  （4/4 个样本出现，三轴不变）
+        _a.ATTR_HEAT_DISSIPATION_RATE_HI,  # 1179  heatDissipationRateHi  （4/4 个样本出现，三轴不变）
+        _a.ATTR_HEAT_DISSIPATION_RATE_MED,  # 1196  heatDissipationRateMed  （4/4 个样本出现，三轴不变）
+        _a.ATTR_HEAT_DISSIPATION_RATE_LOW,  # 1198  heatDissipationRateLow  （4/4 个样本出现，三轴不变）
+        _a.ATTR_HEAT_CAPACITY_MED,  # 1199  heatCapacityMed  （4/4 个样本出现，三轴不变）
+        _a.ATTR_HEAT_CAPACITY_LOW,  # 1200  heatCapacityLow  （4/4 个样本出现，三轴不变）
+        _a.ATTR_OVERLOAD_DAMAGE_MODIFIER,  # 1210  overloadDamageModifier  （1/4 个样本出现，三轴不变）
+        _a.ATTR_HEAT_GENERATION_MULTIPLIER,  # 1224  heatGenerationMultiplier  （4/4 个样本出现，三轴不变）
+        _a.ATTR_HEAT_ATTENUATION_HI,  # 1259  heatAttenuationHi  （4/4 个样本出现，三轴不变）
+        _a.ATTR_HEAT_ATTENUATION_MED,  # 1261  heatAttenuationMed  （4/4 个样本出现，三轴不变）
+        _a.ATTR_HEAT_ATTENUATION_LOW,  # 1262  heatAttenuationLow  （4/4 个样本出现，三轴不变）
+        _a.ATTR_DRONE_BANDWIDTH,  # 1271  droneBandwidth  （4/4 个样本出现，三轴不变）
+        _a.ATTR_DRONE_BANDWIDTH_USED,  # 1272  droneBandwidthUsed  （2/4 个样本出现，三轴不变）
+        _a.ATTR_REQUIRED_SKILL_4,  # 1285  requiredSkill4  （1/4 个样本出现，三轴不变）
+        _a.ATTR_REQUIRED_SKILL_4_LEVEL,  # 1286  requiredSkill4Level  （1/4 个样本出现，三轴不变）
+        _a.ATTR_REQUIRED_SKILL_5_LEVEL,  # 1287  requiredSkill5Level  （1/4 个样本出现，三轴不变）
+        _a.ATTR_REQUIRED_SKILL_5,  # 1289  requiredSkill5  （1/4 个样本出现，三轴不变）
+        _a.ATTR_MAX_SUBSYSTEMS,  # 1367  maxSubSystems  （1/4 个样本出现，三轴不变）
+        _a.ATTR_RELOAD_TIME,  # 1795  reloadTime  （3/4 个样本出现，三轴不变）
+        _a.ATTR_STANCE_SWITCH_TIME,  # 1985  stanceSwitchTime  （1/4 个样本出现，三轴不变）
+        _a.ATTR_ENERGY_WARFARE_RESISTANCE,  # 2045  energyWarfareResistance  （4/4 个样本出现，三轴不变）
+        _a.ATTR_SENSOR_DAMPENER_RESISTANCE,  # 2112  sensorDampenerResistance  （4/4 个样本出现，三轴不变）
+        _a.ATTR_WEAPON_DISRUPTION_RESISTANCE,  # 2113  weaponDisruptionResistance  （4/4 个样本出现，三轴不变）
+        _a.ATTR_STASIS_WEBIFIER_RESISTANCE,  # 2115  stasisWebifierResistance  （4/4 个样本出现，三轴不变）
+        _a.ATTR_FIGHTER_SQUADRON_MAX_SIZE,  # 2215  fighterSquadronMaxSize  （1/4 个样本出现，三轴不变）
+        _a.ATTR_FIGHTER_TUBES,  # 2216  fighterTubes  （1/4 个样本出现，三轴不变）
+        _a.ATTR_LIGHT_FIGHTER_SLOTS,  # 2217  fighterLightSlots  （1/4 个样本出现，三轴不变）
+        _a.ATTR_SUPPORT_FIGHTER_SLOTS,  # 2218  fighterSupportSlots  （1/4 个样本出现，三轴不变）
+        _a.ATTR_HEAVY_FIGHTER_SLOTS,  # 2219  fighterHeavySlots  （1/4 个样本出现，三轴不变）
     }
 )
 
 # =============================================================================
-# 二、assumed：依赖假设（技能档 / 状态 / 伤害剖面）
+# 二、assumed：依赖假设（负 ID / 技能档 / 状态 / 伤害剖面）
 #
-#    实测 41 个，按「命中哪条判定规则」分三组（规则顺序即归因优先级）：
-#    负 ID 29 / 技能轴 10 / 状态轴 2。每组的实测 A→B 值抄在行尾注释里。
+#    **内容由 `tools/derive_provenance.py` 生成**，按「命中哪条判定规则」分组
+#    （规则顺序即归因优先级）；行尾注释写「哪个样本 × 哪一轴」触发的。
 # =============================================================================
 ASSUMED_ATTRS: frozenset[int] = frozenset(
     {
-        # ---- 规则 2：负 ID（引擎 pass 4 派生；本样本里出现过，故 29 个而不是 33 个）----
-        _a.ATTR_ALIGN_TIME,  # -1  alignTime     技能 11.8611 → 12.8925；状态 → 8.03496
-        _a.ATTR_CAP_PEAK_RECHARGE,  # -2  capPeakRecharge
-        _a.ATTR_DERIVED_CYCLE_TIME,  # -3  derivedCycleTime  技能 2304.64 → 2761.24
-        _a.ATTR_CAP_PEAK_LOAD,  # -4  capPeakLoad   技能 22.1737 → 22.372；状态 → 0
-        _a.ATTR_CAP_DELTA_PEAK,  # -5  capDeltaPeak  技能 -17.1737 → -17.372
-        _a.ATTR_CAP_DELTA_PEAK_PCT,  # -6  capDeltaPeakPct
-        _a.ATTR_CAP_DEPLETES_IN,  # -7  capDepletesIn  技能 28.8 → 25；状态 → -1
-        _a.ATTR_CPU_FREE,  # -9  cpuFree      技能 -11 → -75
-        _a.ATTR_POWER_FREE,  # -10 powerFree
-        _a.ATTR_DAMAGE_ALPHA,  # -11 damageAlpha   技能 842.56 → 624.119；状态 → 0
-        _a.ATTR_DAMAGE_DPS,  # -12 damageDps     技能 365.594 → 226.029；状态 → 0
-        _a.ATTR_DAMAGE_DPS_WITH_RELOAD,  # -13 damageDpsWithReload
-        _a.ATTR_DAMAGE_VOLLEY,  # -21 damageVolley（装备级）技能 168.512 → 124.824
-        _a.ATTR_ARMOR_EFFECTIVE_RESONANCE,  # -25 剖面 0.470156 → 0.425
-        _a.ATTR_HULL_EFFECTIVE_RESONANCE,  # -26
-        _a.ATTR_SHIELD_EFFECTIVE_RESONANCE,  # -27 剖面 0.525 → 0.875
-        _a.ATTR_EHP_ARMOR,  # -28 ehpArmor      技能 1786.64 → 1488.87；剖面 → 1976.47
-        _a.ATTR_EHP_HULL,  # -29 ehpHull      技能 5830.22 → 4858.52
-        _a.ATTR_EHP_SHIELD,  # -30 ehpShield     剖面 1238.1 → 742.857
-        _a.ATTR_EHP,  # -43 ehp           技能 8854.96 → 7585.48；剖面 → 8549.55
-        _a.ATTR_VELOCITY_BOOST,  # -44 velocityBoost  状态 488.71 → 0
-        _a.ATTR_ARMOR_REPAIR_RATE,  # -45 armorRepairRate
-        _a.ATTR_ARMOR_EFFECTIVE_REPAIR_RATE,  # -48  技能 69.126 → 55.3008；状态 → 0
-        _a.ATTR_HULL_EFFECTIVE_REPAIR_RATE,  # -49 hullEffectiveRepairRate
-        _a.ATTR_SHIELD_EFFECTIVE_BOOST_RATE,  # -50 shieldEffectiveBoostRate
-        _a.ATTR_PASSIVE_SHIELD_RECHARGE,  # -51
-        _a.ATTR_PASSIVE_SHIELD_EFFECTIVE_RECHARGE,  # -52 剖面 3.86905 → 2.32143
-        _a.ATTR_CALIBRATION_FREE,  # -69 calibrationFree
-        _a.ATTR_CAP_STABLE_PCT,  # -72 capStablePct   状态 0 → 100
-        # ---- 规则 3：技能轴变化（10 个）----
-        _a.ATTR_HULL_HP,  # 9   hp           2343.75 → 1953.12（DC II 的结构层加成吃技能）
-        _a.ATTR_MAX_VELOCITY,  # 37  maxVelocity  1271.61 → 1059.68
-        _a.ATTR_CPU_OUTPUT,  # 48  cpuOutput    276 → 230（CPU Management）
-        _a.ATTR_CPU_LOAD,  # 49  cpuLoad      287 → 305
-        _a.ATTR_CYCLE_TIME,  # 51  speed        2304.64 → 2761.24（射速技能）
-        _a.ATTR_DAMAGE_MULTIPLIER,  # 64 damageMultiplier  9.46697 → 7.01257
-        _a.ATTR_AGILITY,  # 70  agility      5.52 → 6
-        _a.ATTR_TRACKING_SPEED,  # 160 trackingSpeed  444.366 → 306.214
-        _a.ATTR_ARMOR_HP,  # 265 armorHP      840 → 700（Hull Upgrades）
-        _a.ATTR_HEAT_DAMAGE,  # 1211 heatDamage   装备级 0.64 → 0.76、4 → 4.75
-        # ---- 规则 4：状态轴变化（2 个）----
-        _a.ATTR_MASS,  # 4   mass             1550000 → 1050000（MWD active 的质量加成）
-        _a.ATTR_SIGNATURE_RADIUS,  # 552 signatureRadius  385 → 70（MWD 信号膨胀）
+        # ---- 规则 2 · 负 ID（引擎 pass 4 派生）：40 个 ----
+        _a.ATTR_CAP_STABLE_PCT,  # -72  capStablePct  ← 技能轴: f4；状态轴: f1/f4/f15
+        _a.ATTR_CALIBRATION_FREE,  # -69  calibrationFree  ← 负 ID：pass 4 派生值，一律 assumed；4/4 个样本里出现
+        _a.ATTR_FIGHTER_TUBES_USED,  # -62  fighterTubesUsed  ← 负 ID：pass 4 派生值，一律 assumed；1/4 个样本里出现
+        _a.ATTR_SUPPORT_FIGHTER_SLOTS_USED,  # -61  fighterSupportSlotsUsed  ← 负 ID：pass 4 派生值，一律 assumed；1/4 个样本里出现
+        _a.ATTR_LIGHT_FIGHTER_SLOTS_USED,  # -60  fighterLightSlotsUsed  ← 负 ID：pass 4 派生值，一律 assumed；1/4 个样本里出现
+        _a.ATTR_HEAVY_FIGHTER_SLOTS_USED,  # -59  fighterHeavySlotsUsed  ← 负 ID：pass 4 派生值，一律 assumed；1/4 个样本里出现
+        _a.ATTR_FIGHTER_DPS,  # -58  fighterDps  ← 技能轴: carrier
+        _a.ATTR_FIGHTER_BAY_USED,  # -57  fighterCapacityLoad  ← 负 ID：pass 4 派生值，一律 assumed；1/4 个样本里出现
+        _a.ATTR_FIGHTER_ABILITY_MISSILES_DPS,  # -56  fighterAbilityMissilesDamagePerSecond  ← 技能轴: carrier
+        _a.ATTR_FIGHTER_ABILITY_ATTACK_DPS,  # -55  fighterAbilityAttackMissileDamagePerSecond  ← 技能轴: carrier
+        _a.ATTR_PASSIVE_SHIELD_EFFECTIVE_RECHARGE,  # -52  passiveShieldEffectiveRecharge  ← 技能轴: f1/f4/f15/carrier；状态轴: f4/f15；剖面轴: f1/f4/f15/carrier
+        _a.ATTR_PASSIVE_SHIELD_RECHARGE,  # -51  passiveShieldRecharge  ← 技能轴: f1/f4/f15/carrier
+        _a.ATTR_SHIELD_EFFECTIVE_BOOST_RATE,  # -50  shieldEffectiveBoostRate  ← 技能轴: f4；状态轴: f4/f15；剖面轴: f4/f15
+        _a.ATTR_HULL_EFFECTIVE_REPAIR_RATE,  # -49  hullEffectiveRepairRate  ← 负 ID：pass 4 派生值，一律 assumed；4/4 个样本里出现
+        _a.ATTR_ARMOR_EFFECTIVE_REPAIR_RATE,  # -48  armorEffectiveRepairRate  ← 技能轴: f1；状态轴: f1；剖面轴: f1
+        _a.ATTR_SHIELD_BOOST_RATE,  # -47  shieldBoostRate  ← 技能轴: f4；状态轴: f4/f15
+        _a.ATTR_HULL_REPAIR_RATE,  # -46  hullRepairRate  ← 负 ID：pass 4 派生值，一律 assumed；0/4 个样本里出现
+        _a.ATTR_ARMOR_REPAIR_RATE,  # -45  armorRepairRate  ← 技能轴: f1；状态轴: f1
+        _a.ATTR_VELOCITY_BOOST,  # -44  velocityBoost  ← 技能轴: f1；状态轴: f1
+        _a.ATTR_EHP,  # -43  ehp  ← 技能轴: f1/f4/f15/carrier；状态轴: f4/f15；剖面轴: f1/f4/f15/carrier
+        _a.ATTR_EHP_SHIELD,  # -30  ehpShield  ← 技能轴: f1/f4/f15/carrier；状态轴: f4/f15；剖面轴: f1/f4/f15/carrier
+        _a.ATTR_EHP_HULL,  # -29  ehpHull  ← 技能轴: f1/f4/f15/carrier
+        _a.ATTR_EHP_ARMOR,  # -28  ehpArmor  ← 技能轴: f1/f4/f15/carrier；剖面轴: f1/f4/f15/carrier
+        _a.ATTR_SHIELD_EFFECTIVE_RESONANCE,  # -27  shieldEffectiveResonance  ← 状态轴: f4/f15；剖面轴: f1/f4/f15/carrier
+        _a.ATTR_HULL_EFFECTIVE_RESONANCE,  # -26  hullEffectiveResonance  ← 负 ID：pass 4 派生值，一律 assumed；4/4 个样本里出现
+        _a.ATTR_ARMOR_EFFECTIVE_RESONANCE,  # -25  armorEffectiveResonance  ← 剖面轴: f1/f4/f15/carrier
+        _a.ATTR_DAMAGE_VOLLEY,  # -21  damageVolley  ← 技能轴: f1/f4/f15/carrier
+        _a.ATTR_DRONE_DPS,  # -14  droneDps  ← 技能轴: f4/carrier
+        _a.ATTR_DAMAGE_DPS_WITH_RELOAD,  # -13  damageDpsWithReload  ← 技能轴: f1/f4/f15/carrier；状态轴: f1/f15
+        _a.ATTR_DAMAGE_DPS,  # -12  damageDps  ← 技能轴: f1/f4/f15/carrier；状态轴: f1/f15
+        _a.ATTR_DAMAGE_ALPHA,  # -11  damageAlpha  ← 技能轴: f1/f15；状态轴: f1/f15
+        _a.ATTR_POWER_FREE,  # -10  powerFree  ← 技能轴: f1/f4/f15/carrier
+        _a.ATTR_CPU_FREE,  # -9  cpuFree  ← 技能轴: f1/f4/f15/carrier
+        _a.ATTR_CAP_DEPLETES_IN,  # -7  capDepletesIn  ← 技能轴: f1/f4/f15；状态轴: f1/f15
+        _a.ATTR_CAP_DELTA_PEAK_PCT,  # -6  capDeltaPeakPct  ← 技能轴: f1/f4/f15；状态轴: f1/f4/f15
+        _a.ATTR_CAP_DELTA_PEAK,  # -5  capDeltaPeak  ← 技能轴: f1/f4/f15/carrier；状态轴: f1/f4/f15
+        _a.ATTR_CAP_PEAK_LOAD,  # -4  capPeakLoad  ← 技能轴: f1/f4/f15；状态轴: f1/f4/f15
+        _a.ATTR_DERIVED_CYCLE_TIME,  # -3  derivedCycleTime  ← 技能轴: f1/f15；状态轴: f1/f4/f15
+        _a.ATTR_CAP_PEAK_RECHARGE,  # -2  capPeakRecharge  ← 技能轴: f1/f4/f15/carrier
+        _a.ATTR_ALIGN_TIME,  # -1  alignTime  ← 技能轴: f1/f4/f15/carrier；状态轴: f1
+        # ---- 规则 3 · 技能轴变化：26 个 ----
+        _a.ATTR_HULL_HP,  # 9  hp  ← 技能轴: f1/f4/f15/carrier
+        _a.ATTR_POWER_OUTPUT,  # 11  powerOutput  ← 技能轴: f1/f4/f15/carrier
+        _a.ATTR_POWER_LOAD,  # 15  powerLoad  ← 技能轴: f1/f4/f15
+        _a.ATTR_MAX_VELOCITY,  # 37  maxVelocity  ← 技能轴: f1/f4/f15/carrier；状态轴: f1
+        _a.ATTR_CARGO_CAPACITY,  # 38  capacity  ← 技能轴: f1
+        _a.ATTR_CPU_OUTPUT,  # 48  cpuOutput  ← 技能轴: f1/f4/f15/carrier
+        _a.ATTR_CPU_LOAD,  # 49  cpuLoad  ← 技能轴: f1/f4/f15
+        _a.ATTR_CYCLE_TIME,  # 51  speed  ← 技能轴: f1/f4/f15
+        _a.ATTR_MAX_RANGE,  # 54  maxRange  ← 技能轴: f1/f4/carrier
+        _a.ATTR_CAPACITOR_RECHARGE_RATE,  # 55  rechargeRate  ← 技能轴: f1/f4/f15/carrier
+        _a.ATTR_DAMAGE_MULTIPLIER,  # 64  damageMultiplier  ← 技能轴: f1/f4/carrier
+        _a.ATTR_AGILITY,  # 70  agility  ← 技能轴: f1/f4/f15/carrier
+        _a.ATTR_MODULE_DURATION,  # 73  duration  ← 技能轴: f1/f4/f15
+        _a.ATTR_MAX_TARGET_RANGE,  # 76  maxTargetRange  ← 技能轴: f1/f4/f15/carrier
+        _a.ATTR_SCAN_SPEED,  # 79  scanSpeed  ← 技能轴: f1/f15/carrier
+        _a.ATTR_FALLOFF,  # 158  falloff  ← 技能轴: f1
+        _a.ATTR_TRACKING_SPEED,  # 160  trackingSpeed  ← 技能轴: f1
+        _a.ATTR_SHIELD_CAPACITY,  # 263  shieldCapacity  ← 技能轴: f1/f4/f15/carrier
+        _a.ATTR_ARMOR_HP,  # 265  armorHP  ← 技能轴: f1/f4/f15/carrier
+        _a.ATTR_EXPLOSION_DELAY,  # 281  explosionDelay  ← 技能轴: f4
+        _a.ATTR_SHIELD_RECHARGE_RATE,  # 479  shieldRechargeRate  ← 技能轴: f1/f4/f15/carrier
+        _a.ATTR_CAPACITOR_CAPACITY,  # 482  capacitorCapacity  ← 技能轴: f1/f4/f15/carrier
+        _a.ATTR_SIGNATURE_RADIUS,  # 552  signatureRadius  ← 技能轴: f15；状态轴: f1/f15
+        _a.ATTR_SCAN_RESOLUTION,  # 564  scanResolution  ← 技能轴: f1/f4/f15/carrier
+        _a.ATTR_AOE_CLOUD_SIZE,  # 654  aoeCloudSize  ← 技能轴: f4
+        _a.ATTR_HEAT_DAMAGE,  # 1211  heatDamage  ← 技能轴: f1/f4/f15/carrier
+        # ---- 规则 4 · 状态轴变化：5 个 ----
+        _a.ATTR_MASS,  # 4  mass  ← 状态轴: f1
+        _a.ATTR_SHIELD_EM_RESONANCE,  # 271  shieldEmDamageResonance  ← 状态轴: f4/f15
+        _a.ATTR_SHIELD_EXPLOSIVE_RESONANCE,  # 272  shieldExplosiveDamageResonance  ← 状态轴: f4/f15
+        _a.ATTR_SHIELD_KINETIC_RESONANCE,  # 273  shieldKineticDamageResonance  ← 状态轴: f4/f15
+        _a.ATTR_SHIELD_THERMAL_RESONANCE,  # 274  shieldThermalDamageResonance  ← 状态轴: f4/f15
     }
 )
 
 # =============================================================================
-# 三、unknown：本样本里不存在 / 引擎没算（**默认分支也在这里**）
+# 三、unknown：**全部样本**里都不存在 / 引擎没算（**默认分支也在这里**）
 #
-#    下面 35 个登记常量是「实测扫不到」的：无战斗机（-55…-62）、无模式
-#    （1997–2000 / 2030）、弹药属货舱物品（114–118）、没有对应模块
-#    （-14 / -46 / -47）…… 它们**没有**被复测，按红线 N4 一律不得标 measured。
+#    **内容由 `tools/derive_provenance.py` 生成**。注意「某个样本里没有」**不再**
+#    等于 unknown（T-14 修掉的单样本缺陷）—— 只有四个样本全都没有才算。
 # =============================================================================
 
 #: 手工覆盖：唯一一条。`-70 maxTargets` 实测三轴都恒为 0 —— 那是「引擎没在算」，
@@ -233,48 +272,16 @@ _MANUAL_OVERRIDES: dict[int, str] = {
 }
 
 UNKNOWN_ATTRS: frozenset[int] = frozenset(
-    set(_MANUAL_OVERRIDES)
-    | {
-        # ---- 战斗机族（本样本无战斗机 → 引擎不输出）----
-        _a.ATTR_FIGHTER_ABILITY_ATTACK_DPS,  # -55
-        _a.ATTR_FIGHTER_ABILITY_MISSILES_DPS,  # -56
-        _a.ATTR_FIGHTER_BAY_USED,  # -57
-        _a.ATTR_FIGHTER_DPS,  # -58（T-06 在航母上实测过；本样本没有，故不得标）
-        _a.ATTR_HEAVY_FIGHTER_SLOTS_USED,  # -59
-        _a.ATTR_LIGHT_FIGHTER_SLOTS_USED,  # -60
-        _a.ATTR_SUPPORT_FIGHTER_SLOTS_USED,  # -61
-        _a.ATTR_FIGHTER_TUBES_USED,  # -62
-        _a.ATTR_FIGHTER_SQUADRON_MAX_SIZE,  # 2215
-        _a.ATTR_FIGHTER_TUBES,  # 2216
-        _a.ATTR_LIGHT_FIGHTER_SLOTS,  # 2217
-        _a.ATTR_SUPPORT_FIGHTER_SLOTS,  # 2218
-        _a.ATTR_HEAVY_FIGHTER_SLOTS,  # 2219
-        # ---- 无对应模块 → 引擎不输出该派生值 ----
-        _a.ATTR_DRONE_DPS,  # -14（本样本无无人机）
-        _a.ATTR_HULL_REPAIR_RATE,  # -46（无结构修复）
-        _a.ATTR_SHIELD_BOOST_RATE,  # -47（无盾修）
-        # ---- 弹药是货舱物品，其属性不经 `calculate` 输出 ----
-        _a.ATTR_EM_DAMAGE,  # 114
-        _a.ATTR_EXPLOSIVE_DAMAGE,  # 116
-        _a.ATTR_KINETIC_DAMAGE,  # 117
-        _a.ATTR_THERMAL_DAMAGE,  # 118
-        _a.ATTR_WEAPON_RANGE_MULTIPLIER,  # 120
-        _a.ATTR_AOE_VELOCITY,  # 653
-        _a.ATTR_AOE_CLOUD_SIZE,  # 654
-        _a.ATTR_AOE_FALLOFF,  # 655
-        # ---- requiredSkill4..6（本样本的模块只用到 1..3）----
-        _a.ATTR_REQUIRED_SKILL_4,  # 1285
-        _a.ATTR_REQUIRED_SKILL_5,  # 1289
-        _a.ATTR_REQUIRED_SKILL_6,  # 1290
-        _a.ATTR_REQUIRED_SKILL_4_LEVEL,  # 1286
-        _a.ATTR_REQUIRED_SKILL_5_LEVEL,  # 1287
-        _a.ATTR_REQUIRED_SKILL_6_LEVEL,  # 1288
-        # ---- 模式后除数（本样本无 mode）----
-        _a.ATTR_MODE_EM_RESISTANCE_POST_DIV,  # 1997
-        _a.ATTR_MODE_EXPLOSIVE_RESISTANCE_POST_DIV,  # 1998
-        _a.ATTR_MODE_THERMIC_RESISTANCE_POST_DIV,  # 1999
-        _a.ATTR_MODE_KINETIC_RESISTANCE_POST_DIV,  # 2000
-        _a.ATTR_MODE_ARMOR_REP_DURATION_POST_DIV,  # 2030
+    set(_MANUAL_OVERRIDES) | {
+        _a.ATTR_WEAPON_RANGE_MULTIPLIER,  # 120  weaponRangeMultiplier  （4 个样本里都没有这个键）
+        _a.ATTR_AOE_FALLOFF,  # 655  aoeFalloff  （4 个样本里都没有这个键）
+        _a.ATTR_REQUIRED_SKILL_6_LEVEL,  # 1288  requiredSkill6Level  （4 个样本里都没有这个键）
+        _a.ATTR_REQUIRED_SKILL_6,  # 1290  requiredSkill6  （4 个样本里都没有这个键）
+        _a.ATTR_MODE_EM_RESISTANCE_POST_DIV,  # 1997  modeEmResistancePostDiv  （4 个样本里都没有这个键）
+        _a.ATTR_MODE_EXPLOSIVE_RESISTANCE_POST_DIV,  # 1998  modeExplosiveResistancePostDiv  （4 个样本里都没有这个键）
+        _a.ATTR_MODE_THERMIC_RESISTANCE_POST_DIV,  # 1999  modeThermicResistancePostDiv  （4 个样本里都没有这个键）
+        _a.ATTR_MODE_KINETIC_RESISTANCE_POST_DIV,  # 2000  modeKineticResistancePostDiv  （4 个样本里都没有这个键）
+        _a.ATTR_MODE_ARMOR_REP_DURATION_POST_DIV,  # 2030  modeArmorRepDurationPostDiv  （4 个样本里都没有这个键）
     }
 )
 
@@ -333,7 +340,7 @@ def audit() -> dict:
 
     返回：
     - `measured` / `assumed` / `unknown`：各类 ID 个数（`unknown` 含手工覆盖项）；
-    - `derived_at` / `sample`：这张表是哪天、用哪份样本跑出来的（可复跑性）；
+    - `derived_at` / `sample` / `samples`：这张表是哪天、用哪些样本跑出来的（可复跑性）；
     - `overrides`：手工覆盖的 ID → 理由（必须逐条有据）；
     - `overlap`：重叠 ID（正常为空）；
     - `unnamed`：在分类表里但 `attribute_dict` 没有名字来源的 ID（正常为空；`-70`
@@ -356,6 +363,7 @@ def audit() -> dict:
         "unknown": len(UNKNOWN_ATTRS),
         "derived_at": DERIVED_AT,
         "sample": DERIVED_SAMPLE,
+        "samples": list(DERIVED_SAMPLES),
         "overrides": {aid: why for aid, why in sorted(_MANUAL_OVERRIDES.items())},
         "overlap": overlap,
         "unnamed": [aid for aid in unnamed if aid not in UNKNOWN_ATTRS],

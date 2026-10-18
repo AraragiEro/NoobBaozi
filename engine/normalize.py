@@ -10,6 +10,10 @@
    原始消息原样留在 `raw` 里，方便定位。
 3. **状态是引擎补的**。导入规则（武器/推进/修复 → active）由引擎在 `calculate`
    阶段套用，本层不做任何 state 推断，只用 `warnings` 明示这一事实。
+4. **丢了什么要说出来**（T-22 / 字段规格 §0.6）。killmail 里落在**非槽位 flag**
+   （至少覆盖 177 `SubSystemBay`）的模块，引擎根本不会装进 `fit`；本层**不改还原结果**，
+   只在 `warnings` 里追加一条「舱内另有 N 件模块，其效果未计入」。静默丢失会让
+   `resources` 把「真实不可能在线」的模块当实占用（f4：`cpu.load 10572.1` vs 可飞 472.1）。
 
 `EFT` 额外做一次**结构预扫描**（自己按行解析，不依赖引擎），目的是在引擎报错之前
 给出「第几行、原文、失败位置」这种可读错误；预扫描只判断行的**形态**，不校验名字。
@@ -428,6 +432,105 @@ def _structured_states_inferred(fit: dict) -> bool:
     return any(not isinstance(item, dict) or "state" not in item for item in items)
 
 
+# ---- killmail 的「舱内物品」：不在已装槽位的模块（T-22 / 字段规格 §0.6）----
+#
+# 背景（实测，见 PROGRESS §3 第 137 条）：`load_killmail` 只还原**槽位 flag** 上的物品，
+# flag 177（SubSystemBay 子系统舱）里的东西**没有静默丢弃的提示**——f4 的
+# `Loki Defensive - Covert Reconfiguration`（type 45595）就躺在 177 里，它是唯一能免掉
+# covert cloak 那 10000 CPU 罚值的子系统；丢掉它之后，`resources` 把「真实不可能在线」
+# 的 cloak 当成实占用（`cpu.load 10572.1` vs 真实可飞 472.1）。
+#
+# 处置边界（**不得越过**）：
+# - 只追加 `warnings`，**不改还原结果**（那件装备仍然不装，引擎行为一行不改）；
+# - 判据是 **flag 是否在已装槽位**，不是「检测子系统类型」——模块类型会随版本增加，
+#   而「东西在舱里、效果没算」这个事实不会。
+
+SLOT_FLAGS: frozenset[int] = frozenset(
+    {5, 87, 88}  # 货舱 / 无人机舱 / 无人机舱（备用）
+    | set(range(11, 19))  # low 0–7
+    | set(range(19, 27))  # medium 0–7
+    | set(range(27, 35))  # high 0–7
+    | set(range(89, 100))  # 植入体 / booster / rig 0–7
+    | set(range(125, 133))  # 子系统槽 0–7（**已装**子系统走这里）
+    | set(range(155, 172))  # 战斗机发射管 / 机库 / 服务槽 / 结构槽
+)
+"""`load_killmail` **会**还原的槽位 flag（其余 flag 上的物品一律进「舱内未计入」提示）。
+
+177（SubSystemBay）刻意**不在**这个集合里：它是子系统**存放**舱，不是已装槽位——
+这正是 f4 的坑所在。
+"""
+
+SUBSYSTEM_BAY_FLAG: int = 177
+"""`SubSystemBay` —— 子系统存放舱的 flag（f4 的 45595 就在这个 flag 上）。"""
+
+MAX_BAY_NAMES: int = 3
+"""提示里最多列几个名字（更多时用「等」收尾，避免一条 warning 变成长清单）。"""
+
+
+def _type_name(type_id: int) -> str:
+    """`type_id` → 名字；没有注入索引（或查不到）时退回 `type_id N`（不猜名字）。"""
+    index = _INDEX
+    getter = getattr(index, "get_type", None) if index is not None else None
+    if callable(getter):
+        try:
+            row = getter(type_id)
+        except Exception:  # 边界：名字查询失败不能影响归一化
+            row = None
+        name = row.get("name") if isinstance(row, dict) else None
+        if isinstance(name, str) and name:
+            return name
+    return f"type_id {type_id}"
+
+
+def _bay_items(data: dict) -> list[tuple[int, int]]:
+    """killmail 里**落在非槽位 flag** 的物品 → `[(flag, type_id), ...]`（保持原始顺序）。
+
+    只读 `victim.items`，不碰引擎：`flag` / `item_type_id` 缺失或不是整数的条目直接跳过
+    （那属于 killmail 本身的畸形，不是本提示要管的事）。
+    """
+    victim = data.get("victim")
+    items = victim.get("items") if isinstance(victim, dict) else None
+    if not isinstance(items, list):
+        return []
+
+    bays: list[tuple[int, int]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        flag = item.get("flag")
+        type_id = item.get("item_type_id")
+        if not isinstance(flag, int) or not isinstance(type_id, int):
+            continue
+        if flag in SLOT_FLAGS:
+            continue
+        bays.append((flag, type_id))
+    return bays
+
+
+def _bay_warning(data: dict) -> str | None:
+    """舱内物品提示（没有则 `None`）。
+
+    文案（字段规格 §0.6 / 任务书原文）：
+    `子系统舱内另有 N 件可用模块（flag 177 等不在已装槽位），其效果未计入：<名字，最多 3 个>`
+    """
+    bays = _bay_items(data)
+    if not bays:
+        return None
+
+    flags = sorted({flag for flag, _type_id in bays})
+    names = [_type_name(type_id) for _flag, type_id in bays[:MAX_BAY_NAMES]]
+    listing = "、".join(names)
+    if len(bays) > MAX_BAY_NAMES:
+        listing = f"{listing} 等"
+
+    where = "子系统舱内" if SUBSYSTEM_BAY_FLAG in flags else "舱内"
+    flag_text = "、".join(str(flag) for flag in flags)
+    return (
+        f"{where}另有 {len(bays)} 件可用模块（flag {flag_text} 等不在已装槽位），"
+        f"其效果未计入：{listing}"
+    )
+
+
 def _normalize_json(text: str) -> contracts.NormalizeResult:
     try:
         data = json.loads(text)
@@ -491,7 +594,15 @@ def _normalize_json(text: str) -> contracts.NormalizeResult:
         fit = loader(data)
     except Exception as exc:
         return _fail(target, [_engine_error(exc)])
-    return _ok(fit, target)
+
+    result = _ok(fit, target)
+    if is_killmail:
+        # T-22 / §0.6：舱内模块「存在但没被计入」是**事实**，必须显式说出来。
+        # 只加 warning（还原结果一个字不改）：那件装备仍然不装。
+        warning = _bay_warning(data)
+        if warning is not None:
+            result["warnings"].append(warning)
+    return result
 
 
 # ---- 公开入口 ----

@@ -19,6 +19,18 @@
 样本里 17 个已装模块后面跟着 14 个货舱项，按下标摘除时一旦用错列表就会摘掉货舱物品
 （已知坑）。本模块的 `_fit_without()` 只对 `ctx.fit["items"]` 操作。
 
+**T-20 收口的两处口径**（都是真实样本暴露的，别改回去）：
+
+1. **D5 · 弹药续航只有一份实现**：`consumables.ammo_endurance_s` 与
+   `firepower.ammo_endurance_s` 是**同一个事实**，现在都走
+   `views/shared.py::weapon_records()` + `ammo_endurance_s()`。以前这里自带一份
+   （要求武器同时有 `51` 与 `64`，且用 `int(capacity / 体积)` 无浮点容差），
+   导弹发射器没有装备级 `64` → f4/f5 报 `None`，而火力视角报 172.663 / 250.323。
+2. **D6 · 电容耗尽时长归一**：引擎 `-7 capDepletesIn` 对「电容稳定、永不耗尽」
+   给的是**哨兵 `-1.0`**（f3/f4/f5/f6 实测），不是秒数。`capacitor.depletes_in_s`
+   与 `cap_sensitivity[].depletes_in_s` 都过 `shared.depletes_in_s()`：
+   `stable_pct > 0` 或引擎给负数 → `None`；否则照实给秒数（f1 = 38.4 s）。
+
 `cap_sensitivity` 只算耗电最高的 5 个模块（13.6 ms 冷启动预算内，最多 5 次变体）。
 """
 
@@ -27,7 +39,7 @@ from __future__ import annotations
 from evefit.config import attributes as A
 from evefit.config.attributes import ATTR_CHARGE_RATE, ATTR_MODULE_DURATION
 from evefit.project import units
-from evefit.project.views import register
+from evefit.project.views import register, shared
 from evefit.project.views.base import BASE, SLOT_CARGO, ViewContext, ship_attributes
 
 # =============================================================================
@@ -179,12 +191,17 @@ def _cap_use(item: dict) -> float | None:
 
 
 def _capacitor(attrs: dict[int, float]) -> dict:
-    """电容七个字段（`recharge_s` 已是秒：`55` 的毫秒由投影层换算）。"""
+    """电容七个字段（`recharge_s` 已是秒：`55` 的毫秒由投影层换算）。
+
+    `depletes_in_s` 走 `shared.depletes_in_s()` 归一（D6）：电容稳定时引擎给 `-7 = -1.0`
+    这个**哨兵**，它不是秒数；稳定与否由 `stable_pct > 0` 表达，耗尽时长给 `None`。
+    """
+    stable = _number(attrs, A.ATTR_CAP_STABLE_PCT)
     return {
         "capacity": _fmt(_number(attrs, A.ATTR_CAPACITOR_CAPACITY)),
         "recharge_s": _fmt(_number(attrs, A.ATTR_CAPACITOR_RECHARGE_RATE)),
-        "stable_pct": _fmt(_number(attrs, A.ATTR_CAP_STABLE_PCT)),
-        "depletes_in_s": _fmt(_number(attrs, A.ATTR_CAP_DEPLETES_IN)),
+        "stable_pct": _fmt(stable),
+        "depletes_in_s": shared.depletes_in_s(stable, _number(attrs, A.ATTR_CAP_DEPLETES_IN)),
         "peak_load": _fmt(_number(attrs, A.ATTR_CAP_PEAK_LOAD)),
         "peak_recharge": _fmt(_number(attrs, A.ATTR_CAP_PEAK_RECHARGE)),
         "delta": _fmt(_number(attrs, A.ATTR_CAP_DELTA_PEAK)),
@@ -250,7 +267,10 @@ def _cap_sensitivity(ctx: ViewContext, fitted: list[tuple[int, dict]], stable_no
                 "type_id": item.get("type_id"),
                 "cap_use_gj_s": _fmt(use),
                 "stable_pct": _fmt(stable_after),
-                "depletes_in_s": _fmt(_number(after, A.ATTR_CAP_DEPLETES_IN)),
+                # 同一口径：摘掉这个模块后若电容稳定，引擎仍给哨兵 -1.0 → None（D6）
+                "depletes_in_s": shared.depletes_in_s(
+                    stable_after, _number(after, A.ATTR_CAP_DEPLETES_IN)
+                ),
                 "stable_delta_pct": _fmt(delta),
             }
         )
@@ -295,22 +315,16 @@ def _external_dependency(ctx: ViewContext, fitted: list[tuple[int, dict]]) -> di
 # =============================================================================
 
 
-def _weapons(fitted: list[tuple[int, dict]]) -> list[tuple[int, dict]]:
-    """武器（同时带 `cycleTime(51)` 与 `damageMultiplier(64)`，同诊断层的判据）。"""
-    return [
-        (position, item)
-        for position, item in fitted
-        if item["attributes"].get(A.ATTR_CYCLE_TIME) is not None
-        and item["attributes"].get(A.ATTR_DAMAGE_MULTIPLIER) is not None
-    ]
+def _ammo_endurance(ctx: ViewContext) -> dict:
+    """单弹匣时长：**唯一实现**在 `views/shared.py`（T-20 / D5）。
 
+    以前这里自己算一遍（`int(capacity / 弹药体积)` + 只看带 `64` 的「炮」），
+    于是 f4/f5（导弹船）算出 `None`，而火力视角算出 172.663 / 250.323 —— 同一个事实
+    两个视角不一致。现在两边都调 `shared.weapon_records()` + `shared.ammo_endurance_s()`：
+    武器判定、弹匣发数（含 `chargeRate` 与浮点容差）、周期口径、取最短者全部同一份代码。
 
-def _ammo_endurance(ctx: ViewContext, fitted: list[tuple[int, dict]]) -> dict:
-    """单弹匣时长 = 弹匣发数 × 周期。发数 = ⌊弹匣容量 ÷ 弹药体积⌋（体积查索引）。
-
-    容量属性是 `capacity(38)`（在武器作用域里就是弹匣容积，与船体货舱同名不同域）；
-    弹药体积来自 `types.volume`。任一环节缺失 → `None`（不猜）。
-    多武器时报告**最短**的那一匣（"最先打空"），并回显是哪门炮、多少发。
+    回显口径不变：仍是**最先打空**的那一匣，并给出模块名 / 发数 / 周期，
+    便于下游追「为什么是这个数」。
     """
     empty = {
         "ammo_endurance_s": None,
@@ -318,36 +332,14 @@ def _ammo_endurance(ctx: ViewContext, fitted: list[tuple[int, dict]]) -> dict:
         "ammo_rounds": None,
         "ammo_cycle_s": None,
     }
-    if ctx.index is None:
-        return empty
-
-    best: tuple[float, str, int, float] | None = None
-    for _position, item in _weapons(fitted):
-        charge_type_id = item.get("charge_type_id")
-        if not isinstance(charge_type_id, int):
-            continue
-        charge_row = ctx.index.get_type(charge_type_id)
-        charge_volume = (charge_row or {}).get("volume")
-        capacity = item["attributes"].get(A.ATTR_CARGO_CAPACITY)
-        cycle = _cycle_s(item["attributes"])
-        if not charge_volume or capacity is None or cycle is None:
-            continue
-        rounds = int(capacity / float(charge_volume))
-        if rounds <= 0:
-            continue
-        endurance = rounds * cycle
-        name = item.get("name") or f"type_id {item.get('type_id')}"
-        if best is None or endurance < best[0]:
-            best = (endurance, name, rounds, cycle)
-
+    best = shared.shortest_endurance(shared.weapon_records(ctx, BASE))
     if best is None:
         return empty
-    endurance, name, rounds, cycle = best
     return {
-        "ammo_endurance_s": units.fmt(endurance),
-        "ammo_module": name,
-        "ammo_rounds": rounds,
-        "ammo_cycle_s": units.fmt(cycle),
+        "ammo_endurance_s": units.fmt(best["endurance_s"]),
+        "ammo_module": best["name"] or f"type_id {best['type_id']}",
+        "ammo_rounds": best["rounds"],
+        "ammo_cycle_s": units.fmt(best["cycle_s"]),
     }
 
 
@@ -445,7 +437,7 @@ def build(ctx: ViewContext) -> dict:
         "cap_sensitivity": _cap_sensitivity(ctx, fitted, capacitor["stable_pct"]),
         "external_dependency": _external_dependency(ctx, fitted),
         "consumables": {
-            **_ammo_endurance(ctx, fitted),
+            **_ammo_endurance(ctx),
             **_paste_endurance(ctx, fitted, items),
             "cap_booster": _carries_cap_booster(ctx, items),
         },

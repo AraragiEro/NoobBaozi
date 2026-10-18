@@ -34,11 +34,14 @@ from evefit.config import attributes as A
 from evefit.config.paths import db_path
 from evefit.engine.adapter import Engine
 from evefit.engine.assumptions import default_assumptions, derive_skill_tier
+from evefit.project import diagnostics as D
 from evefit.project.views import (
     available_views,
     build_view,
     firepower,
     mobility,
+    shared,
+    stability,  # noqa: F401  （导入即注册：D5 的跨视角断言要读 stability）
     survivability,
 )
 from evefit.project.views.base import BASE, OVERLOAD, ViewContext, ship_attributes
@@ -882,3 +885,229 @@ def test_views_do_not_recompute_units(ctx: ViewContext) -> None:
     assert _close(mobility_view["speed_mps"], round(projected[A.ATTR_MAX_VELOCITY], 3))
     assert _close(mobility_view["align_time_s"], round(projected[A.ATTR_ALIGN_TIME], 3))
     assert _close(firepower_view["dps"]["base"], round(projected[A.ATTR_DAMAGE_DPS], 3))
+
+
+# =============================================================================
+# 七、真实样本对照（T-20：D5 弹药续航跨视角一致 / D7 齐射口径）
+# =============================================================================
+
+ACCEPTANCE_FIXTURES = EVE_ROOT / "acceptance" / "fixtures"
+"""验收样本（**只读**：`acceptance/` 不在本任务写入范围内）。"""
+
+REAL_SAMPLES = ("f1-hecate-killmail.eft", "f4-non-hecate.json", "f5-no-mwd.json")
+"""三个样本：正常炮船 / T3C 导弹船 / 无 MWD 导弹船（后两个就是 D5/D7 的暴露者）。"""
+
+WEAPON_SLOTS = frozenset({"high", "medium", "low"})
+"""齐射只算这三类挂架（无人机/战斗机的中队条目也带 `-21`，但舰船级 `-11` 不含它们）。"""
+
+DAMAGE_GROUPS = frozenset({"Hybrid Weapon", "Energy Weapon", "Projectile Weapon", "Smart Bomb"})
+"""测试侧独立写的武器 group 判据（不复用生产代码，避免「两边一起错」）。"""
+
+MISSILE_GROUP_PREFIX = "Missile Launcher"
+"""导弹发射器 group 名前缀（SDE 实测；测试侧独立写一遍）。"""
+
+MAGAZINE_TOLERANCE = 1e-9
+"""弹匣发数取整容差（与生产实现同一个理由：0.2 / 0.0025 可能算出 79.99999999）。"""
+
+
+def _load_real_fit(engine: Engine, index, name: str) -> dict:
+    """按后缀读验收样本（`.eft` 走 EFT，`.json` 走原始 killmail）并补技能档。"""
+    path = ACCEPTANCE_FIXTURES / name
+    if path.suffix == ".eft":
+        fit = engine.load_eft(path.read_text(encoding="utf-8"))
+    else:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, list):
+            raw = raw[0]
+        raw.pop("zkb", None)  # zkillboard 附加字段
+        fit = dogma.load_killmail(raw)
+    fit["character"] = {"skills": derive_skill_tier(fit, engine, index=index)}
+    return fit
+
+
+@pytest.fixture(scope="module")
+def real_ctx(engine: Engine, index):
+    """样本名 → `ViewContext`（与验收命令完全同一条构造路径）。"""
+
+    def factory(name: str) -> ViewContext:
+        fit = _load_real_fit(engine, index, name)
+        return ViewContext(
+            engine=engine,
+            index=index,
+            fit=fit,
+            assumptions=default_assumptions(fit, engine, index=index),
+            meta=engine.meta(),
+        )
+
+    return factory
+
+
+def _is_weapon_group(group: str | None) -> bool:
+    """测试侧武器判定：四类炮 group + 导弹发射器前缀（扫描发射器 / 隐身装置不算）。"""
+    if not group:
+        return False
+    return group in DAMAGE_GROUPS or group.startswith(MISSILE_GROUP_PREFIX)
+
+
+def _endurance_recomputed(ctx: ViewContext) -> float | None:
+    """独立复算单弹匣时长：⌊capacity ÷ (弹药体积 × chargeRate)⌋ × 周期，取最短。
+
+    刻意与 `views/shared.py` 分开写（自己读 `ctx.variant()` / `ctx.items()`），
+    这样生产实现写错时这里会炸，而不是跟着一起错。
+    """
+    values: list[float] = []
+    for raw_item, merged in zip(ctx.variant(BASE)["items"], ctx.items(BASE)):
+        if merged.get("slot_type") == "cargo":
+            continue
+        if not _is_weapon_group(merged.get("group_name")):
+            continue
+        attrs = merged.get("attributes") or {}
+        charge = raw_item.get("charge")
+        source = {int(k): v for k, v in ((charge or {}).get("attributes") or {}).items()}
+        source = {k: (v["value"] if isinstance(v, dict) else v) for k, v in source.items()}
+        capacity = attrs.get(A.ATTR_CARGO_CAPACITY)
+        cycle = attrs.get(A.ATTR_CYCLE_TIME)
+        volume = source.get(A.ATTR_VOLUME)
+        rate = attrs.get(A.ATTR_CHARGE_RATE, 1.0)
+        if capacity is None or cycle is None or volume is None or volume <= 0.0 or rate <= 0.0:
+            continue
+        rounds = math.floor(capacity / (volume * rate) + MAGAZINE_TOLERANCE)
+        if rounds <= 0:
+            continue
+        values.append(round(rounds * cycle, 3))
+    return min(values) if values else None
+
+
+def _weapon_volley_sum(ctx: ViewContext) -> float:
+    """Σ 武器槽（high/medium/low）装备级 `-21`；无人机/战斗机/货舱不计。"""
+    total = 0.0
+    for raw_item, merged in zip(ctx.variant(BASE)["items"], ctx.items(BASE)):
+        if merged.get("slot_type") not in WEAPON_SLOTS:
+            continue
+        value = _raw_value(raw_item.get("attributes") or {}, A.ATTR_DAMAGE_VOLLEY)
+        if value:
+            total += value
+    return total
+
+
+@pytest.mark.parametrize("name", REAL_SAMPLES)
+def test_ammo_endurance_agrees_between_firepower_and_stability(real_ctx, name: str) -> None:
+    """D5：同一份弹药续航在火力 / 不稳定两个视角**逐位相同**（三个样本各比一次）。
+
+    历史缺陷：`firepower` 用 `51` + `chargeRate` + 弹药体积，`stability` 要求模块同时带
+    `64 damageMultiplier`（导弹发射器没有）→ f4/f5 在稳定视角是 `None`、在火力视角是
+    172.663 / 250.323。现在两处都调 `views/shared.py`，这个断言就是防回归的闸门。
+    """
+    ctx = real_ctx(name)
+    firepower_value = build_view("firepower", ctx)["overview"]["ammo_endurance_s"]
+    consumables = build_view("stability", ctx)["overview"]["consumables"]
+
+    assert firepower_value is not None, f"{name}: 装了带弹药的武器就必须算得出续航"
+    assert firepower_value == consumables["ammo_endurance_s"], (
+        f"{name}: 两个视角必须逐位相同，实际 {firepower_value!r} vs "
+        f"{consumables['ammo_endurance_s']!r}"
+    )
+    # 与独立复算对拍（弹匣发数 × 周期，取最短的那一门）
+    assert firepower_value == _endurance_recomputed(ctx), f"{name}: 与独立复算不一致"
+    # 回显口径自洽（rounds × cycle 已各自取 3 位小数，容差 1e-3）
+    assert math.isclose(
+        firepower_value,
+        consumables["ammo_rounds"] * consumables["ammo_cycle_s"],
+        rel_tol=1e-3,
+    )
+
+
+def test_ammo_endurance_known_values_on_real_samples(real_ctx) -> None:
+    """D5 的实测值（验收报告点名的两个数）：f4 = 172.663、f5 = 250.323。"""
+    f4 = build_view("firepower", real_ctx("f4-non-hecate.json"))["overview"]
+    f5 = build_view("firepower", real_ctx("f5-no-mwd.json"))["overview"]
+
+    assert f4["ammo_endurance_s"] == 172.663, "f4：40 发 × 4.31658 s"
+    assert f5["ammo_endurance_s"] == 250.323, "f5：66 发 × 3.79277 s"
+
+
+@pytest.mark.parametrize("name", REAL_SAMPLES)
+def test_dph_is_weapon_volley_sum_and_matches_ship_alpha(real_ctx, name: str) -> None:
+    """D7：`dph` = Σ 武器槽 `-21`；Σ 与舰船级 `-11` 同值（不变式 I2）。
+
+    实测（本任务验证数据）：
+    - f1：5 × 188.733536 = **943.667678** == `ship -11`；
+    - f5：6 × 350.929885 = **2105.579310** == `ship -11`（**导弹船也成立** → 原先
+      「`-11` 只聚合炮台」的假设被这两组数据直接证伪）；
+    - f4：Σ = 0.0、`ship -11` = 0.0 —— **但装填了 5 门 HML**（`charge_type_id` 有值），
+      所以 `dph` 必须是 `None`（输入不完整，T-22 / §0.6），不是 `0.0`。
+
+    零伤害本身不触发 null：`total == 0` 且**没有带弹药的武器**时照实给 `0.0`。
+    """
+    ctx = real_ctx(name)
+    overview = build_view("firepower", ctx)["overview"]
+    total = _weapon_volley_sum(ctx)
+    alpha = ctx.attrs(BASE).get(A.ATTR_DAMAGE_ALPHA)
+
+    if total > 0.0:
+        assert _close(overview["dph"], round(total, 3))
+        assert alpha is not None and math.isclose(total, alpha, rel_tol=0.0, abs_tol=1e-6), (
+            f"{name}: I2 破了（Σ 武器 -21 = {total!r}，ship -11 = {alpha!r}）"
+        )
+    else:
+        armed = [
+            record
+            for record in shared.weapon_records(ctx, BASE)
+            if record.get("slot_type") in shared.WEAPON_SLOT_TYPES
+            and record.get("charge_type_id") is not None
+        ]
+        # 引擎把逐件 -21 和舰船级 -11 一起算成 0（f4 的突变数据缺失）
+        assert alpha == 0.0
+        if armed:
+            assert overview["dph"] is None, f"{name}: 有带弹药的武器却零齐射 → 必须 null"
+        else:
+            assert overview["dph"] == 0.0, f"{name}: 没武器时 0 是真值"
+
+
+def test_dph_known_values_are_bit_identical(real_ctx) -> None:
+    """正常样本的 `dph` **逐位不变**（写死实测值，不放宽成范围）。"""
+    f1 = build_view("firepower", real_ctx("f1-hecate-killmail.eft"))["overview"]
+    f5 = build_view("firepower", real_ctx("f5-no-mwd.json"))["overview"]
+
+    assert f1["dph"] == 943.668, "f1：5 × 188.733536 四舍五入到 3 位"
+    assert f5["dph"] == 2105.579, "f5：6 × 350.929885 四舍五入到 3 位"
+
+
+def test_f4_dph_is_null_because_mutation_data_is_missing(real_ctx) -> None:
+    """T-22 / D7 的裁决：有带弹药的武器但齐射为 0 → `dph` 是 `null`，并带一条 flag。
+
+    取代 T-20 留下的 `xfail(strict)`（那条期望「`dph > 0`」，被引擎侧的数据保真问题
+    挡着）。现在期望改成**输入不完整的事实**：数值不可信 → `None`，可疑点显式给出。
+    """
+    ctx = real_ctx("f4-non-hecate.json")
+    overview = build_view("firepower", ctx)["overview"]
+
+    armed = [
+        weapon
+        for weapon in overview["weapons"]
+        if weapon["ammo_name"] and weapon["count"] > 0 and weapon["family"] != "drone"
+    ]
+    assert len(armed) == 1 and armed[0]["count"] == 5, "f4 的武器清单里应有 5 门带弹药的 HML"
+
+    assert overview["dph"] is None, "有弹药却零伤害：不得输出 0.0 伪事实"
+
+    flags = {flag["id"]: flag for flag in D.evaluate(ctx)}
+    assert "weapon_damage_zero" in flags, sorted(flags)
+    flag = flags["weapon_damage_zero"]
+    assert flag["view"] == "firepower"
+    assert flag["message"] == (
+        "有带弹药的武器但齐射伤害为 0：可能因突变模块数据缺失（killmail 不暴露 mutation）"
+    )
+    assert flag["evidence"]["armed_weapons"] == 5
+    assert flag["evidence"]["volley_sum_hp"] == 0.0
+    assert flag["evidence"]["dph_hp"] == 0.0
+
+
+@pytest.mark.parametrize("name", ("f1-hecate-killmail.eft", "f5-no-mwd.json"))
+def test_normal_samples_have_no_weapon_damage_zero_flag(real_ctx, name: str) -> None:
+    """反面：正常样本（齐射 > 0）不得冒出 `weapon_damage_zero`（判据是矛盾，不是类型）。"""
+    ctx = real_ctx(name)
+    overview = build_view("firepower", ctx)["overview"]
+
+    assert overview["dph"] is not None and overview["dph"] > 0.0
+    assert "weapon_damage_zero" not in {flag["id"] for flag in D.evaluate(ctx)}

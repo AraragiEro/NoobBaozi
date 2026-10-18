@@ -11,9 +11,16 @@
    **不在** `SCALE_BY_ATTR`（8 项）里，故用 `units.ms_to_s()` 显式换算——这正是
    `project/units.py` 对「非缩放表数值」提供的合法入口（红线 N5 只禁止裸乘除 1000，
    不禁止这个函数）。
-2. **dps / dph**：`dps.base` = `-12`、`dps.with_reload` = `-13`、`dph` = `-11`。
-   `volley`（`-21`）只在**装备级**，舰船级没有；`-11 = Σ 逐装备 -21`
-   （实测 5 × 168.51208543 = 842.56042716，与 `-11` 完全一致，即不变式 I2）。
+2. **dps / dph**：`dps.base` = `-12`、`dps.with_reload` = `-13`；`dph`（首轮齐射伤）
+   = **Σ 武器槽装备级 `-21`**，Σ 为 0 时回退舰船级 `-11`（T-20 / D7 改动，见 `_dph`）。
+   `volley`（`-21`）只在**装备级**，舰船级没有；实测 f1 `Σ = 943.667678` 与 `-11`
+   逐位相等、f5 `Σ = 2105.579310` 与 `-11` 逐位相等（不变式 I2）。
+   **注意**：舰船级 `-11` **包含发射器**（f5 就是导弹船，I2 成立），D7 原先「`-11`
+   只聚合炮台」的假设已被实测证伪；f4 的 `-11`/逐件 `-21` 同为 0 的根因是
+   「killmail 不带 mutation 的 Abyssal BCS 把发射器伤害乘子压成 0」（见报告）。
+   **T-22 起**：Σ 与回落值**同时**为 0、但存在带弹药的武器时，`dph` 输出 `None`
+   （输入不完整 → 未知），并由 `weapon_damage_zero` flag 说明原因（字段规格 §0.6）。
+   零伤害本身不触发 null：没有武器的配装照实给 `0.0`。
 3. **伤害构成按伤害量加权**（不是按弹种数量）：形状取弹药四系（114/116/117/118），
    量级取装备级 `volley`（`-21`；缺失时才退回「弹药 × 武器 `damageMultiplier`（64）」）。
    实测 Void S = 8.9 动能 + 8.9 热能（50/50），**不是**单系；弹药自身也带 64
@@ -34,6 +41,9 @@
    弹匣发数 = 模块 `capacity`（38）÷（弹药 `volume`（161）× `chargeRate`（56）），
    时长 = 发数 × 周期（51）。实测中子炮 0.2 ÷ 0.0025 = 80 发 × 2.304636 s = 184.371 s。
    多组武器取**最短者**（最先打空的那一组）。
+   **算法只有一份**：T-20 起搬到 `views/shared.py`（`weapon_records()` +
+   `ammo_endurance_s()`），本视角与 `stability.consumables.ammo_endurance_s` 都调它，
+   因此两个视角的数值逐位相同（D5）。别再在本模块里另写一份取最小值的实现。
 7. **战斗机 / 无人机**：`-58`（fighterDps，舰船级 = Σ 架数 × 逐机 `-12`）与
    `-14`（droneDps）已经并入 `-12`，这里仍按字段单独给，避免下游把「纯无人机配装」
    误读成「没有火力」；缺值给 `None`（不补 0）。注意 `damage_split` 的来源是**弹药**
@@ -61,71 +71,23 @@ T-16 起 `tests/test_views_a.py` 的 walker 已支持 `[]` 段，于是换回元
 
 from __future__ import annotations
 
-import math
-
 from evefit.config import attributes as _a
 from evefit.project import units
-from evefit.project.views import register
-from evefit.project.views.base import (
-    BASE,
-    OVERLOAD,
-    SLOT_CARGO,
-    ViewContext,
-    item_attributes,
-)
+from evefit.project.views import register, shared
+from evefit.project.views.base import BASE, OVERLOAD, ViewContext
 
 VIEW_NAME = "firepower"
 
-ATTR_EXPLOSION_DELAY: int = 281
-"""`explosionDelay` —— 导弹最大飞行时间，**存储毫秒**。
+# 武器判定 / 弹药续航的公共实现已抽到 `views/shared.py`（T-20 起，见该模块 docstring）。
+# 这里只做 re-export，保持既有引用（`firepower.ATTR_EXPLOSION_DELAY` 等）不变。
+ATTR_EXPLOSION_DELAY: int = shared.ATTR_EXPLOSION_DELAY
+"""`explosionDelay`（281）—— 常量与来源说明见 `views/shared.py`（同一处定义）。"""
 
-`config/attributes.py` 本轮只读且尚未登记该 ID（PROGRESS §3 第 28 条只记了
-「281 = explosionDelay」这一结论），故常量就近定义在这里并注明来源：
-ESI 名 `explosionDelay`、SDE 单位 `Milliseconds`、实测 Scourge Light Missile = 5000。
-等该文件可写时必须迁进 `config/attributes.py`（红线 N12 的归属要求），处置方式与
-`project/provenance.py` 里的 `ATTR_MAX_TARGETS_UNVERIFIED` 相同。
-"""
+DAMAGE_TYPES: tuple[tuple[str, int], ...] = shared.DAMAGE_TYPES
+"""四系伤害 → 弹药侧属性 ID（读弹药，不读武器）；定义见 `views/shared.py`。"""
 
-ATTR_CHARGE_RATE: int = 56
-"""`chargeRate` —— 每个激活周期消耗几发弹药。同样是本轮未登记的正 ID（实测炮 /
-发射器恒为 1），归属处理见 `ATTR_EXPLOSION_DELAY`。"""
-
-CHARGE_RATE_DEFAULT: float = 1.0
-"""`chargeRate` 缺失时的回退值：实测所有炮与发射器都是 1 发/周期。"""
-
-ENDURANCE_ROUND_TOLERANCE: float = 1e-9
-"""弹匣发数取整的容差。`0.2 / 0.0025` 这类浮点除法可能算出 79.99999999，
-不加容差会把 80 发算成 79 发（红线的精神：不用浮点噪声改事实）。"""
-
-DAMAGE_TYPES: tuple[tuple[str, int], ...] = (
-    ("em", _a.ATTR_EM_DAMAGE),
-    ("explosive", _a.ATTR_EXPLOSIVE_DAMAGE),
-    ("kinetic", _a.ATTR_KINETIC_DAMAGE),
-    ("thermal", _a.ATTR_THERMAL_DAMAGE),
-)
-"""四系伤害 → 弹药侧属性 ID（读弹药，不读武器）。"""
-
-FAMILY_BY_GROUP: dict[str, str] = {
-    "Hybrid Weapon": "hybrid",
-    "Energy Weapon": "laser",
-    "Projectile Weapon": "projectile",
-    "Smart Bomb": "smartbomb",
-}
-"""SDE group 名 → 规格 §1 的家族。名字是索引库里的实测值（`groups.name`）。
-
-刻意只放**精确**的模块 group：`Rig Energy Weapon` / `Energy Weapon Blueprint` 之类
-名字相近的 group 不属于武器，不能被前缀匹配误伤。
-"""
-
-MISSILE_GROUP_PREFIX: str = "Missile Launcher"
-"""导弹发射器的 group 名前缀（实测 `Missile Launcher` / `Missile Launcher Light` /
-`Missile Launcher Rapid Heavy` / `Missile Launcher XL Cruise` 等 14 个 group 都以此开头）。"""
-
-DRONE_SLOT_TYPE: str = "drone_bay"
-"""无人机槽位类别（软件设计 §7.3 的合法 slot.type）。"""
-
-FIGHTER_SLOT_TYPES: frozenset[str] = frozenset({"fighter_tube", "fighter_bay"})
-"""战斗机槽位类别（发射管 / 机库）。"""
+WEAPON_SLOT_TYPES: frozenset[str] = shared.WEAPON_SLOT_TYPES
+"""武器挂架槽位（high/medium/low）；`dph` 只聚合这几类槽位里的 `-21`。"""
 
 FIELD_SOURCES: dict[str, int | None] = {
     "weapons[].family": None,
@@ -165,6 +127,10 @@ FIELD_SOURCES: dict[str, int | None] = {
 名、`ammo_name` 来自索引库），指不到单一来源属性，故 `None`（渲染层判 `assumed`）。
 `range.max_range_m` / `ammo_endurance_s` / `overload.delta.*` 同样是**合成值**
 （飞行时间 × 速度、弹匣 × 周期、两次重算之差），指不到单一属性，故 `None`。
+
+`dph` 保持映射 `-11`（T-22 未改机制）：`null` 的语义由 `weapon_damage_zero` flag 表达，
+**不**靠 provenance 三态表达——`FIELD_SOURCES` 是静态表，同一路径没法按值变形，
+硬把它登记成 `None` 会让正常样本的 `dph` 从 `measured` 掉成 `assumed`。
 """
 
 
@@ -185,149 +151,69 @@ def _diff(on: float | None, off: float | None) -> float | None:
     return units.fmt(on - off)
 
 
-def _type_name(ctx: ViewContext, type_id: int | None) -> str | None:
-    """`type_id` → 名字；没有索引时返回 `None`（不猜）。"""
-    if ctx.index is None or not isinstance(type_id, int):
-        return None
-    haystack = ctx.index
-    row = haystack.get_type(type_id)  # type: ignore[union-attr]
-    return (row or {}).get("name")
+def _has_armed_weapon(records: list[dict]) -> bool:
+    """是否**存在带弹药的武器**（装填了弹药的挂架武器；无人机/战斗机不算）。
 
-
-def _classify(item: dict, source: dict[int, float]) -> tuple[bool, str | None]:
-    """判断一个已装物品是不是武器，并给出 family。
-
-    - 无人机 / 战斗机按**槽位类别**判（不靠名字：无人机群里也有非战斗型号）；
-    - 炮 / 发射器 / 智能炸弹按 **SDE group 名**判（需要索引库）；
-    - 没有索引（`ctx.index is None`）时退化到**属性特征**：弹药带爆炸半径（654）与
-      爆炸速度（653）→ 导弹；同时有最大射程（54）与周期（51）→ 炮（但分不出
-      laser/hybrid/projectile，`family` 保持 `None`）；
-    - 表外武器（如 `Precursor Weapon`）同样走最后这条，`family=None`，不硬塞规格外的
-      标签，但也不把炮丢掉。
-
-    这套判定把「扫描发射器」正确地排除在外：它有周期（51）与弹药，但没有射程（54）、
-    弹药也没有爆炸半径，且不在家族的 group 表里。
+    判据用「有弹药」（`charge_type_id` 有值），**不用模块类型穷举**：这是
+    `docs/配装理解-字段规格-v1.md` §0.6 的裁决——检测 Abyssal/mutated 类型会随版本失效，
+    而「有弹药却零伤害」这个自相矛盾不会（f4 的 5 门 HML 装填了 Scourge HAM，
+    `charge_type_id = 27453` 有值，但逐件 `-21` 与舰船级 `-11` 一起是 0）。
     """
-    slot_type = item.get("slot_type")
-    if slot_type == DRONE_SLOT_TYPE:
-        return True, "drone"
-    if slot_type in FIGHTER_SLOT_TYPES:
-        return True, "fighter"
-
-    group = item.get("group_name") or ""
-    if group.startswith(MISSILE_GROUP_PREFIX):
-        return True, "missile"
-    family = FAMILY_BY_GROUP.get(group)
-    if family is not None:
-        return True, family
-
-    attrs = item.get("attributes") or {}
-    if (
-        source.get(_a.ATTR_AOE_CLOUD_SIZE) is not None
-        and source.get(_a.ATTR_AOE_VELOCITY) is not None
-    ):
-        return True, "missile"
-    if attrs.get(_a.ATTR_MAX_RANGE) is not None and attrs.get(_a.ATTR_CYCLE_TIME) is not None:
-        return True, None
-    return False, None
-
-
-def _damage_source(item: dict, raw_item: dict) -> dict[int, float]:
-    """伤害参数的来源：**优先弹药**（物理属性表），没有弹药则退回模块自身。
-
-    炮/发射器的四系伤害在弹药上；智能炸弹没有弹药，伤害直接写在模块上。
-    """
-    charge = raw_item.get("charge")
-    if isinstance(charge, dict) and charge.get("attributes"):
-        return item_attributes(charge)
-    return item.get("attributes") or {}
-
-
-def _missile_range_m(attrs: dict[int, float], source: dict[int, float]) -> float | None:
-    """导弹最大射程 = 弹药最大速度（37）× 最大飞行时间（281，毫秒→秒）。
-
-    只对**没有** `maxRange`（54）的武器计算：炮的 54 已经是最终最佳射程，不能再趟这条
-    路径；扫描探针的弹药也带 37/281，但它没有 54 也不在武器家族里，早在 `_classify`
-    就被排除了。
-    """
-    if attrs.get(_a.ATTR_MAX_RANGE) is not None:
-        return None
-    velocity = source.get(_a.ATTR_MAX_VELOCITY)
-    flight_ms = source.get(ATTR_EXPLOSION_DELAY)
-    if velocity is None or flight_ms is None:
-        return None
-    return velocity * units.ms_to_s(flight_ms)
-
-
-def _endurance_s(attrs: dict[int, float], source: dict[int, float]) -> float | None:
-    """单弹匣持续射击时长 = 弹匣发数 × 周期。
-
-    弹匣发数 = `capacity`（38）÷（弹药 `volume`（161）× `chargeRate`（56））。
-    说明：38 在船体上叫「货舱容积」，在武器模块上就是「弹匣容积」——同一个属性 ID，
-    语义随宿主类型走。
-    """
-    capacity = attrs.get(_a.ATTR_CARGO_CAPACITY)
-    cycle = attrs.get(_a.ATTR_CYCLE_TIME)
-    volume = source.get(_a.ATTR_VOLUME)
-    if capacity is None or cycle is None or volume is None or volume <= 0.0:
-        return None
-    rate = attrs.get(ATTR_CHARGE_RATE)
-    if rate is None:
-        rate = CHARGE_RATE_DEFAULT
-    if rate <= 0.0:
-        return None
-    rounds = math.floor(capacity / (volume * rate) + ENDURANCE_ROUND_TOLERANCE)
-    if rounds <= 0:
-        return None
-    return rounds * cycle
-
-
-def _scan(ctx: ViewContext, variant: str = BASE) -> list[dict]:
-    """扫出**每一件**武器（一件一条记录），带上本视角需要的全部参数。"""
-    merged = ctx.items(variant)
-    raw_items = ctx.variant(variant).get("items") or []
-    records: list[dict] = []
-
-    for position, item in enumerate(merged):
-        if item.get("slot_type") == SLOT_CARGO:
+    for record in records:
+        if record.get("slot_type") not in WEAPON_SLOT_TYPES:
             continue
-        raw_item = raw_items[position] if position < len(raw_items) else {}
-        attrs = item.get("attributes") or {}
-        source = _damage_source(item, raw_item)
+        if record.get("charge_type_id") is not None:
+            return True
+    return False
 
-        is_weapon, family = _classify(item, source)
-        if not is_weapon:
+
+def _dph(attrs: dict[int, float], records: list[dict]) -> float | None:
+    """首轮齐射伤（齐射 α）= **Σ 武器槽装备级 `-21`**，Σ 为 0 时回退舰船级 `-11`。
+
+    为什么不再直接读 `-11`（T-20 / D7 的**实测结论**，与任务书的初始假设不同，务必先看
+    `PROGRESS` 与本轮报告）：
+
+    - 舰船级 `-11` **确实包含发射器**（f5 实测：6 × HAM II 各 `-21 = 350.929885`，
+      Σ = 2105.579310，与 `ship -11 = 2105.579310` 逐位相等）→ 「`-11` 只聚合炮台」
+      这个假设是**错的**；
+    - 但 `-11` 仍然是**引擎聚合出来的黑盒**，一旦引擎在某件武器上算崩（f4 实测：
+      未变异 Abyssal BCS 把 5 门 HML 的 `-21`/`-12` 一起压成 0，`-11` 也随之 0），
+      视角就只剩一个 0 可读，无法与逐件 `-21` 交叉验证；
+    - 改成 Σ `-21` 之后，`dph == Σ 武器 volley` 变成**构造性成立**（不变式 I2 不再是
+      「引擎碰巧成立」），并且当引擎只给了逐件 `-21`、没给 `-11`（或 `-11` 缺键）时
+      依然有正确值。
+
+    只聚合**武器挂架**（`high` / `medium` / `low`）：无人机 / 战斗机的中队条目也带
+    `-21`（f4：drone `-21 = 83.866`），但舰船级 `-11` 不含它们（f4 `-11 = 0.0`），
+    混进来会让 I2 当场破掉。
+
+    Σ 为 0 时回退 `-11`：这是「引擎只给了舰船级、逐件缺失」的兜底路径。
+
+    **矛盾判据（T-22 / §0.6 裁决）**：回落值也是 0、但**确实存在带弹药的武器**时，
+    输出 `None`（`unknown`）而不是 `0.0`。理由：装填了弹药的武器不可能真的零齐射，
+    这个矛盾只可能来自输入不完整（killmail **不暴露 mutation 数据**，引擎把未变异的
+    Abyssal BCS 当成 0 伤害乘子相乘）。此时 `0.0` 是伪事实，必须由
+    `diagnostics` 的 `weapon_damage_zero` flag 显式说明「为什么是 null」。
+
+    「有弹药却零伤害」只在两端**同时**为 0 时才成立：没有武器的配装（或武器没装填弹药）
+    齐射就是真 0，照实给 `0.0`——零伤害本身不是矛盾，**有弹药**才是。
+    """
+    total = 0.0
+    for record in records:
+        if record.get("slot_type") not in WEAPON_SLOT_TYPES:
             continue
+        volley = record.get("volley")
+        if volley is None or volley <= 0.0:
+            continue
+        total += volley
+    if total > 0.0:
+        return _value(total)
 
-        # 导弹发射器没有 damageMultiplier（伤害全在弹药上）→ 乘子取 1。
-        multiplier = attrs.get(_a.ATTR_DAMAGE_MULTIPLIER)
-        if multiplier is None:
-            multiplier = 1.0
-
-        records.append(
-            {
-                "family": family,
-                "type_id": item.get("type_id"),
-                "name": item.get("name"),
-                "charge_type_id": item.get("charge_type_id"),
-                "ammo_name": _type_name(ctx, item.get("charge_type_id")),
-                "count": max(int(item.get("quantity") or 1), 1),
-                "volley": attrs.get(_a.ATTR_DAMAGE_VOLLEY),
-                "damage": {
-                    name: (source.get(attribute_id) or 0.0) * multiplier
-                    for name, attribute_id in DAMAGE_TYPES
-                },
-                "tracking_rad_s": attrs.get(_a.ATTR_TRACKING_SPEED),
-                "optimal_sig_m": attrs.get(_a.ATTR_OPTIMAL_SIG_RADIUS),
-                "optimal_m": attrs.get(_a.ATTR_MAX_RANGE),
-                "falloff_m": attrs.get(_a.ATTR_FALLOFF),
-                "max_range_m": _missile_range_m(attrs, source),
-                "explosion_radius_m": source.get(_a.ATTR_AOE_CLOUD_SIZE),
-                "explosion_velocity_mps": source.get(_a.ATTR_AOE_VELOCITY),
-                "endurance_s": _endurance_s(attrs, source),
-            }
-        )
-    return records
+    fallback = attrs.get(_a.ATTR_DAMAGE_ALPHA)
+    if fallback is not None and fallback <= 0.0 and _has_armed_weapon(records):
+        # 自相矛盾：有弹药却零伤害 → 输入不完整（突变数据缺失），不许输出 0.0
+        return None
+    return _value(fallback)
 
 
 def _weapon_list(records: list[dict]) -> list[dict]:
@@ -444,9 +330,12 @@ def _application_block(records: list[dict]) -> dict[str, float | None]:
 
 
 def _ammo_endurance_s(records: list[dict]) -> float | None:
-    """""单弹匣」时长：多组武器取最短者（最先打空的那一组）。"""
-    values = [record["endurance_s"] for record in records if record["endurance_s"] is not None]
-    return _value(min(values) if values else None)
+    """单弹匣时长（多组武器取最短者）：**唯一实现在 `views/shared.ammo_endurance_s`**。
+
+    不稳定视角的 `consumables.ammo_endurance_s` 调的是同一个函数、同一份记录，
+    所以两个视角逐位相同（D5 的收口方式；不要再在这里另写一份取最小值的逻辑）。
+    """
+    return shared.ammo_endurance_s(records)
 
 
 def _overload_block(
@@ -459,7 +348,7 @@ def _overload_block(
     """
     base_attrs = ctx.attrs(BASE)
     overload_attrs = ctx.attrs(OVERLOAD)
-    overload_range = _range_block(_scan(ctx, OVERLOAD))
+    overload_range = _range_block(shared.weapon_records(ctx, OVERLOAD))
 
     off_dps = base_attrs.get(_a.ATTR_DAMAGE_DPS)
     on_dps = overload_attrs.get(_a.ATTR_DAMAGE_DPS)
@@ -498,7 +387,7 @@ def build(ctx: ViewContext) -> dict:
         `flags` **恒为空**：可疑点由渲染层统一算一次（见模块 docstring）。
     """
     attrs = ctx.attrs(BASE)
-    records = _scan(ctx, BASE)
+    records = shared.weapon_records(ctx, BASE)
     range_block = _range_block(records)
 
     overview = {
@@ -509,7 +398,7 @@ def build(ctx: ViewContext) -> dict:
             "drone": _value(attrs.get(_a.ATTR_DRONE_DPS)),
             "fighter": _value(attrs.get(_a.ATTR_FIGHTER_DPS)),
         },
-        "dph": _value(attrs.get(_a.ATTR_DAMAGE_ALPHA)),
+        "dph": _dph(attrs, records),
         "damage_split": _damage_split(records),
         "range": range_block,
         "application": _application_block(records),

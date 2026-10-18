@@ -9,6 +9,12 @@
       "message": "CPU 余量 {cpu_free}、PG 余量 {power_free}：当前档位下超载（缺口 CPU {cpu_deficit} / PG {power_deficit}）"
     },
     {
+      "id": "resource_over_budget_unflyable",
+      "view": "resources",
+      "enabled": true,
+      "message": "资源超预算：当前占用按全 active 计算，部分模块在真实游戏中不可能在线"
+    },
+    {
       "id": "resource_slack",
       "view": "resources",
       "enabled": true,
@@ -55,6 +61,12 @@
       "view": "firepower",
       "enabled": true,
       "message": "dph/dps = {ratio_s} s，与主要武器周期 {cycle_min_s}–{cycle_max_s} s 不符"
+    },
+    {
+      "id": "weapon_damage_zero",
+      "view": "firepower",
+      "enabled": true,
+      "message": "有带弹药的武器但齐射伤害为 0：可能因突变模块数据缺失（killmail 不暴露 mutation）"
     },
     {
       "id": "cap_sensitive",

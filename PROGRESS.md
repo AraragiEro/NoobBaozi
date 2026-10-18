@@ -11,11 +11,11 @@
 
 | 项 | 值 |
 |---|---|
-| 阶段 | **P2 已通过独立验收**；正在补两个已承诺出口（`modes` 块、`confidence` 表） |
-| 进度 | 讨论 100% · 设计 100% · P0 ✅ · P1 ✅ · **P2 ✅（补口子中）** |
-| 下一个动作 | T-17 收口 → 主人提供 KB 样本 → 用 acceptance runner 跑真实六维度 |
-| 阻塞点 | 无 |
-| 环境已验证 | Python 3.13 · 引擎 13.6.0 · SDE 3607705 · **308 tests 全绿** · 技能档 512 · 快照 enforce 0 DIFF |
+| 阶段 | **P2 复验未通过**（真实 KB 样本暴露 7 条 medium 口径缺陷），修复中 |
+| 进度 | 讨论 100% · 设计 100% · P0 ✅ · P1 ✅ · **P2 ⚠️（Hecate 通过，真实样本未通过）** |
+| 下一个动作 | T-20 修 D5/D6/D7/X2；T-21 诊断 T3C CPU 异常 → 复验 |
+| 阻塞点 | D5/D6/D7 属 medium，按验收计划 §5 阻塞 P2 |
+| 环境已验证 | Python 3.13 · 引擎 13.6.0 · SDE 3607705 · 348 tests · 技能档 512 · 快照 enforce 0 DIFF |
 
 ---
 
@@ -25,9 +25,9 @@
 |---|---|---|---|
 | M0 | 可行性验证 | ✅ 完成 | 引擎可算、读取无损、抗性对拍通过 |
 | M1 | 讨论与设计 | ✅ 完成 | 字段规格 / 软件设计 / 开发规范三份文档定稿 |
-| M2 | P0 数据层 | ⬜ 未开始 | 能按名查类型、列出 group 1306 模式、单位表单测通过 |
-| M3 | P1 计算封装 | ⬜ 未开始 | EFT/DNA/killmail 归一化；可修复错误；往返无损 |
-| M4 | P2 六视角 overview | ✅ 完成 | 六视角可出；三态齐全；41/41 字段 × 4 样本；162 条 provenance 全覆盖 |
+| M2 | P0 数据层 | ✅ 完成 | 能按名查类型、列出 group 1306 模式、单位表单测通过 |
+| M3 | P1 计算封装 | ✅ 完成 | EFT/DNA/killmail 归一化；可修复错误；往返无损 |
+| M4 | P2 六视角 overview | ⚠️ 复验未通过 | Hecate 4 样本通过（41/41 字段、162 provenance）；**真实 KB 暴露 D5/D6/D7 medium**，修复中 |
 | M5 | P3 detail/explain/sensitivity | ⬜ 未开始 | 归因可查、灵敏度可算 |
 | M6 | P4 MCP + Skill | ⬜ 未开始 | agent 可实际调用 |
 | M7 | P5 知识层（RAG） | ⬜ 未开始 | 解释增强，不影响数值 |
@@ -123,7 +123,7 @@
 54. 常量表已增至 **141 个**（129 + 12），缩放仍 **8 项**（6 毫秒 + 2 ×1000）。
 55. **provenance 首轮实测**（样本 139246907）：登记常量范围内 measured **65** / assumed **41** / unknown **36**；扫描全域 249 个 ID（measured 137 / assumed 76 / unknown 36）。轴变化数：技能 33 / 状态 18 / 剖面 23。
 56. **手写表把 7 个"静态值"高估成 measured**（实测全部 assumed）：`4 mass`、`552 signatureRadius`、`9 hullHP`、`265 armorHP`、`48 cpuOutput`、`49 cpuLoad`、`70 agility`。前三个走**状态轴**（MWD 质量与信号、结构 HP 受模块影响），其余走**技能轴**。
-57. 反向**上调**为 measured：`11 powerOutput`、`15 powerLoad`、`54 maxRange`、`158 falloff`、`263 shieldCapacity`、`55/482` 电容、`564 scanResolution`、`1132/1152` 标定、以及**全部正 ID 共振率**（109–113、267–274）。
+57. 反向**上调**为 measured：`11 powerOutput`、`15 powerLoad`、`54 maxRange`、`158 falloff`、`263 shieldCapacity`、`55/482` 电容、`564 scanResolution`、`1132/1152` 标定。（**注意：原先还包含「全部正 ID 共振率」，该说法已被第 166 条修正**。）
 58. **剖面轴只影响负 ID**（`-17..-20`、`-25..-30`、`-31..-42`、`-43`）；所有登记的正 ID 都不随剖面变。
 59. **`-58/-55/-56/-57/-59..-62/-14/-46/-47` 在该样本中引擎根本不输出** → 按规则落 `unknown`。但这是「**本样本没有该部件**」，不是「该属性永远不可知」→ **必须改两级模型**（见 60）。
 60. **provenance 判定必须两级**：①**属性级基线类**（该属性的值是否随技能/状态/剖面变化，多样本实验得出）②**实例级覆盖**（本次计算里属性缺失 → `unknown`）。当前实现把两者混成一张全局表，属模型错误。
@@ -188,6 +188,53 @@
 119. **`-51` 被动回充与模块无关**：同船型恒 ≈ **3.0469 hp/s**（f1/f2/f3/裸船逐位相同）→ **不能用它判「有没有护盾修复来源」**，只能用 raw 属性的**存在性**判。
 120. **「两种零」现在可分**：`0.0 + has_source=False`（无来源）vs `0.0 + has_source=True`（有来源但速率 0）。这比用 provenance 表达「没有模块」准确得多。
 121. **实现方两次反驳 Lead 指令且两次都对**：① 拒绝把 `shield`/`shield_passive` 合并（否则 `shield.has_source` 在所有有盾船上恒 True，信息量为零，且与任务书自身期望冲突）；② `-46/-47` 在实测表里是 `unknown` 而非 `assumed`，它按 tag 结果执行、**没有手工塞 `measured`**。
+122. **三条真实 KB 样本**（Loki T3C / Drake+AB / Griffin 空船体）**六维度全齐 41/41**，未崩溃、未缺字段 —— 但「不炸」不等于「对」。
+123. **真实样本暴露 7 条 medium 口径缺陷 → P2 本轮判不通过**（验收计划 §5：medium 阻塞）。**只用一条 Hecate 自证是不够的。**
+124. **D5**：`stability.consumables.ammo_endurance_s`（`None`）与 `firepower.ammo_endurance_s`（172.663 / 250.323）不一致 —— 同一概念在两个视角各写了一遍。
+125. **D6**：`capacitor.depletes_in_s` 把引擎 `-7` 的「不耗尽」哨兵 **`-1.0`** 当秒数输出（对应 stable 96.8 / 61.0 / 38.5 / 100 的样本）→ 稳定时应输出 `None`。
+126. **D7**：`firepower.dph` 在导弹船（Loki + 5×HML）为 **0**，且 `dps.base` 完全等于 `dps.drone` → 极可能舰船级 `-11` **只聚合炮台、不含发射器**；应改为 **Σ 装备级 `-21`** 并以 `-11` 回退。
+127. **X1**：T3C CPU 爆表（`cpu.load 10572.1` / 输出 540，cloak 装备级 `cpu(50)=10100`）；**X3** 的 AB 不生效疑似连带。待诊断是**引擎 / 读取层（`base` vs `value`）/ 样本**哪一层。
+128. **X2**：`resources.slots` 没有 `subsystem` 类 → 对 T3C 而言「槽位已满」不完整。
+129. **X4**：不变式 I5（抗性 = 基础共振率 × 模块乘数）**对效应型抗性模块不适用**（multispectrum hardener 走 effect，不改共振率基础值）→ 要真验必须走 effect 级 `sources`，降为 low，归 P3。
+130. **验收员自查并修掉 4 处自己的检查模型缺陷**：I2 把无人机 volley 算进 alpha、I5 把无人机自带抗性当模块乘数、通用单位扫描误报（`count: 1` 撞 ×1000 巧合）、口径容差比三次舍入还紧。顺带确证：**`alpha` 只聚合武器**（f5 的 6×HAM volley 合计 2105.58 == alpha，无人机 58.97 不计入）。
+131. **「`-11` 只聚合炮台、不含发射器」被实测证伪**：f5（纯导弹 Drake）6×HAM II 各 `-21 = 350.929885`，合计 **2105.579** 与 ship `-11` **逐位相等** → `-11` 确实含发射器；无人机 `-21 = 58.968` 不计入。（I2 在 f5 上严格成立。）
+132. **f4（Loki）的真根因是突变数据丢失**：唯一肇因是 **`Abyssal Ballistic Control System`（type 49738）**。killmail 只给 `item_type_id/quantity/singleton`，**不暴露 Abyssal 变异数据**；引擎按「未变异」处理，导致其对导弹伤害乘子的贡献按 0 相乘 → 5 门 HML 的 `-21`/`-12`/`-13` **全为 0**。摘除该件后 ship `-11` 从 **0 → 1427.588**。对照实验：普通 `BCS II`(15681) 完全不影响 `-21`（230.85 不变）。
+133. → **D7 不是投影层口径缺陷，而是导入层数据保真问题**（killmail 天然丢 mutation）。修复点在 `engine/**` 或上游；D7 应降级为与 X1 同类的观察项。
+134. **裁决**：含突变模块但输入无变异数据时，受影响的关键数值输出 **`null` + `unknown` + 显式 flag**，**不得输出 `0.0` 伪事实**。判据可用「有带弹药的武器但 `dph == 0`」这一自相矛盾作为触发条件。
+135. **T3C CPU 异常的三层判定**：读取层**无问题**（`views/base.py` 读 `value`，全仓 `get("base")` 出现 0 次）；引擎**无 bug**（10100 是对「已装 45597」的**正确**实现，同一段代码在 Buzzard 上给 80.0）；**根因 = killmail 还原 + 我们的状态语义缺失**。
+136. 传导链（SDE 实读）：`45597`（Defensive-Adaptive Defense Node）的 `1871 covertCloakCPUPenalty = 10000` --effect 5262（ship 域）--> 所有模块的 `1870 covertCloakCPUAdd` --effect 5261（item 域）--> cloak 的 `50` → **100 + 10000 = 10100**。子系统机制是**加罚**，不是打折。
+137. **决定性证据**：能让罚值消失的 `45595 Loki Defensive - Covert Reconfiguration` 位于 **flag 177（SubSystemBay 子系统舱）**，不是已装槽位（125–128 才是 SubSystemSlot）；`load_killmail` **静默丢弃** flag 177 物品 → 该 Loki 的 covert cloak 在真实游戏里**不可能在线**（需 10100，实际只剩约 472 余量）。
+138. **真实占用 = 472.1 tf ≤ 540 tf（余 67.9）**。引擎不做资源门控（`validate` 只报违规，`post_load` 也只把 cloak 设成 online），而 `resources` 直接取 ship `49` → **把「不可能在线」的模块当真实占用渲染**。数字没读错，是**「状态没落地」**。
+139. **X3 独立于 X1**：Abyssal AB 的 `speedFactor(20)` base 1.0 / value **1.1**（加成只在 mutation 里）；换正品 `100MN Afterburner II` 后 ship 最大速度 **185.0 → 830.9（4.49×）** → 推进计算本身正常，问题只在**缺 mutation**。修好 CPU 也不会让该 AB 生效。
+140. → **突变数据丢失是系统性输入保真问题**：同时污染导弹伤害（D7）与推进速度（X3）。应作为一类缺陷统一处理，而不是两个孤立的 bug。
+141. **T-20 交付**：D5 ✅（f4 `172.663/172.663`、f5 `250.323/250.323`、f1 `154.872/154.872` **逐位相同**）、D6 ✅（f3–f6 → `None`，f1 仍 `38.4`）、X2 ✅（Loki `subsystem {4,5}` + `empty_slots.subsystem 1`）。D7 的根因已定性，输出改为 `null`（T-22 执行）。
+142. **改动对拍的证明方式值得记**：T-20 改动前**冻结 6 个样本的完整 render 输出**，改后逐叶子 diff —— f1 **0 处变化（逐字节相同）**，f2/f3/f6 仅 `depletes_in_s`，f5 9 处、f4 16 处，全部可归因。**这比"测试通过"强得多。**
+143. **`1367 = maxSubSystems`**（displayName `Subsystem Slots`）才是 T3C 船体的子系统槽总量（Loki = 5）；Hecate(T3D)/Drake/Griffin 引擎**不给这个键**；`1366 subSystemSlot` 不是它。
+144. **弹药续航唯一算法**：`⌊capacity(38) ÷ (弹药 volume(161) × chargeRate(56))⌋ × 51`，取最短；**不能用 `73 duration` 当周期**（那是模块生效时长）。
+145. **新增高优缺陷**：`f10/f11`（T3D Confessor/Svipul）的 `modes` **缺失 6 条** —— 与「group 1306 有 Confessor/Svipul 各 3 模式」的已知事实矛盾，待 T-23 定位。
+146. **第 1 轮 10 条 KB 结果：新缺陷 0 条，字段累计通过率 656/656 = 100%**（16 样本 × 41 字段）。T3C 四艘全齐、两种 T3D 的 `modes` 方向正确、后勤/指挥/战列/HAC 均未崩溃。
+147. **`modes` 的「6 条缺失」是验收员自己的假缺陷**：它的名称匹配**硬编码了 `"Hecate "` 前缀**，换成 Confessor/Svipul 后对不上 → 归一规则已改为「去掉 ` Mode` 后取最后一个词」，不依赖船名。
+148. **不变式 I5 被修正**：「抗性 = 基础共振率 × 模块共振率」**只在单模块时成立**。f7/f14 同时装 DC II + Reactive Armor Hardener + 2× Multispectrum Membrane 时，移除 0.85 的 DC II 得到 **0.8696** 而非 0.85 —— **这是堆叠惩罚**，不是 bug。多模块验证须走「逐模块移除实验」。
+149. **X5（新观察）**：Damnation 裸船装甲 HP **7,896** → 整装 **34,142**（+26,246，来自 2 块 FN 装甲板 + 2× Trimark 装甲泵 + DC II），EHP **234,743**；按模块常识疑为重复计入，待复核。
+150. **X1 不是 T3C 通病**：f7/f8/f9（Legion/Tengu/Proteus）CPU 正常、无 `tier_violations`；X1 是 **Loki + Covert Ops Cloaker** 的特例。
+151. **T-25 修掉导弹射程双换算** → Kestrel/Scourge Light `max_range_m = 51450.0`、Raven/Precision Heavy `30776.528`；全量 **389 passed**，无连带破坏。
+152. `shared.py` 与 `project/views/` 全目录**已无第二处双换算**（无 `ms_to_s` / `s_to_ms` / `/1000` / `*1000` 算术）。`acceptance/fixtures/prepare_expected.py` 与测试里的 `/1000` 作用于**原始毫秒**，口径正确。
+153. **X5 关闭：Damnation 34,142 装甲 HP 是正确的**。逐位闭式复算差 **0.000e+00**：
+`(4700 基础 + 5000 + 2500 板) × 1.4(Command Ships 10%/级×4) × 1.2(Hull Upgrades) × 1.44(2×Trimark) × 1.1568(装甲指挥脉冲自增益) = 34142.072832`。
+154. **错的是「~2 万量级」这个直觉**：`20496`（裸船 + 2 板）忽略了 3 项乘子 —— 板被前置百分链放大 1.68 倍（7500→12600）、Trimark +44%、脉冲波 +15.68%。
+155. **EVE 算子次序**：`mod_add` 先合入、`post_percent` 后乘 → SDE 里 `armorHPBonusAdd = 5000/2500` 的装甲板，实际贡献被放大成 **8400/4200**。
+156. **hit points 免堆叠惩罚**（EVE 规则）：2× Trimark II 均 `penalty=None`、满值 20% 生效。对照实验 2× `Medium EM Armor Reinforcer II` 在**抗性**上照罚（`1.0 / 0.8691`）→ **引擎的惩罚机制本身没坏**，是属性类别不同。
+157. 技能档对该值极敏感：`Command Ships` 5 → `36,713.61`；`Hull Upgrades` 5 → `35,564.66` → 34,142 是「全 4 档 + 全 active + 含自身指挥脉冲」口径的产物。
+158. **观察项（未定性）**：两块 `Armor Command Burst II` 置 `offline` 后 `armorHP` **不变** → 引擎的 buff 传播似乎不受模块 `state` 影响。待后续确认是否合理。
+159. **T-22 落地四项**（391 passed）：`dph` 矛盾判据 → `null` + flag `weapon_damage_zero`；新增 `feasible` / `over_budget{cpu,powergrid}` + flag `resource_over_budget_unflyable`；`load_killmail` 不再静默丢 flag 177；诊断 evidence 走 `shared.depletes_in_s()`。
+160. **f1（Hecate）本身就不 feasible**：全 4 档下 CPU 余量 **−11.0**、PG **−3.6**。f5 也超（CPU −30.0）。真正 feasible 的是 f3/f6/f9/f14。→ **「配装不可飞」不是罕见个例**，`feasible` 字段是必需的。
+161. **f4 的 CPU 缺口 10032.1 = 10100（cloak 100 + covert 罚值 10000）− 67.9 余量**，与「真实可飞 472.1」互证 —— `feasible False` 与 `cpu.load` 原样保留是同一件事的两面。
+162. **`dph` 为 `null` 时 provenance 仍是 `measured`**：`FIELD_SOURCES` 是静态映射表，**无法按值变形** → `null` 的语义只能由 flag 表达。这是**两层 provenance 模型**（属性级类 + 实例级覆盖）的直接需求（欠账 24）。
+163. **T-23 确认「modes 缺失」是验收器假缺陷**（硬编码 `"Hecate "`），产品四层全正常；已加回归测试钉死。`1367 maxSubSystems` / `281 explosionDelay` 已登记。
+164. **静默退化第 3 次出现**：`tools/derive_provenance.py::load_sample()` 未传 index，导致 provenance 表在**旧 19 技能档**上推导 → 已写入开发规范 §4.6 + 红线 N16（可选参数不得静默退化）。
+165. **第 61 条被修正**：弹药四系伤害（`114/116/117/118`）与 `653 aoeVelocity` **确实在** `calculate` 的**装备条目**里（导弹发射器把已装填弹药属性合并进自己的 `attributes`；无人机条目也带四系伤害）。实测 f4 `Republic Fleet Valkyrie` → 116=32.0、f15 `Rapid Heavy Missile Launcher II` → 281=0.0/653=0.0。→ `damage_split.*` 应为 **`measured`**，不是 `unknown`。
+166. **护盾共振率 `271–274` 应变 `assumed`（原 `measured` 是单样本假象）**：f4 的 `EM Ward Field II`、f15 的 `Thermal Dissipation Field II` 是**盾抗模块**，`active` 才有抗性 → 状态轴下 `271` 从 `0.5`（online）变 `0.2969`（active）。`109–113`（结构）与 `267–270`（装甲）在本批样本仍是 `measured`。
+167. **由此得出一个根本性认知**：**provenance 本质上是「按配装」的性质，不是「按属性」的性质**。同一属性（如护盾共振率）在无盾抗模块的船上可以是 `measured`，在有盾抗模块的船上必须是 `assumed`。→ **属性级静态表只能是近似**，两层模型（欠账 24）从"应该做"升级为"必须做"。
 
 ---
 
@@ -287,7 +334,21 @@
 | 42 | **`confidence` 全量平行表 +5,093 chars**（默认值被显式输出）→ 改稀疏表 | T-18 | ✅ 完成（真实增量降到 +223） |
 | 43 | `acceptance/run_acceptance.py` 的 confidence 查表口径（spec 字段名 vs 叶子路径） | evefit-tester | ✅ 已对齐（验收侧本就是稀疏约定） |
 | 44 | 文档里 `D`（需对拍）档已收敛为 `A`；`C` 仅表示「不可用」 | Lead | 待改字段规格 |
-| 45 | `acceptance/run_acceptance.py::check_repair_zero` 仍期望 `0.0 + measured`，与新裁决（`0.0` + 属性级 tag + `has_source`）不一致 → 会误报 6 条 low | evefit-tester | 已通知 |
+| 45 | `acceptance/run_acceptance.py::check_repair_zero` 仍期望 `0.0 + measured`，与新裁决（`0.0` + 属性级 tag + `has_source`）不一致 → 会误报 6 条 low | evefit-tester | ✅ 完成（4 条判据重写，0 误报且 4/4 注入全中） |
+| 46 | **D5** `ammo_endurance_s` 两视角不一致 | T-20 | ✅ 完成（抽到 `shared.py`，三样本逐位相同） |
+| 47 | **D6** `depletes_in_s` 哨兵 `-1.0` 被当秒数 | T-20 | ✅ 完成（f3–f6 → `None`，f1 仍 38.4） |
+| 48 | **D7** 导弹船 `dph = 0`（实为突变数据丢失） | T-22 | 进行中（改 `null` + `unknown` + flag） |
+| 49 | **X2** `slots` 缺 `subsystem` 类（T3C） | T-20 | ✅ 完成（Loki 4/5） |
+| 50 | **X1/X3** T3C CPU 爆表 / AB 不生效 | T-21 诊断 | 进行中 |
+| 51 | **X4** I5 对效应型抗性模块不适用（须走 effect 级 `sources`） | P3 | 待办 |
+| 52 | `subsystemSlots` 属性 ID 未登记常量表 | 待 T-20 结果 | 中 |
+| 53 | **突变（Abyssal/Mutated）数据保真**：killmail 不带 mutation，引擎按未变异算 → 相关数值失真 | T-22 / 上游 | **高** |
+| 54 | **`dph` 在「有弹药却算出 0」时改输出 `null` + `unknown` + flag**（裁决已定，待实现） | T-22 | **高** |
+| 55 | `load_killmail` **静默丢弃 flag 177（SubSystemBay）备用件**，无日志无 violations | T-22 | **高** |
+| 56 | **资源可行性语义缺失**：`cpuLoad > cpuOutput` 时仍裸渲染理论值，未标「部分模块不可能在线」 | T-22 | **高** |
+| 57 | 突变模块检测 → 归一化/诊断给显式 flag（覆盖 D7 与 X3 同一根因） | T-22 | **高** |
+| 58 | `firepower.py` docstring 陈旧（仍称 281 不在 `SCALE_BY_ATTR`、说「8 项」，实为 11 项 = 9 毫秒 + 2 ×1000） | 下一轮清理 | 低 |
+| 59 | 常量清单靠人工穷举必漏（281 / 56 / 1272 都是事后补的）→ 需「视角用到的 ID 必须全在常量表」的自动检查 | 待立项 | 中 |
 
 ---
 
@@ -312,6 +373,11 @@
 17. **装备级属性也会被 `units.physical()` 换算**（`views/base.py::item_attributes`）→ 千万别在视角里对已登记的毫秒属性再除 1000，会差 1000 倍且不报错。
 18. **子代理之间会互相打红测试**：T-12 在改 `engine/assumptions.py` 期间，`test_engine` 必然红；这类红是并行的正常摩擦，判据是「最终全量绿」，不是「中途每个代理都绿」。
 19. **`ViewContext` 只从 `ctx.fit` 建变体，不读 `ctx.assumptions`** → 构造上下文时必须把技能注入 `fit["character"]["skills"]`，否则全部按**零技能**算（EHP 7585.48、速度 1059.68），看起来像一堆口径错误。验收员自己就踩过，误报 72 条。
+20. **把属性登记进 `SCALE_BY_ATTR` 是一个「全局破坏性」操作**：所有已按「原始值 + 手工换算」写的消费点会立刻变成**双换算**（差 1000 倍且不报错）。实测：登记 `281 explosionDelay` 后 `_missile_range_m` 从 51450 变成 **51.45**。
+   → 登记缩放时必须**全仓搜索该 ID 的每个消费点**，并检查 `ms_to_s` / `s_to_ms` / `/1000` / `*1000`。
+21. **并行任务会互相打红测试**：一个代理登记缩放常量、另一个代理的既有代码立刻失效；判据是「最终全量绿」，中途红不代表谁的错。
+22. **「量级不对」的直觉本身可能是错的**：X5 的 34,142 装甲 HP 看起来高得离谱，实测**逐位正确**（差 0）。判据必须是**闭式复算**——把每一项乘子写出来乘一遍与引擎逐位比对，不是"按常识应该多少"。
+23. **不同属性类别的堆叠惩罚规则不同**：hit points（护盾/装甲/结构）**免**罚，抗性**吃**罚。拿抗性的经验去怀疑 HP 会得出相反结论（差点冤枉引擎）。
 
 ---
 
