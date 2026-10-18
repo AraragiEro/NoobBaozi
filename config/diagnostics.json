@@ -69,6 +69,12 @@
       "message": "有带弹药的武器但齐射伤害为 0：可能因突变模块数据缺失（killmail 不暴露 mutation）"
     },
     {
+      "id": "fighters_in_bay_only",
+      "view": "firepower",
+      "enabled": true,
+      "message": "机库内有 {fighter_bay_count} 架载机但未发射（发射管占用 {fighter_tubes_used}），其伤害未计入"
+    },
+    {
       "id": "cap_sensitive",
       "view": "stability",
       "enabled": true,

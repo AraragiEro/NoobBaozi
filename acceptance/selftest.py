@@ -193,6 +193,11 @@ def _good_payload(facts: ra.CaseFacts, oracle) -> dict:
             "load": tv(ship.get(1152), unit="点", source_attr=1152),
             "free": tv((ship.get(1132) or 0.0) - (ship.get(1152) or 0.0), unit="点"),
         },
+        "feasible": True,
+        "over_budget": {
+            "cpu": tv(0.0, unit="tf"),
+            "powergrid": tv(0.0, unit="MW"),
+        },
         "slots": {
             "high": {"used": tv(min(hi_used, int(hi_total)), unit="个"), "total": tv(hi_total, unit="个")},
             "medium": {"used": tv(3, unit="个"), "total": tv(med_total, unit="个")},
@@ -410,6 +415,130 @@ BARE_MUTATIONS = (
 
 
 # ---------------------------------------------------------------------------
+# T-23 新字段：feasible / over_budget / dph=null 的自证 payload
+# ---------------------------------------------------------------------------
+
+
+def _resources_payload(cpu_free=10.0, pg_free=5.0, cal_free=100.0, infeasible=False):
+    """合成 resources 视角：feasible / over_budget / flag 三者一致。"""
+    return {
+        "views": {
+            "resources": {
+                "overview": {
+                    "cpu": {"output": 100.0, "load": 100.0 - cpu_free, "free": cpu_free},
+                    "powergrid": {"output": 50.0, "load": 50.0 - pg_free, "free": pg_free},
+                    "calibration": {"output": 400.0, "load": 400.0 - cal_free, "free": cal_free},
+                    "feasible": not infeasible,
+                    "over_budget": {
+                        "cpu": max(0.0, -cpu_free),
+                        "powergrid": max(0.0, -pg_free),
+                    },
+                },
+                "provenance": {},
+                "flags": ([{"id": "resource_over_budget_unflyable", "view": "resources"}]
+                          if infeasible else []),
+            }
+        }
+    }
+
+
+def mutation_feasible_wrong(payload, state):
+    payload["views"]["resources"]["overview"]["feasible"] = False
+    return payload, "口径错误"
+
+
+def mutation_over_budget_wrong(payload, state):
+    payload["views"]["resources"]["overview"]["over_budget"]["cpu"] = 3.0
+    return payload, "口径错误"
+
+
+def mutation_infeasible_without_flag(payload, state):
+    overview = payload["views"]["resources"]["overview"]
+    overview["cpu"]["free"] = -11.0
+    overview["cpu"]["load"] = 111.0
+    overview["feasible"] = False
+    overview["over_budget"]["cpu"] = 11.0
+    payload["views"]["resources"]["flags"] = []
+    return payload, "字段缺失"
+
+
+FEASIBLE_MUTATIONS = (
+    ("feasible 与余量不符", mutation_feasible_wrong),
+    ("over_budget 与缺口不符", mutation_over_budget_wrong),
+    ("不可行但缺 flag", mutation_infeasible_without_flag),
+)
+
+
+def _dph_null_payload(with_flag: bool):
+    flags = [{"id": "weapon_damage_zero", "view": "firepower"}] if with_flag else []
+    return {
+        "views": {
+            "firepower": {
+                "overview": {
+                    "dph": None,
+                    "weapons": [{"name": "Heavy Missile Launcher II", "count": 5,
+                                 "ammo_name": "Nova Heavy Missile", "family": "missile"}],
+                },
+                "provenance": {},
+                "flags": flags,
+            }
+        }
+    }
+
+
+# ---------------------------------------------------------------------------
+# repair 零值语义（T-19）：合成 payload 用于验证 check_repair_zero
+# ---------------------------------------------------------------------------
+
+
+def _repair_payload(oracle):
+    """按 T-19 裁决拼一份合规的 repair（值 0.0、provenance 跟随属性级 tag、有 has_source）。"""
+    repair = {
+        "shield": {"has_source": False, "raw_hp_s": 0.0, "effective_ehp_s": 0.0},
+        "shield_passive": {"has_source": True, "raw_hp_s": 3.047, "effective_ehp_s": 5.804},
+        "armor": {"has_source": False, "raw_hp_s": 0.0, "effective_ehp_s": 0.0},
+        "hull": {"has_source": False, "raw_hp_s": 0.0, "effective_ehp_s": 0.0},
+    }
+    table = {}
+    for layer, (raw_attr, eff_attr) in ra.REPAIR_LAYER_ATTRS.items():
+        table[f"repair.{layer}.raw_hp_s"] = (oracle.tag(raw_attr) if oracle.available else None) or "unknown"
+        table[f"repair.{layer}.effective_ehp_s"] = (oracle.tag(eff_attr) if oracle.available else None) or "assumed"
+        table[f"repair.{layer}.has_source"] = "assumed"
+    return {"views": {"survivability": {"overview": {"repair": repair}, "provenance": table}}}, repair
+
+
+def mutation_repair_source_with_value(payload, repair):
+    """has_source=False 却报出修复量 —— 自相矛盾（high）。"""
+    repair["shield"]["raw_hp_s"] = 12.5
+    return payload, "口径错误"
+
+
+def mutation_repair_null_value(payload, repair):
+    """无模块层给 null（应给 0.0）（medium）。"""
+    repair["hull"]["raw_hp_s"] = None
+    return payload, "口径错误"
+
+
+def mutation_repair_missing_has_source(payload, repair):
+    del repair["armor"]["has_source"]
+    return payload, "字段缺失"
+
+
+def mutation_repair_manual_measured(payload, repair):
+    """手工把 -47 的 provenance 塞成 measured（属性级 tag 是 unknown）→ high。"""
+    payload["views"]["survivability"]["provenance"]["repair.shield.raw_hp_s"] = "measured"
+    return payload, "provenance 错误"
+
+
+REPAIR_MUTATIONS = (
+    ("repair: has_source=False 却有修复量", mutation_repair_source_with_value),
+    ("repair: 无模块层给 null", mutation_repair_null_value),
+    ("repair: 缺 has_source", mutation_repair_missing_has_source),
+    ("repair: 手工塞 measured", mutation_repair_manual_measured),
+)
+
+
+# ---------------------------------------------------------------------------
 # 注入缺陷
 # ---------------------------------------------------------------------------
 
@@ -620,6 +749,63 @@ def main() -> int:
 
     print()
     print("=" * 78)
+    print("B3) repair 零值语义（T-19：0.0 + has_source + provenance 跟随属性级 tag）")
+    print("=" * 78)
+    repair_payload, repair_node = _repair_payload(oracle)
+    repair_defects = ra.check_repair_zero("f1", repair_payload, facts, oracle)
+    print(f"  合规 repair 缺陷条数 = {len(repair_defects)}")
+    for defect in repair_defects:
+        print(f"    [意外] {defect.category} {defect.severity} {defect.where}: {defect.actual}")
+    repair_ok = not repair_defects
+    print()
+    print(f"  {'注入的缺陷':34s} {'期望类别':14s} {'实际命中':20s} 判定")
+    print("  " + "-" * 80)
+    repair_mut_ok = True
+    for label, mutation in REPAIR_MUTATIONS:
+        payload_copy, repair_copy = _repair_payload(oracle)
+        payload_copy, expected_category = mutation(payload_copy, repair_copy)
+        found = ra.check_repair_zero("f1", payload_copy, facts, oracle)
+        hit = {d.category for d in found}
+        ok = expected_category in hit
+        repair_mut_ok = repair_mut_ok and ok
+        print(f"  {label:34s} {expected_category:14s} "
+              f"{('、'.join(sorted(hit)) or '（未命中）'):20s} {'✅' if ok else '❌'}")
+
+    print()
+    print("=" * 78)
+    print("B4) T-23 新字段：feasible / over_budget / dph=null 的 flag 契约")
+    print("=" * 78)
+    base_resources = _resources_payload()
+    base_defects = ra.check_feasible("f1", base_resources, facts)
+    print(f"  合规 resources 缺陷条数 = {len(base_defects)}")
+    for defect in base_defects:
+        print(f"    [意外] {defect.category} {defect.severity} {defect.where}: {defect.actual}")
+    feasible_ok = not base_defects
+    feasible_mut_ok = True
+    print()
+    print(f"  {'注入的缺陷':30s} {'期望类别':12s} {'实际命中':18s} 判定")
+    print("  " + "-" * 74)
+    for label, mutation in FEASIBLE_MUTATIONS:
+        payload_copy, expected_category = mutation(_resources_payload(), None)
+        found = ra.check_feasible("f1", payload_copy, facts)
+        hit = {d.category for d in found}
+        ok = expected_category in hit
+        feasible_mut_ok = feasible_mut_ok and ok
+        print(f"  {label:30s} {expected_category:12s} "
+              f"{('、'.join(sorted(hit)) or '（未命中）'):18s} {'✅' if ok else '❌'}")
+
+    # dph=null 必须带 flag
+    dph_with = ra.check_weapons_vs_alpha("f1", _dph_null_payload(with_flag=True))
+    dph_without = ra.check_weapons_vs_alpha("f1", _dph_null_payload(with_flag=False))
+    dph_ok = not dph_with and any(d.category == "字段缺失" for d in dph_without)
+    print(f"  {'dph=null 且带 flag':30s} {'无缺陷':12s} "
+          f"{('无' if not dph_with else '有'):18s} {'✅' if not dph_with else '❌'}")
+    print(f"  {'dph=null 但缺 flag':30s} {'字段缺失':12s} "
+          f"{('、'.join(sorted({d.category for d in dph_without})) or '（未命中）'):18s} "
+          f"{'✅' if dph_ok else '❌'}")
+
+    print()
+    print("=" * 78)
     print("C) 形状样例落盘（给实现方对照）：形态A 与形态B 各一份")
     print("=" * 78)
     sample_path = HERE / "out" / "views-样例.json"
@@ -643,11 +829,15 @@ def main() -> int:
 
     print()
     print("=" * 78)
-    passed = baseline_ok and all_ok and bare_ok and bare_mutations_ok and conf_ok
+    passed = (baseline_ok and all_ok and bare_ok and bare_mutations_ok
+              and conf_ok and repair_ok and repair_mut_ok
+              and feasible_ok and feasible_mut_ok and dph_ok)
     print(f"自测结论：{'全部通过' if passed else '存在失败项'}"
           f"（形态B 合规零缺陷={baseline_ok} / 形态B 注入全中={all_ok} / "
           f"形态A 合规零缺陷={bare_ok} / 形态A 注入全中={bare_mutations_ok} / "
-          f"稀疏confidence 注入全中={conf_ok}）")
+          f"稀疏confidence 注入全中={conf_ok} / repair 合规={repair_ok} / repair 注入全中={repair_mut_ok} / "
+          f"feasible 合规={feasible_ok} / feasible 注入全中={feasible_mut_ok} / "
+          f"dph=null 契约={dph_ok}）")
     print("=" * 78)
     return 0 if passed else 1
 

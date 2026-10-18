@@ -9,7 +9,8 @@
 1. `render_overview` 的视角键 = `VIEW_ORDER`，每个视角
    `{overview, provenance, confidence, flags}`；
 2. **每个视角 provenance 覆盖率 100%**：`set(provenance) == set(overview 叶子点路径)`，
-   且三态取值合法、`FIELD_SOURCES` 的映射（含 `None` → `assumed`）逐条对得上；
+   且三态取值合法、`FIELD_SOURCES` 的映射（含 `None` → `assumed`；T-27 起**值缺失
+   优先** → `unknown`）逐条对得上；
 3. **诊断只算一次**（用计数器桩证明 `diagnostics.evaluate` 每轮只被调用一次），
    并按 `flag["view"]` 归位到对应视角；未渲染视角的 flag 进顶层兜底、不丢；
 4. `meta` 含版本三元组 + `assumptions`（且就是 `ctx.assumptions` 本身）；
@@ -36,6 +37,10 @@
     ③ `provenance` 键集合 == overview 叶子集合。`application.*` 三个未建模参数为 `E`，
     其余路径不出现（= 默认 `A`）；与 provenance 正交（同一路径可以是 `assumed` + `E`，
     也可以是 `assumed` + 默认 `A`）；`render_detail` 同口径裁剪。
+13. **T-27 实例级覆盖**：`值缺失 ⇒ unknown`（`provenance.resolve()`）。f4 的 `dph`
+    （`None`）必须是 `unknown`，f1/f5 的 `dph`（有数值）保持静态表结论；任意视角里值为
+    `None` 的叶子一律 `unknown`（通用断言遍历全部叶子）；值存在的叶子仍与 `tag()`
+    逐条一致（抽 7 个对照，含数组元素 / 整数键容器 / 合成值来源）。
 
 约束：无网络、无随机（红线 N1）；样本只读；只碰本任务写入范围内的文件。
 """
@@ -64,6 +69,11 @@ EVE_ROOT = Path(__file__).resolve().parents[1]
 KILL_PATH = EVE_ROOT / "spike" / "kill.json"
 RENDER_PATH = EVE_ROOT / "project" / "render.py"
 BASELINE_PATH = EVE_ROOT / "tools" / "baseline_after_tierfix.json"
+FIXTURES_DIR = EVE_ROOT / "acceptance" / "fixtures"
+"""验收样本目录（只读）：T-27 的 f1/f4/f5 从这里的**输入**文件取，不碰 `*.expected.json`。"""
+
+INSTANCE_SAMPLES: tuple[str, ...] = ("f1-hecate-killmail", "f4-non-hecate", "f5-no-mwd")
+"""T-27 的对照样本：f1/f5 的 `dph` 有数值，f4 的 `dph` 是 `None`（有弹药却零伤害）。"""
 
 BIG_BUDGET: int = 10**9
 """「不可能超」的预算：让输出保持原始形态（不降级），用于结构类断言。"""
@@ -146,6 +156,52 @@ def overview(ctx: ViewContext) -> dict:
         render.BUDGET_CHARS = original
 
 
+def _load_instance_fit(engine: Engine, index, stem: str) -> dict:
+    """按样本名加载配装 + 「全 4 + 补最低」技能档（f1 是 `.eft`，f4/f5 是 killmail）。
+
+    **必须排除 `*.expected.json`**：快照文件的 stem 比输入文件更靠前（`glob` 顺序），
+    它没有 `killmail_id`，误取会以「missing field killmail_id」炸在引擎里。
+    """
+    candidates = [
+        path
+        for path in sorted(FIXTURES_DIR.glob(f"{stem}*"))
+        if not path.name.endswith(".expected.json")
+    ]
+    assert candidates, f"找不到样本 {stem} 的输入文件（{FIXTURES_DIR}）"
+    path = candidates[0]
+    if path.suffix == ".eft":
+        fit = engine.load_eft(path.read_text(encoding="utf-8"))
+    else:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = raw[0] if isinstance(raw, list) else raw
+        raw.pop("zkb", None)  # zkillboard 附加字段，不是 killmail 字段
+        fit = dogma.load_killmail(raw)
+    fit["character"] = {"skills": derive_skill_tier(fit, engine, index=index)}
+    return fit
+
+
+@pytest.fixture(scope="module")
+def rendered_samples(engine: Engine, index) -> dict[str, dict]:
+    """f1 / f4 / f5 三个样本各渲染一次 overview（预算调大，排除降级对结构的干扰）。"""
+    original = render.BUDGET_CHARS
+    render.BUDGET_CHARS = BIG_BUDGET
+    try:
+        rendered: dict[str, dict] = {}
+        for stem in INSTANCE_SAMPLES:
+            fit = _load_instance_fit(engine, index, stem)
+            ctx = ViewContext(
+                engine=engine,
+                index=index,
+                fit=fit,
+                assumptions=default_assumptions(fit, engine, index=index),
+                meta=engine.meta(),
+            )
+            rendered[stem] = render.render_overview(ctx)
+        return rendered
+    finally:
+        render.BUDGET_CHARS = original
+
+
 @pytest.fixture(scope="module")
 def baseline() -> dict:
     """`tools/baseline_after_tierfix.json`：**四模式数值的权威快照**。"""
@@ -224,6 +280,33 @@ def _leaf_paths(node: object, prefix: str = "") -> list[str]:
             found.extend(_leaf_paths(item, f"{prefix}{ARRAY_MARKER}"))
         return list(dict.fromkeys(found)) or [prefix]
     return [prefix]
+
+
+def _leaf_values(node: object, prefix: str = "") -> dict[str, list[object]]:
+    """**独立实现**的「叶子点路径 → 该路径上所有出现过的值」（同 `_leaf_paths` 的寻址）。
+
+    T-27 的实例级规则看的是**值**，所以测试也要能拿到值：数组元素路径
+    （`weapons[].ammo_name`）会收集每个元素的值，一个路径可能对应多个出现。
+    """
+    if isinstance(node, dict) and node:
+        found: dict[str, list[object]] = {}
+        for key, value in node.items():
+            child = f"{prefix}.{key}" if prefix else str(key)
+            for path, occurrences in _leaf_values(value, child).items():
+                found.setdefault(path, []).extend(occurrences)
+        return found
+    if isinstance(node, list) and node and all(isinstance(item, dict) for item in node):
+        found = {}
+        for item in node:
+            for path, occurrences in _leaf_values(item, f"{prefix}{ARRAY_MARKER}").items():
+                found.setdefault(path, []).extend(occurrences)
+        return found
+    return {prefix: [node]}
+
+
+def _has_missing_value(occurrences: list[object]) -> bool:
+    """一条路径上任一出现是 `None` = 实例级「值缺失」（保守口径，与渲染层一致）。"""
+    return any(value is None for value in occurrences)
 
 
 def _covered_by(path: str, registered: str) -> bool:
@@ -347,21 +430,30 @@ def test_provenance_states_are_valid(overview: dict, view_name: str) -> None:
 
 @pytest.mark.parametrize("view_name", VIEW_ORDER)
 def test_provenance_follows_field_sources(overview: dict, view_name: str) -> None:
-    """映射 `None` → `assumed`；映射到属性 ID → `provenance.tag(ID)`。
+    """**两层模型（T-27）**：先判实例值，再回静态表。
+
+    - 该叶子在本次计算里**值缺失**（任一出现是 `None`）→ `unknown`，**覆盖**静态表；
+    - 值存在时：映射 `None`（合成值）→ `assumed`；映射到属性 ID → `provenance.tag(ID)`。
 
     只检查**确实出现在这次 overview 里**的映射路径（空列表会被折叠成容器路径，
-    见渲染层 docstring），避免把结构差异误判成标签错误。
+    见渲染层 docstring），避免把结构差异误判成标签错误。这条不是放宽：值存在的路径
+    仍然要求与静态表**逐条相等**，值缺失的路径多了一条更严格的 `unknown` 要求。
     """
     from evefit.project import provenance as P  # 局部 import：只为对拍三态
 
     sources = VIEW_MODULES[view_name].FIELD_SOURCES
     states = overview["views"][view_name]["provenance"]
+    values = _leaf_values(overview["views"][view_name]["overview"])
 
     checked = 0
     for path, attribute_id in sources.items():
         if path not in states:
             continue
-        expected = "assumed" if attribute_id is None else P.tag(int(attribute_id))
+        static = "assumed" if attribute_id is None else P.tag(int(attribute_id))
+        if _has_missing_value(values.get(path, [])):
+            expected = "unknown"  # 实例级覆盖：值缺失 ⇒ unknown
+        else:
+            expected = static
         assert states[path] == expected, f"{view_name}.{path} 应为 {expected}，实为 {states[path]}"
         checked += 1
     assert checked > 0, f"{view_name} 的 FIELD_SOURCES 一条都没对上（说明结构变了）"
@@ -442,6 +534,120 @@ def test_provenance_uses_array_element_convention(overview: dict) -> None:
         assert "cap_by_module[].cap_use_gj_s" in stability["provenance"]
     else:  # 没有耗电模块时整块折叠成一个键（结构差异，不是标签问题）
         assert "cap_by_module" in stability["provenance"]
+
+
+# =============================================================================
+# 三·B、实例级覆盖（T-27：值缺失 ⇒ unknown，覆盖静态表）
+# =============================================================================
+
+
+def test_dph_missing_value_is_unknown_and_present_value_keeps_the_table(
+    rendered_samples: dict[str, dict],
+) -> None:
+    """**本轮核心验收**：`dph` 的三态跟着**值**走，不跟着属性表走。
+
+    - `f4-non-hecate`：`dph` 是 `None`（有带弹药武器却零伤害，突变模块数据缺失）→
+      `unknown`。旧口径给它 `assumed`（`-11` 在静态表里是 `assumed`），
+      等于「值不可信，三态却说可信」——正是本轮要修的根因性缺陷。
+    - `f1-hecate-killmail` / `f5-no-mwd`：`dph` 是数值 → **保持原样**
+      （仍等于 `provenance.tag(-11)`），本轮改动不得让它们漂移。
+    """
+    from evefit.project import provenance as P
+
+    attribute_id = VIEW_MODULES["firepower"].FIELD_SOURCES["dph"]
+    static = P.tag(int(attribute_id))
+
+    f4 = rendered_samples["f4-non-hecate"]["views"]["firepower"]
+    assert f4["overview"]["dph"] is None, "f4 的 dph 应仍是 None（矛盾判据，值本身就是缺陷证据）"
+    assert f4["provenance"]["dph"] == "unknown", (
+        f"f4.dph 值缺失却报 {f4['provenance']['dph']!r}——实例级覆盖没生效"
+    )
+
+    for stem in ("f1-hecate-killmail", "f5-no-mwd"):
+        entry = rendered_samples[stem]["views"]["firepower"]
+        value = entry["overview"]["dph"]
+        assert isinstance(value, (int, float)) and value > 0, f"{stem}.dph 应有数值，实为 {value!r}"
+        assert entry["provenance"]["dph"] == static, (
+            f"{stem}.dph 有值时应保持静态表结论 {static!r}，实为 {entry['provenance']['dph']!r}"
+        )
+
+
+@pytest.mark.parametrize("stem", INSTANCE_SAMPLES)
+def test_every_missing_value_leaf_is_unknown(rendered_samples: dict[str, dict], stem: str) -> None:
+    """**通用断言**：任意视角里值为 `None` 的叶子，三态必须是 `unknown`（遍历全部叶子）。
+
+    口径与渲染层一致：数组元素路径上**任一元素**缺值就算缺值（一条路径只有一个标签，
+    不能比它最弱的那个出现更自信）。
+    """
+    rendered = rendered_samples[stem]
+    violations: list[str] = []
+    checked = 0
+
+    for view_name, entry in rendered["views"].items():
+        assert entry["provenance"], f"{view_name} 的 provenance 不该是空表"
+        for path, occurrences in _leaf_values(entry["overview"]).items():
+            if not _has_missing_value(occurrences):
+                continue
+            checked += 1
+            state = entry["provenance"][path]
+            if state != "unknown":
+                violations.append(f"{stem}.{view_name}.{path}: 值缺失却报 {state!r}")
+
+    assert violations == [], "值缺失的叶子必须是 unknown：\n" + "\n".join(violations)
+    assert checked > 0, f"{stem} 没有任何缺值叶子（这条断言会变成空转，样本或规则变了）"
+
+
+def test_mixed_array_element_path_with_missing_value_is_unknown(
+    rendered_samples: dict[str, dict],
+) -> None:
+    """数组元素路径：**部分元素缺值** → `unknown`（保守方向，别只看第一个元素）。
+
+    f4/f5 的 `weapons[].ammo_name` 一条有弹药、一条没有：路径只有一个标签，
+    不能因为「有条目有值」就宣称整条路径是合成值 `assumed`。f1 的武器全部装填
+    弹药，路径上每个元素都有值 → 仍是 `assumed`。
+    """
+    f4 = rendered_samples["f4-non-hecate"]["views"]["firepower"]
+    occurrences = _leaf_values(f4["overview"])["weapons[].ammo_name"]
+    assert None in occurrences and any(value is not None for value in occurrences), occurrences
+    assert f4["provenance"]["weapons[].ammo_name"] == "unknown"
+
+    f1 = rendered_samples["f1-hecate-killmail"]["views"]["firepower"]
+    f1_occurrences = _leaf_values(f1["overview"])["weapons[].ammo_name"]
+    assert not _has_missing_value(f1_occurrences), f1_occurrences
+    assert f1["provenance"]["weapons[].ammo_name"] == "assumed"
+
+
+STATIC_TABLE_SAMPLES: tuple[tuple[str, str, int | None], ...] = (
+    # (视角, 叶子路径, FIELD_SOURCES 里的来源属性；None = 合成值)
+    ("firepower", "damage_split.em", 114),  # measured
+    ("firepower", "dph", -11),  # assumed（负 ID 派生）
+    ("firepower", "weapons[].name", None),  # 合成值
+    ("mobility", "warp_speed_au_s", 600),  # measured
+    ("survivability", "layers.shield_hp", 263),  # assumed（技能轴）
+    ("constraints", "skill_floor.count_by_level.4", None),  # 整数键容器继承
+    ("stability", "cap_by_module[].cap_use_gj_s", -4),  # 数组元素约定 + 负 ID
+)
+"""值非 `None` 的对照项：三态必须与静态表 `tag()` 逐条一致（本轮不得漂移）。"""
+
+
+@pytest.mark.parametrize(("view_name", "path", "attribute_id"), STATIC_TABLE_SAMPLES)
+def test_present_values_still_follow_the_static_table(
+    rendered_samples: dict[str, dict], view_name: str, path: str, attribute_id: int | None
+) -> None:
+    """值存在的叶子：三态 == 静态表结论（`None` 来源 → `assumed`，否则 `tag(ID)`）。
+
+    这几条都是**有值**的叶子，所以实例级覆盖不该生效 —— 一变就说明本轮改过头了。
+    """
+    from evefit.project import provenance as P
+
+    entry = rendered_samples["f1-hecate-killmail"]["views"][view_name]
+    occurrences = _leaf_values(entry["overview"])[path]  # KeyError = 结构变了，直接炸
+    assert not _has_missing_value(occurrences), f"{path} 本是有值对照项，结构/数据变了"
+
+    expected = "assumed" if attribute_id is None else P.tag(int(attribute_id))
+    assert entry["provenance"][path] == expected, (
+        f"{view_name}.{path} 有值时应为 {expected!r}，实为 {entry['provenance'][path]!r}"
+    )
 
 
 # =============================================================================

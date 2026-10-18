@@ -1,0 +1,139 @@
+{
+ "attackers": [
+  {
+   "damage_done": 7241,
+   "faction_id": 500011,
+   "final_blow": true,
+   "security_status": 0,
+   "ship_type_id": 24130
+  }
+ ],
+ "killmail_id": 139255347,
+ "killmail_time": "2026-10-18T13:07:13Z",
+ "solar_system_id": 30002178,
+ "victim": {
+  "alliance_id": 1354830081,
+  "character_id": 2112682243,
+  "corporation_id": 98825941,
+  "damage_taken": 7241,
+  "items": [
+   {
+    "flag": 13,
+    "item_type_id": 4405,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 16,
+    "item_type_id": 33824,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 21,
+    "item_type_id": 2281,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 11,
+    "item_type_id": 8133,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 93,
+    "item_type_id": 31718,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 22,
+    "item_type_id": 2297,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 19,
+    "item_type_id": 10888,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 15,
+    "item_type_id": 4405,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 87,
+    "item_type_id": 2478,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 87,
+    "item_type_id": 2478,
+    "quantity_dropped": 3,
+    "singleton": 0
+   },
+   {
+    "flag": 12,
+    "item_type_id": 1248,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 20,
+    "item_type_id": 4871,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 92,
+    "item_type_id": 31372,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 14,
+    "item_type_id": 4405,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 27,
+    "item_type_id": 1182,
+    "quantity_dropped": 1,
+    "singleton": 0
+   }
+  ],
+  "position": {
+   "x": -992221607178.8826,
+   "y": -73779118725.81493,
+   "z": -970044175993.6116
+  },
+  "ship_type_id": 12005
+ },
+ "zkb": {
+  "locationID": 40138950,
+  "hash": "a7e0bc08cfca20921ef35807d7da3143fdb58228",
+  "fittedValue": 143533937.77,
+  "droppedValue": 11181600.11,
+  "destroyedValue": 138344070.98,
+  "totalValue": 149525671.09,
+  "totalDroppableValue": 12686643.57,
+  "points": 1,
+  "npc": true,
+  "solo": false,
+  "awox": false,
+  "labels": [
+   "tz:au",
+   "cat:6",
+   "#:1",
+   "npc",
+   "loc:nullsec",
+   "isk:under1b"
+  ]
+ }
+}

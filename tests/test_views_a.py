@@ -18,11 +18,15 @@ Light Neutron Blaster II 装 Void S），技能档走 `engine.assumptions.derive
    `has_source=False`，T-19 裁决 C4——「无来源的 0」与「有什么」由 `has_source` 区分，
    不靠 `None`，也不靠 provenance）。
 
+另含 T-29 的「机库 vs 发射管」区分：f26 真样本（Thanatos，8 架载机全在 `fighter_bay`
+= ESI flag 158）与**改造样本**（把 Templar 移进 `fighter_tube`）的对照断言。
+
 约束：无网络、无随机（红线 N1）；样本只读；只碰本任务写入范围内的文件。
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 from pathlib import Path
@@ -1111,3 +1115,172 @@ def test_normal_samples_have_no_weapon_damage_zero_flag(real_ctx, name: str) -> 
 
     assert overview["dph"] is not None and overview["dph"] > 0.0
     assert "weapon_damage_zero" not in {flag["id"] for flag in D.evaluate(ctx)}
+
+
+# =============================================================================
+# 八、T-29：机库载机 ≠ 武器（`fighter_bay` 与 `fighter_tube` 必须分开）
+# =============================================================================
+
+F26_CARRIER = "f26-carrier-fighter.json"
+"""Thanatos 真实样本：8 架载机全在 `fighter_bay`（ESI flag 158），159–163 一条都没有。"""
+
+TEMPLAR_I_TYPE_ID = 23055
+"""`Templar I`（本样本里 ×5 的那批；T-28 改造实验搬进发射管的就是它）。"""
+
+SIREN_I_TYPE_ID = 40346
+"""`Siren I`（×3，支援战斗机：进管后只记 `-61` 支援槽，仍不出 `-58`——与「在机库」无关）。"""
+
+BAY_FLAG_ID = "fighters_in_bay_only"
+"""「机库有货但未发射」的事实提示（不是缺陷，也不是自相矛盾）。"""
+
+
+def test_classify_weapon_keeps_tube_and_drops_bay() -> None:
+    """根因单测：`fighter_tube` 是武器（family=fighter），`fighter_bay` 不是。
+
+    这是 T-29 的靶心——旧实现把两个槽位一起判成 `family: "fighter"`，于是机库里的
+    载机被列进 `weapons[]`，而 `dps.fighter` 恒 0 → 验收不变式恒假。
+    """
+    tube = {"slot_type": "fighter_tube", "type_id": TEMPLAR_I_TYPE_ID}
+    bay = {"slot_type": "fighter_bay", "type_id": TEMPLAR_I_TYPE_ID}
+
+    assert shared.classify_weapon(tube, {}) == (True, "fighter")
+    assert shared.classify_weapon(bay, {}) == (False, None), "机库里的载机不是武器"
+
+
+def test_f26_bay_fighters_are_not_in_weapons_but_still_reported(real_ctx) -> None:
+    """f26：`weapons[]` 不含 fighter 项；机库事实由 `fighter_bay` + flag 表达。
+
+    三条一起断言，缺一条这个修复就退化成「丢掉事实」：
+    ① `weapons[]` 不再冒出未参战的载机（旧行为：Siren I ×3 + Templar I ×5，family=fighter）；
+    ② `fighter_bay` 如实给出 8 架 / 14000 m³ / 两个型号；
+    ③ `dps.fighter` 仍是 **0.0**（正确的 0，不是 `None`，也不是报错）。
+    """
+    ctx = real_ctx(F26_CARRIER)
+    overview = build_view("firepower", ctx)["overview"]
+
+    assert [w for w in overview["weapons"] if w["family"] == "fighter"] == [], (
+        "机库里的载机不得进 weapons[]（那是库存，不是参战武器）"
+    )
+    assert overview["weapons"] == [], "f26 没有别的武器，清单应为空"
+
+    bay = overview["fighter_bay"]
+    assert bay["count"] == 8, "Siren I ×3 + Templar I ×5"
+    assert bay["types"] == ["Siren I", "Templar I"], "按首次出现顺序去重"
+    assert bay["capacity_used_m3"] == 14000.0, "船级 -57 fighterCapacityLoad（m³）"
+
+    assert overview["dps"]["fighter"] == 0.0, "载机在机库 → 0 是正确值，不得改成 None"
+
+    flags = {flag["id"]: flag for flag in D.evaluate(ctx)}
+    assert BAY_FLAG_ID in flags, sorted(flags)
+    flag = flags[BAY_FLAG_ID]
+    assert flag["view"] == "firepower"
+    assert flag["message"] == "机库内有 8 架载机但未发射（发射管占用 0），其伤害未计入"
+    assert flag["evidence"]["fighter_bay_count"] == 8
+    assert flag["evidence"]["fighter_tubes_used"] == 0
+    assert flag["evidence"]["capacity_used_m3"] == 14000.0
+    assert flag["evidence"]["fighter_bay_types"] == ["Siren I", "Templar I"]
+    assert flag["evidence"]["fighter_dps_hp_s"] == 0.0
+
+
+def test_f26_bay_field_covers_its_leaves(real_ctx) -> None:
+    """新字段的每个叶子都有 `FIELD_SOURCES` 映射（红线 N3：没映射 = 无 provenance）。
+
+    `fighter_bay.types` 是**字符串列表**：渲染层把标量列表当一个叶子
+    （`render._leaf_values` 的「其余」分支），本文件的 `_numeric_leaf_paths` 同样如此，
+    所以它也必须登记（值 `None` → `assumed`），否则航母样本会多出无来源的叶子。
+    """
+    overview = build_view("firepower", real_ctx(F26_CARRIER))["overview"]
+
+    missing = sorted(set(_numeric_leaf_paths(overview)) - set(firepower.FIELD_SOURCES))
+    assert not missing, f"f26 这些叶子没有 FIELD_SOURCES 映射：{missing}"
+    for path in ("fighter_bay.count", "fighter_bay.types", "fighter_bay.capacity_used_m3"):
+        _resolve(overview, path)
+    assert firepower.FIELD_SOURCES["fighter_bay.capacity_used_m3"] == A.ATTR_FIGHTER_BAY_USED
+
+    # 字符串只允许是载机型号名（与 `test_views_only_emit_whitelisted_strings` 同一口径，
+    # 只是样本换成航母：Hecate 样本的机库是空的，那边校验不到这两个名字）。
+    assert set(_string_leaf_paths(overview)) == {
+        "fighter_bay.types[0]",
+        "fighter_bay.types[1]",
+    }, "航母样本的字符串必须只有载机型号名"
+
+
+def test_f26_launched_fighter_produces_dps_and_drops_the_flag(
+    engine: Engine, index, real_ctx
+) -> None:
+    """改造样本（T-28 S5 的 B 变体）：把 Templar 移进 `fighter_tube` → 伤害链路通了。
+
+    唯一变量是 `slot.type`（`fighter_bay` → `fighter_tube`），架数、技能档、其余模块全不动
+    （`real_ctx` 只用来断言基线，改造后必须新建 ctx）。期望：
+
+    - `weapons[]` 出现 `family=fighter` 的 Templar I（这时它**真的**参战了）；
+    - `dps.fighter > 0`（技能档推导后 495.455；T-28 无技能档时 240.846，量级同阶）；
+    - `fighters_in_bay_only` **消失**（`-62 = 1`，已有中队在管里）。
+    """
+    baseline = build_view("firepower", real_ctx(F26_CARRIER))["overview"]
+    assert baseline["dps"]["fighter"] == 0.0 and baseline["weapons"] == [], "基线必须仍是机库状态"
+
+    moved = copy.deepcopy(_load_real_fit(engine, index, F26_CARRIER))
+    launched = 0
+    for item in moved["items"]:
+        if item.get("type_id") == TEMPLAR_I_TYPE_ID:
+            item["slot"] = {"type": "fighter_tube", "index": 0}
+            item["state"] = "active"
+            launched += int(item.get("quantity") or 1)
+
+    assert launched == 5, "改造成本必须是「5 架 Templar 移进发射管」，否则对照不成立"
+
+    bay_left = {
+        item.get("type_id")
+        for item in moved["items"]
+        if (item.get("slot") or {}).get("type") == "fighter_bay"
+    }
+    assert bay_left == {SIREN_I_TYPE_ID}, "机库里应当只剩 Siren I（支援机不改动）"
+
+    ctx = ViewContext(
+        engine=engine,
+        index=index,
+        fit=moved,
+        assumptions=default_assumptions(moved, engine, index=index),
+        meta=engine.meta(),
+    )
+    overview = build_view("firepower", ctx)["overview"]
+
+    fighters = [w for w in overview["weapons"] if w["family"] == "fighter"]
+    assert len(fighters) == 1 and fighters[0]["name"] == "Templar I"
+    assert fighters[0]["count"] == 5
+
+    assert overview["dps"]["fighter"] is not None
+    assert overview["dps"]["fighter"] > 0.0, "载机进发射管后 -58 必须为正（链路是通的）"
+    assert ctx.attrs(BASE)[A.ATTR_FIGHTER_TUBES_USED] > 0.0
+
+    assert BAY_FLAG_ID not in {flag["id"] for flag in D.evaluate(ctx)}, (
+        "已有中队在发射管里 → 不得再报「机库有货未发射」"
+    )
+
+    # 机库口径仍如实统计（不是被清零）：只剩 Siren I ×3。
+    assert overview["fighter_bay"]["count"] == 3
+    assert overview["fighter_bay"]["types"] == ["Siren I"]
+
+
+@pytest.mark.parametrize("name", ("f1-hecate-killmail.eft", "f5-no-mwd.json"))
+def test_non_carrier_samples_have_empty_fighter_bay(real_ctx, name: str) -> None:
+    """非航母样本：`fighter_bay` 字段**存在但全零**（schema 稳定），且没有该 flag。"""
+    ctx = real_ctx(name)
+    overview = build_view("firepower", ctx)["overview"]
+
+    assert overview["fighter_bay"] == {"count": 0, "types": [], "capacity_used_m3": 0.0}
+    assert BAY_FLAG_ID not in {flag["id"] for flag in D.evaluate(ctx)}
+
+
+def test_fighter_bay_summary_reports_count_types_and_ship_capacity(real_ctx) -> None:
+    """机库摘要的口径单测：架数按 `quantity` 求和、型号去重、占用取船级 `-57`。
+
+    另一条**实测约束**（T-29 探针）：`-57` 是「载机舱容占用」，把 Templar 移进发射管后
+    它**仍是 14000**（S5 的 B 变体实测）——所以 `capacity_used_m3` 不等于「机库条目体积
+    之和」，它是船级属性原值，别改成按 `fighter_bay` 条目累加体积。
+    """
+    all_bay = shared.fighter_bay_summary(real_ctx(F26_CARRIER))
+
+    assert all_bay == {"count": 8, "types": ["Siren I", "Templar I"], "capacity_used_m3": 14000.0}
+

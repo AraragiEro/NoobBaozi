@@ -9,6 +9,8 @@
    `audit()` 必须自报 `derived_at` / `sample(s)`；
 2b. **T-14 多样本推导的护栏**：工具的技能档必须 `all4+min_required` 且技能数 > 100
    （否则 `RuntimeError`），且 `1367/281/1272/-14/-55…-62` 这 12 个属性不得再落 `unknown`；
+2c. **T-27 实例级覆盖**：`provenance.resolve(id, value)` 在值为 `None` 时强制 `unknown`
+   （覆盖静态表），值存在时逐条等于 `tag()`；`audit()` 必须自报这条口径；
 3. **默认 unknown 红线（N4）**：随便造一个不存在的属性 ID，必须 `unknown`；
 4. `provenance.typed` 的 `TypedValue` 字段齐全、value 去噪；
 5. `ViewContext.attrs("base")` 的 key 是 int、value 是 float（且已是物理单位）；
@@ -364,6 +366,60 @@ def test_provenance_no_longer_unknown_for_former_sample_gaps() -> None:
     # 两态互斥（红线：tag() 的结果不得取决于判断顺序）
     assert P.MEASURED_ATTRS & P.ASSUMED_ATTRS == frozenset()
 
+
+
+# ---- T-27：实例级覆盖（两层模型的第二层：值缺失 ⇒ unknown）----
+
+
+def test_resolve_missing_value_is_unknown_overrides_table() -> None:
+    """**值缺失 ⇒ `unknown`**，与静态表怎么判无关（实例级覆盖静态表，T-27）。
+
+    `-11 damageAlpha` 在表里是 `assumed`、`109 kineticDamageResonance` 是 `measured`
+    —— 但只要本次计算里这个字段没有值，三态就必须落在 `unknown`：值都没有时，
+    「依赖假设」与「实测稳定」都是无依据的宣称（f4 的 `dph` 正是这个情形：
+    有带弹药武器却零伤害，突变模块数据缺失）。
+    """
+    # 先钉住静态表结论，避免「表变了导致下一条断言变成同义反复」
+    assert P.tag(A.ATTR_DAMAGE_ALPHA) == "assumed"  # -11
+    assert P.tag(A.ATTR_HULL_KINETIC_RESONANCE) == "measured"  # 109
+
+    assert P.resolve(A.ATTR_DAMAGE_ALPHA, None) == "unknown"
+    assert P.resolve(A.ATTR_HULL_KINETIC_RESONANCE, None) == "unknown"
+    assert P.resolve(None, None) == "unknown"  # 合成值 + 缺值 → 仍按缺值
+    assert P.resolve(P.ATTR_MAX_TARGETS_UNVERIFIED, None) == "unknown"
+
+
+def test_resolve_keeps_static_table_when_value_exists() -> None:
+    """值非 `None` 时**完全等于** `tag()`：不得因本轮改动漂移（f1/f5 的 `dph` 靠这条）。"""
+    cases = {
+        A.ATTR_LOW_SLOTS: 6.0,  # 12   measured
+        A.ATTR_EHP: 9102.577816,  # -43  assumed
+        A.ATTR_MASS: 1_550_000.0,  # 4    assumed（状态轴）
+        A.ATTR_DRONE_CAPACITY: 50.0,  # 283  measured
+        A.ATTR_DAMAGE_ALPHA: 943.668,  # -11  assumed（f1 的 dph）
+        A.ATTR_HULL_KINETIC_RESONANCE: 0.5,  # 109  measured
+        P.ATTR_MAX_TARGETS_UNVERIFIED: 0.0,  # -70  手工覆盖 unknown
+        UNKNOWN_ATTR_ID: 1.0,  # 表外 → unknown
+    }
+    for attribute_id, value in cases.items():
+        assert P.resolve(attribute_id, value) == P.tag(attribute_id), attribute_id
+
+    # 合成值（没有属性 ID）仍然是 assumed —— 它是「算出来的」，不是「缺值」
+    assert P.resolve(None, 0.0) == "assumed"
+    assert P.resolve(None, "hybrid") == "assumed"
+    # **0.0 是值、不是缺失**：零伤害照实走静态表，不能当 unknown
+    assert P.resolve(A.ATTR_DAMAGE_ALPHA, 0.0) == "assumed"
+
+
+def test_audit_reports_the_instance_rule() -> None:
+    """`audit()` 必须自报「实例级覆盖：值缺失 → unknown」（排查口径的唯一入口）。"""
+    audit = P.audit()
+
+    assert audit["instance_missing_rule"] == P.INSTANCE_MISSING_RULE
+    assert "实例级覆盖" in audit["instance_missing_rule"]
+    assert "unknown" in audit["instance_missing_rule"]
+    # 静态表的口径没被这条改动：三态计数仍是实测表自己的数字
+    assert audit["consistent"] is True
 
 
 def test_typed_returns_full_contract_fields() -> None:

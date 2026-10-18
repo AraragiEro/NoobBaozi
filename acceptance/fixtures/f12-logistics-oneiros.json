@@ -1,0 +1,229 @@
+{
+ "attackers": [
+  {
+   "alliance_id": 99007879,
+   "character_id": 2122041531,
+   "corporation_id": 98139309,
+   "damage_done": 3235,
+   "faction_id": 500002,
+   "final_blow": false,
+   "security_status": 0.1,
+   "ship_type_id": 29990,
+   "weapon_type_id": 29990
+  },
+  {
+   "character_id": 2114350216,
+   "corporation_id": 98573194,
+   "damage_done": 3169,
+   "final_blow": false,
+   "security_status": 3.7,
+   "ship_type_id": 29990,
+   "weapon_type_id": 29990
+  },
+  {
+   "character_id": 92931000,
+   "corporation_id": 98528707,
+   "damage_done": 2299,
+   "final_blow": false,
+   "security_status": 4.2,
+   "ship_type_id": 29986,
+   "weapon_type_id": 29986
+  },
+  {
+   "alliance_id": 99012464,
+   "character_id": 824733020,
+   "corporation_id": 98744132,
+   "damage_done": 2110,
+   "final_blow": false,
+   "security_status": -3.5,
+   "ship_type_id": 29986,
+   "weapon_type_id": 29986
+  },
+  {
+   "alliance_id": 1900696668,
+   "character_id": 2116829240,
+   "corporation_id": 98779490,
+   "damage_done": 1852,
+   "final_blow": true,
+   "security_status": -1.2,
+   "ship_type_id": 29986,
+   "weapon_type_id": 3025
+  },
+  {
+   "character_id": 91634362,
+   "corporation_id": 2026831070,
+   "damage_done": 89,
+   "final_blow": false,
+   "security_status": 0,
+   "ship_type_id": 11377,
+   "weapon_type_id": 14256
+  },
+  {
+   "character_id": 2124263575,
+   "corporation_id": 1000167,
+   "damage_done": 0,
+   "final_blow": false,
+   "security_status": 0,
+   "ship_type_id": 11963,
+   "weapon_type_id": 14268
+  }
+ ],
+ "killmail_id": 139254677,
+ "killmail_time": "2026-10-18T12:43:37Z",
+ "solar_system_id": 30000240,
+ "victim": {
+  "alliance_id": 99003581,
+  "character_id": 2123890809,
+  "corporation_id": 98550682,
+  "damage_taken": 12754,
+  "items": [
+   {
+    "flag": 29,
+    "item_type_id": 26914,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 92,
+    "item_type_id": 31360,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 87,
+    "item_type_id": 33706,
+    "quantity_dropped": 2,
+    "singleton": 0
+   },
+   {
+    "flag": 87,
+    "item_type_id": 23709,
+    "quantity_dropped": 4,
+    "singleton": 0
+   },
+   {
+    "flag": 15,
+    "item_type_id": 11646,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 13,
+    "item_type_id": 1355,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 30,
+    "item_type_id": 26914,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 12,
+    "item_type_id": 20353,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 29009,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 93,
+    "item_type_id": 31360,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 22,
+    "item_type_id": 12058,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 14,
+    "item_type_id": 11642,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 20,
+    "item_type_id": 4833,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 27,
+    "item_type_id": 26914,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 29011,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 19,
+    "item_type_id": 1952,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 28,
+    "item_type_id": 26914,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 21,
+    "item_type_id": 35660,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 5,
+    "item_type_id": 41155,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 11,
+    "item_type_id": 11269,
+    "quantity_dropped": 1,
+    "singleton": 0
+   }
+  ],
+  "position": {
+   "x": 3525764384290.853,
+   "y": 693530198698.5299,
+   "z": -854404410398.3723
+  },
+  "ship_type_id": 11989
+ },
+ "zkb": {
+  "locationID": 50001397,
+  "hash": "c3520cf4d9ca2c04c130f0715e5f604c2286f32e",
+  "fittedValue": 171469927.21,
+  "droppedValue": 17802569.59,
+  "destroyedValue": 153946705.28,
+  "totalValue": 171749274.87,
+  "totalDroppableValue": 19968069.59,
+  "points": 2,
+  "npc": false,
+  "solo": false,
+  "awox": false,
+  "labels": [
+   "tz:au",
+   "cat:6",
+   "#:5+",
+   "pvp",
+   "loc:nullsec",
+   "isk:under1b"
+  ]
+ }
+}

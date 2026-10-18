@@ -1,0 +1,48 @@
+{
+ "attackers": [
+  {
+   "damage_done": 1055,
+   "faction_id": 500010,
+   "final_blow": true,
+   "security_status": 0,
+   "ship_type_id": 64117
+  }
+ ],
+ "killmail_id": 139250630,
+ "killmail_time": "2026-10-18T08:58:26Z",
+ "solar_system_id": 30100066,
+ "victim": {
+  "alliance_id": 1042504553,
+  "character_id": 2124767662,
+  "corporation_id": 98821158,
+  "damage_taken": 1055,
+  "items": [],
+  "position": {
+   "x": -87659639098.36436,
+   "y": 236743560065.75943,
+   "z": 371042548953.62354
+  },
+  "ship_type_id": 584
+ },
+ "zkb": {
+  "locationID": 40503083,
+  "hash": "d8b7545be8c91cd92c77ee52795fd1b1f587f3e2",
+  "fittedValue": 350039.6,
+  "droppedValue": 0,
+  "destroyedValue": 350039.6,
+  "totalValue": 350039.6,
+  "totalDroppableValue": 0,
+  "points": 1,
+  "npc": true,
+  "solo": false,
+  "awox": false,
+  "labels": [
+   "tz:au",
+   "cat:6",
+   "#:1",
+   "npc",
+   "loc:highsec",
+   "isk:under1b"
+  ]
+ }
+}

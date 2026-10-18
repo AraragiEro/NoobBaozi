@@ -17,6 +17,11 @@
 
    这两条**只给事实与提示**，不做求解（不会自动把模块降级成 offline 去凑预算）。
 
+另有 `fighters_in_bay_only`（T-29）：机库里有载机、但 `-62` 发射管占用为 0 —— 它属于第 1 类
+「是否有」（有货但没起飞），**不是**矛盾也不是缺陷：`dps.fighter = 0.0` 在这个场景就是
+正确值（载机停在机库不参战，T-28 改造实验已证）。它存在的唯一目的，是让下游知道
+「`weapons[]` 里没有战斗机、`dps.fighter` 是 0」**并非**数据缺失。
+
 倍数常量集中在本文件顶部，全部注明「相对量，非绝对门槛」，并且**只用于判断"明显"**，
 不用于给出「够快 / 够硬 / 够用」这类判词。规则开关与文案在
 `evefit/config/diagnostics.json`（只存 id / view / enabled / message，判定逻辑全在这里）。
@@ -387,6 +392,43 @@ def _rule_weapon_damage_zero(facts: _Facts) -> dict | None:
     }
 
 
+def _rule_fighters_in_bay_only(facts: _Facts) -> dict | None:
+    """机库里有载机、但发射管占用（`-62`）为 0 → 载机没参战，其伤害未计入。
+
+    **两条判据都与视图同源**（`views/shared.fighter_bay_summary()`，机库口径只有一份）：
+
+    - 机库（`fighter_bay` / ESI flag 158）里确实有载机；
+    - `-62 fighterTubesUsed == 0`（没有中队在发射管里）。
+
+    **这不是缺陷，是事实提示**：T-28 的改造实验证明载机停在机库时 `-58/-59..-62` 全 0 是
+    正确行为（A/B 两组唯一的差别就是 `slot.type`；把 Templar 移进 `fighter_tube` 后
+    `-58` 从 0 → 240.846）。所以本规则**不同于** `weapon_damage_zero`（那是输入自相矛盾）：
+    它描述「有货但没起飞」，视图侧的 `dps.fighter = 0.0` 是**正确的 0**，不得改成 `null`
+    或报错——那会丢掉「确定没有载机在飞」这个事实。
+
+    另一条独立原因（T-28）：支援战斗机（如 `Siren I`）进管后只记 `-61` 支援槽占用，
+    仍不出 `-58`。那种情况 `-62` 已经不是 0，本规则**不**命中也**不**判缺陷。
+    """
+    bay = _shared.fighter_bay_summary(facts.ctx)
+    if bay["count"] <= 0:
+        return None
+
+    tubes_used = _num(facts.attrs, _a.ATTR_FIGHTER_TUBES_USED)
+    if tubes_used is None or tubes_used > 0.0:
+        # 未知 → 不下「未发射」的结论（N4）；>0 → 已有中队在管里，无需提示。
+        return None
+
+    fighter_dps = _num(facts.attrs, _a.ATTR_FIGHTER_DPS)
+    return {
+        "fighter_bay_count": bay["count"],
+        "fighter_tubes_used": _as_count(tubes_used),
+        "fighter_bay_types": bay["types"],
+        "capacity_used_m3": bay["capacity_used_m3"],
+        # `-58` 缺失时给 None，不拿 0 冒充（这是事实提示，不是数值证据）。
+        "fighter_dps_hp_s": None if fighter_dps is None else units.fmt(fighter_dps),
+    }
+
+
 def _rule_resource_slack(facts: _Facts) -> dict | None:
     """CPU 与 PG 余量都超过各自总量的一半，且存在空槽位。"""
     cpu_output = _num(facts.attrs, _a.ATTR_CPU_OUTPUT)
@@ -703,6 +745,7 @@ _HANDLERS: dict[str, Callable[[_Facts], dict | None]] = {
     "repaired_but_unstable": _rule_repaired_but_unstable,
     "alpha_dph_ratio": _rule_alpha_dph_ratio,
     "weapon_damage_zero": _rule_weapon_damage_zero,
+    "fighters_in_bay_only": _rule_fighters_in_bay_only,
     "cap_sensitive": _rule_cap_sensitive,
 }
 

@@ -20,6 +20,11 @@
 武器判定（`classify_weapon`）也一并搬到这里：不稳定视角要数「哪些已装模块算武器」，
 如果它另写一套判定，就会重演上面那种「两个视角各有一套口径」的缺陷。
 
+**载机槽位的两种语义（T-29）**：`fighter_tube`（159–163）= 已发射、参战；
+`fighter_bay`（158）= 机库库存、不参战。混同的后果是把机库里的载机列进 `weapons[]`，
+下游据此以为有战斗机在输出，而 `dps.fighter` 恒为 0 —— 那是判定误判，不是配装事实。
+机库侧的事实由 `fighter_bay_summary()` 单独表达。
+
 `depletes_in_s()` 收口 D6：引擎 `-7 capDepletesIn` 用 **`-1.0` 这个哨兵**表示
 「电容永不耗尽」（与 `-72 capStablePercentage > 0` 同义）。它不是物理时长，
 当成秒数输出就是伪事实，所以这里统一归一到 `None`。
@@ -72,8 +77,24 @@ MISSILE_GROUP_PREFIX: str = "Missile Launcher"
 DRONE_SLOT_TYPE: str = "drone_bay"
 """无人机槽位类别（软件设计 §7.3 的合法 slot.type）。"""
 
-FIGHTER_SLOT_TYPES: frozenset[str] = frozenset({"fighter_tube", "fighter_bay"})
-"""战斗机槽位类别（发射管 / 机库）。"""
+FIGHTER_TUBE_SLOT_TYPE: str = "fighter_tube"
+"""战斗机**发射管**槽位（ESI flag 159–163）—— 已发射、参与伤害计算。"""
+
+FIGHTER_BAY_SLOT_TYPE: str = "fighter_bay"
+"""战斗机**机库**槽位（ESI flag 158 = FighterBay）—— 只是库存，**不参战**。"""
+
+FIGHTER_SLOT_TYPES: frozenset[str] = frozenset({FIGHTER_TUBE_SLOT_TYPE, FIGHTER_BAY_SLOT_TYPE})
+"""载机槽位类别（发射管 / 机库）。
+
+**这两个槽位的语义不同，不能一起当武器**（T-29 的根因就是这个混同）：
+
+- `fighter_tube`（159–163）：中队已发射，逐机 `-12` 汇总成舰船级 `-58`，是**参战**的；
+- `fighter_bay`（158）：载机停在机库，只计入 `-57 fighterCapacityLoad`（机库占用 m³），
+  对 `-58`/`-59..-62` 与任何槽位伤害都**零贡献**。改造实验（T-28 S5）：把 Templar 从
+  `fighter_bay` 移进 `fighter_tube` 后 `-58` 从 `0` 变成 `240.846`，A/B 两组唯一的差别
+  就是 `slot.type` → 零值成因是「在机库」，不是引擎限制、也不是 state=offline。
+
+所以本常量只用于**识别载机槽位**（做机库摘要、诊断），**不再**作为「算不算武器」的判据。"""
 
 WEAPON_SLOT_TYPES: frozenset[str] = frozenset({"high", "medium", "low"})
 """**武器挂架**槽位类别（高/中/低槽）。
@@ -118,7 +139,7 @@ def damage_source(item: dict, raw_item: dict) -> dict[int, float]:
 
 
 def classify_weapon(item: dict, source: dict[int, float]) -> tuple[bool, str | None]:
-    """判断一个已装物品是不是武器，并给出 family。
+    """判断一个已装物品是不是**参战**武器，并给出 family。
 
     - 无人机 / 战斗机按**槽位类别**判（不靠名字：无人机群里也有非战斗型号）；
     - 炮 / 发射器 / 智能炸弹按 **SDE group 名**判（需要索引库）；
@@ -127,6 +148,17 @@ def classify_weapon(item: dict, source: dict[int, float]) -> tuple[bool, str | N
       laser/hybrid/projectile，`family` 保持 `None`）；
     - 表外武器（如 `Precursor Weapon`）同样走最后这条，`family=None`，不硬塞规格外的
       标签，但也不把炮丢掉。
+
+    **T-29：`fighter_bay`（机库）不再是武器。** 这是修正一个把「库存」当「参战」的
+    启发式误判：
+
+    - `fighter_tube`（159–163）→ `family: "fighter"`：已发射的中队，`-58` 会真的出伤害；
+    - `fighter_bay`（158）→ **`(False, None)`**：载机停在机库，不参与任何伤害/槽位计算，
+      只计入 `-57 fighterCapacityLoad`（m³）。把它列进 `weapons[]` 会让下游读成「有战斗机
+      在输出」，而 `dps.fighter` 恒为 0 —— 这个自相矛盾不是配装问题，是本判定的误判
+      （验收不变式「`weapons[]` 有 family=fighter → `dps.fighter > 0`」因此恒假）。
+      机库里的载机**不丢**：火力视角用 `fighter_bay` 字段 + `fighters_in_bay_only` flag
+      如实表达「有载机但没参战」。
 
     这套判定把「扫描发射器」正确地排除在外：它有周期（51）与弹药，但没有射程（54）、
     弹药也没有爆炸半径，且不在家族的 group 表里。
@@ -137,8 +169,11 @@ def classify_weapon(item: dict, source: dict[int, float]) -> tuple[bool, str | N
     slot_type = item.get("slot_type")
     if slot_type == DRONE_SLOT_TYPE:
         return True, "drone"
-    if slot_type in FIGHTER_SLOT_TYPES:
+    if slot_type == FIGHTER_TUBE_SLOT_TYPE:
         return True, "fighter"
+    if slot_type == FIGHTER_BAY_SLOT_TYPE:
+        # 机库里的载机不是武器（只占 -57 机库体积，见 `FIGHTER_SLOT_TYPES` 的说明）。
+        return False, None
 
     group = item.get("group_name") or ""
     if group.startswith(MISSILE_GROUP_PREFIX):
@@ -221,6 +256,9 @@ def weapon_records(ctx: ViewContext, variant: str = BASE) -> list[dict]:
     - 射程与应用层：`optimal_m` / `falloff_m` / `max_range_m` / `explosion_radius_m` /
       `explosion_velocity_mps` / `tracking_rad_s` / `optimal_sig_m`
     - 续航：`rounds`（弹匣发数）/ `cycle_s`（周期秒）/ `endurance_s`（单弹匣时长）
+
+    **机库里的载机不在本表里**（T-29）：它们由 `fighter_bay_summary()` 单独表达，
+    不参与 `weapons[]`、`dph`、射程或弹药续航的任何聚合。
     """
     merged = ctx.items(variant)
     raw_items = ctx.variant(variant).get("items") or []
@@ -293,6 +331,51 @@ def ammo_endurance_s(records: list[dict]) -> float | None:
     """
     best = shortest_endurance(records)
     return None if best is None else units.fmt(best["endurance_s"])
+
+
+# =============================================================================
+# 机库载机摘要（T-29：机库 = 库存，不是武器）
+# =============================================================================
+
+
+def fighter_bay_summary(ctx: ViewContext, variant: str = BASE) -> dict:
+    """机库（`fighter_bay`）里的载机摘要：`{count, types, capacity_used_m3}`。
+
+    **唯一实现**：火力视角的 `firepower.fighter_bay` 字段与诊断规则
+    `fighters_in_bay_only` 都调它，两边对「机库里到底有几架、哪几种」不会分叉。
+
+    取值口径：
+
+    - `count`：机库条目的 `quantity` 之和（引擎把一条载机物品按架数记量）；
+    - `types`：按**首次出现顺序**去重的 type 名（成品输出 `["Siren I", "Templar I"]`）；
+    - `capacity_used_m3`：**船级 `-57 fighterCapacityLoad`**（注意 `-57` 只在船级有值，
+      item 级没有——T-28 的实测修正），不是架数、也不是带宽；
+    - 无载机时给空结构 `{"count": 0, "types": [], "capacity_used_m3": 0.0}`，保证 schema
+      稳定（非航母样本也恒有该字段）。
+
+    为什么单独表达：机库里的载机**完全不参与**伤害计算，把它放进 `weapons[]` 会把
+    「库存」误读成「参战」。这里只陈述事实（有几架、占多少 m³），「有没有在打」由
+    `dps.fighter`（`-58`）表达，二者不互相冒充。
+    """
+    bay_items = [
+        item for item in ctx.items(variant) if item.get("slot_type") == FIGHTER_BAY_SLOT_TYPE
+    ]
+    count = sum(max(int(item.get("quantity") or 1), 1) for item in bay_items)
+
+    types: list[str] = []
+    for item in bay_items:
+        name = item.get("name") or f"type_id {item.get('type_id')}"
+        if name not in types:
+            types.append(name)
+
+    capacity = ctx.attrs(variant).get(A.ATTR_FIGHTER_BAY_USED)
+    if capacity is None:
+        # 有载机却没有 -57 → 机库占用未知（不拿 0 冒充）；无载机时 0.0 才是真值。
+        capacity_used = 0.0 if count == 0 else None
+    else:
+        capacity_used = units.fmt(capacity)
+
+    return {"count": count, "types": types, "capacity_used_m3": capacity_used}
 
 
 # =============================================================================

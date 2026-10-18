@@ -344,6 +344,23 @@ class EngineFacts:
 # ---------------------------------------------------------------------------
 
 
+NON_WEAPON_SLOTS = ("drone_bay", "fighter_bay", "fighter_tube", "cargo",
+                    "implant", "booster")
+"""不算「武器/抗性模块」的槽位：无人机/战斗机有自己的 volley 与抗性，
+把它们算进 alpha 或抗性乘性链会立刻造出假缺陷（T-19 新样本实测踩到）。"""
+
+
+def slot_types(facts: CaseFacts) -> list[str]:
+    """输入 fit 的逐项 slot.type（与 calc["items"] 同序；D8 记录的隐式顺序契约）。"""
+    return [((item.get("slot") or {}).get("type") or "") for item in (facts.fit.get("items") or [])]
+
+
+def is_real_module(slots: list[str], index: int) -> bool:
+    if index >= len(slots):
+        return True          # 长度对不上时保守当作真实模块（宁可报也不漏）
+    return slots[index] not in NON_WEAPON_SLOTS
+
+
 def check_invariants(facts: CaseFacts, eng: EngineFacts) -> list[Defect]:
     defects: list[Defect] = []
     ship = facts.ship
@@ -364,9 +381,18 @@ def check_invariants(facts: CaseFacts, eng: EngineFacts) -> list[Defect]:
 
     # ---- I2: alpha = Σ 逐装备 volley ----
     alpha = ship.get(-11)
-    volley_sum = math.fsum(float(item.get(-21) or 0.0) for item in facts.items)
+    slots = slot_types(facts)
+    volley_sum = math.fsum(
+        float(item.get(-21) or 0.0)
+        for index, item in enumerate(facts.items)
+        if is_real_module(slots, index)
+    )
     if alpha is None:
-        defects.append(Defect("不变式失败", "blocker", facts.name, "I2", "有 alpha 值", "None", ""))
+        if not math.isclose(volley_sum, 0.0, abs_tol=INVARIANT_ABS_TOL):
+            defects.append(Defect("不变式失败", "blocker", facts.name, "I2",
+                                  f"有武器 volley（Σ={volley_sum:.6f}）就应有 alpha",
+                                  "alpha=None", ""))
+        # 无武器（volley 合计 0）时 alpha=None 合法，不报
     elif not math.isclose(float(alpha), volley_sum, abs_tol=INVARIANT_ABS_TOL, rel_tol=0.0):
         defects.append(Defect("不变式失败", "blocker", facts.name, "I2",
                               f"{volley_sum:.9f}", f"{float(alpha):.9f}",
@@ -407,10 +433,13 @@ def check_invariants(facts: CaseFacts, eng: EngineFacts) -> list[Defect]:
         arithmetic = math.fsum(pure.values()) / 4.0
         harmonic = 4.0 / math.fsum(1.0 / value for value in pure.values())
         if abs(float(total) - arithmetic) / arithmetic <= 0.01:
-            defects.append(Defect("不变式失败", "blocker", facts.name, "I3",
-                                  f"与算术平均差 >1%（算术={arithmetic:.3f}）",
+            # 这是**样本性质**，不是实现缺陷：层抗性接近均匀时（f31 结构坦抗性全 0.402），
+            # 混合 EHP 本来就会贴近算术平均（差 0.54%）。真正的不变式是上面那条
+            # 「Σ HP/Σ(w×r) 复算」；这里只记覆盖度观察，避免把好实现当红线。
+            defects.append(Defect("不变式失败", "low", facts.name, "I3",
+                                  "与算术平均差 >1%（用于区分「混合」口径）",
                                   f"混合={float(total):.3f}，差={abs(float(total)-arithmetic)/arithmetic:.2%}",
-                                  "红线 N6：把混合 EHP 当作四系平均"))
+                                  "该样本层抗性接近均匀：混合与算术平均天然接近，不足以区分口径（非缺陷）"))
         if math.isclose(float(total), harmonic, rel_tol=1e-6):
             defects.append(Defect("不变式失败", "blocker", facts.name, "I3",
                                   "≠ 四系调和平均（仅单层时两者才相等）",
@@ -448,6 +477,15 @@ def check_invariants(facts: CaseFacts, eng: EngineFacts) -> list[Defect]:
 
     # ---- I5: 抗性叠加 = 共振率相乘 ----
     bare = eng.calculate_with(facts, items=[])
+    slots = slot_types(facts)
+    fit_items = list(facts.fit.get("items") or [])
+    real_indices = [i for i in range(len(facts.items)) if is_real_module(slots, i)]
+    effect_driven: list[str] = []
+    stacked: list[str] = []
+
+    def without(index: int) -> list[dict]:
+        return [item for position, item in enumerate(fit_items) if position != index]
+
     for layer, attrs in RESONANCE_LAYERS.items():
         for dmg, attr_id in attrs.items():
             base_r = bare.get(attr_id)
@@ -455,24 +493,62 @@ def check_invariants(facts: CaseFacts, eng: EngineFacts) -> list[Defect]:
             if base_r is None or full_r is None or float(base_r) == 0.0:
                 continue
             ratio = float(full_r) / float(base_r)
-            module_values = []
-            for item in facts.items:
-                value = item.get(MODULE_RESONANCE[layer][dmg])
+
+            # 哪些**真实模块**通过基础属性声明了这一层/这一系的乘数？
+            declaring: list[tuple[int, float]] = []
+            for index in real_indices:
+                value = facts.items[index].get(MODULE_RESONANCE[layer][dmg])
                 if isinstance(value, (int, float)) and float(value) > 0.0:
-                    module_values.append(float(value))
-            product = math.prod(module_values) if module_values else 1.0
-            if module_values:
-                # 允许 974–977 的 EM/EXP/KIN/THM 顺序不确定：任一映射成立即通过
-                candidates = [product]
+                    declaring.append((index, float(value)))
+
+            if not declaring:
+                # 没有真实模块声明乘数，但比值变了 → 来自 dogma effect（hardener 等），
+                # 基础属性上看不到乘数，I5 的乘性对照不适用（不是实现错误）。
+                if not rel_close(ratio, 1.0, 1e-6):
+                    effect_driven.append(f"{layer}.{dmg}")
+                continue
+
+            if len(declaring) > 1:
+                # 多个模块同时声明同一层抗性 → 引擎会施加**堆叠惩罚**，
+                # `ship/bare` 不再等于任一模块的声明乘数（实测 f7/f14：
+                # 移除 0.85 的 DC II 得到 0.8696，正是惩罚的表现）。
+                # 简单乘积只在**单模块**时成立（PROGRESS §3 第 4 条的实测就是单 DC II）。
+                stacked.append(f"{layer}.{dmg}")
+                continue
+
+            # **逐模块移除实验**：移除模块 i 后 ship/bare 必须等于 i 声明的乘数。
+            # 这样「部分模块声明、部分走效应」不会污染乘积。
+            for index, declared in declaring:
+                reduced = eng.calculate_with(facts, items=without(index))
+                after = reduced.get(attr_id)
+                if after is None or float(after) == 0.0:
+                    continue
+                single = float(full_r) / float(after)
+                candidates = [declared]
                 if layer == "hull":
-                    candidates = [math.prod(
-                        float(item.get(MODULE_RESONANCE["hull"][d]) or 1.0) for item in facts.items
-                    ) for d in MODULE_RESONANCE["hull"]]
-                if not any(rel_close(ratio, cand, 1e-6) for cand in candidates):
+                    # 974–977 的 EM/EXP/KIN/THM 顺序不确定：任一映射成立即通过
+                    module = facts.items[index]
+                    candidates = [float(module.get(MODULE_RESONANCE["hull"][d]) or declared)
+                                  for d in MODULE_RESONANCE["hull"]]
+                if not any(rel_close(single, candidate, 1e-6) for candidate in candidates):
                     defects.append(Defect(
                         "不变式失败", "high", facts.name, f"I5:{layer}.{dmg}",
-                        f"ship/bare = Π module = {product:.6f}",
-                        f"ship/bare = {ratio:.6f}", "抗性不是按共振率相乘"))
+                        f"移除该模块后 ship/bare = 模块乘数 {declared:.6f}",
+                        f"实测 {single:.6f}",
+                        "抗性叠加不是按共振率相乘（逐模块移除实验不成立）"))
+
+    if effect_driven:
+        defects.append(Defect(
+            "不变式失败", "low", facts.name, "I5",
+            "可验证乘性叠加（模块基础属性可见乘数）",
+            f"{len(effect_driven)} 项来自效应型模块（如 hardener），基础属性无乘数：{effect_driven[:4]}",
+            "I5 对这些项不适用；要验需走 effect 级 sources（P3 explain 才有）"))
+    if stacked:
+        defects.append(Defect(
+            "不变式失败", "low", facts.name, "I5",
+            "单模块抗性 → 乘性对照",
+            f"{len(set(stacked))} 组（{sorted(set(stacked))[:4]}）有多个模块同时声明抗性",
+            "多模块抗性叠加受**堆叠惩罚**，简单乘积不成立；I5 只在单模块时可用"))
     return defects
 
 
@@ -577,6 +653,17 @@ def check_empty_slot_markers() -> list[Defect]:
 # ---------------------------------------------------------------------------
 
 
+SUBSYSTEM_SLOTS_ATTR = 1367
+"""`maxSubSystems`：T3C 的子系统槽位数。为 0 时 `slots.subsystem` 是**条件字段**，
+缺失不算字段缺失（T-23 裁决）。"""
+
+
+def condition_holds(name: str, facts: CaseFacts) -> bool:
+    if name == "subsystem_slots":
+        return float(facts.ship.get(SUBSYSTEM_SLOTS_ATTR) or 0.0) > 0.0
+    return True
+
+
 def lookup_field(overview: dict, spec_field: dict) -> tuple[bool, object]:
     for name in (spec_field["name"], *spec_field.get("aliases", [])):
         if name in overview:
@@ -622,6 +709,7 @@ class Leaf:
     source_attr: int | None
     form: str                    # "bare"（形态 A：查平行表）/ "typed"（形态 B：值自带）
     confidence: str | None = None
+    value_none: bool = False     # T-27：值为 None 时 provenance 强制 unknown
 
 
 def collect_leaves(overview: object, table: dict | None = None) -> list[Leaf]:
@@ -663,7 +751,8 @@ def _collect(node: object, prefix: str, out: list[Leaf],
         attr = node.get("source_attr") if isinstance(node.get("source_attr"), int) else inherited_attr
         conf = node.get("confidence") if isinstance(node.get("confidence"), str) else inherited_conf
         out.append(Leaf(path=path, numbers=numbers, provenance=local,
-                        source_attr=attr, form="typed", confidence=conf))
+                        source_attr=attr, form="typed", confidence=conf,
+                        value_none=raw_value is None))
         return
 
     # ---- 对象：逐键递归 ----
@@ -696,7 +785,7 @@ def _collect(node: object, prefix: str, out: list[Leaf],
         provenance = table[path]
     out.append(Leaf(path=path, numbers=numbers, provenance=provenance,
                     source_attr=inherited_attr, form="bare",
-                    confidence=inherited_conf))
+                    confidence=inherited_conf, value_none=node is None))
 
 
 def leaf_paths(overview: object, table: dict | None = None) -> set[str]:
@@ -973,8 +1062,14 @@ def check_modes(case: str, payload: dict, facts: CaseFacts, supported: list[dict
             by_name[name] = entry
 
     # 1) 结构：本船支持的模式必须全部出现
+    #    引擎给全名（`Confessor Defense Mode`），渲染层给短名（`Defense`）。
+    # 归一规则：去掉 ` Mode` 后缀后取**最后一个词** —— 不需要知道船名，
+    #    也不能硬编码船名（第一版写死 "Hecate "，结果只有 Hecate 能对上）。
     for row in supported:
-        name = row["name"].replace("Hecate ", "").replace(" Mode", "")
+        name = row["name"]
+        if name.endswith(" Mode"):
+            name = name[: -len(" Mode")]
+        name = name.split(" ")[-1]
         if name not in by_name:
             defects.append(Defect("字段缺失", "high", case, f"modes[{name}]",
                                   f"{row['name']}（引擎 modes_for_ship 列出）", "未输出"))
@@ -1138,6 +1233,315 @@ def check_repair_zero(case: str, payload: dict, facts: CaseFacts,
     return defects
 
 
+CAP_SENTINEL_SECONDS = -1.0
+"""引擎 `-7`（capDepletesIn）对「电容稳定、永不耗尽」给的哨兵值。
+
+它不是物理时长；输出层应转成 `null`（或省略），并用 `stable_pct > 0` 表达稳定。
+"""
+
+
+def check_cap_sentinel(case: str, payload: dict) -> list[Defect]:
+    """D6：`depletes_in_s` 不得把引擎哨兵 `-1` 当秒数输出。"""
+    defects: list[Defect] = []
+    overview, _table = resolve_view_entry(payload.get("views", payload), "stability")
+    if not isinstance(overview, dict):
+        return defects
+    cap = overview.get("capacitor")
+    if not isinstance(cap, dict):
+        return defects
+    depletes = cap.get("depletes_in_s")
+    stable = cap.get("stable_pct")
+    if is_number(depletes) and float(depletes) < 0.0:
+        defects.append(Defect(
+            "口径错误", "medium", case, "stability.capacitor.depletes_in_s",
+            "稳定时给 null（永不耗尽）；不得输出引擎哨兵 -1",
+            f"{float(depletes)!r}（stable_pct={stable!r}）",
+            "引擎 -7 的 -1 是「不耗尽」哨兵，不是物理时长；agent 会读成 −1 秒"))
+    return defects
+
+
+def check_ammo_endurance(case: str, payload: dict, facts: CaseFacts) -> list[Defect]:
+    """D5：装了带弹药的武器却算不出弹药续航（导弹武器实测踩到）。
+
+    根因：item 级 `cycleTime(-3)` 对发射器不提供值，但 `51`(speed，毫秒) 有值；
+    投影层只用了 `-3`，于是 `ammo_endurance_s` / `ammo_rounds` 恒 None。
+    """
+    defects: list[Defect] = []
+    overview, _table = resolve_view_entry(payload.get("views", payload), "firepower")
+    if not isinstance(overview, dict):
+        return defects
+    weapons = overview.get("weapons")
+    if not isinstance(weapons, list):
+        return defects
+    armed = [w for w in weapons
+             if isinstance(w, dict) and w.get("ammo_name") and (w.get("count") or 0) > 0]
+    if not armed:
+        return defects
+    firepower_value = overview.get("ammo_endurance_s")
+    stability_overview, _t = resolve_view_entry(payload.get("views", payload), "stability")
+    consumables = (stability_overview or {}).get("consumables")
+    consumables_value = (consumables or {}).get("ammo_endurance_s") \
+        if isinstance(consumables, dict) else None
+
+    # 同一事实在两个视角必须一致（与 hardpoints_free 同类）
+    if is_number(firepower_value) and consumables_value is None:
+        defects.append(Defect(
+            "口径错误", "medium", case, "stability.consumables.ammo_endurance_s",
+            f"{float(firepower_value)!r}（与 firepower.ammo_endurance_s 同源，应一致）",
+            "None",
+            "同一份弹药续航在火力视角有值、不稳定视角为空——下游取哪个都会不一致"))
+    elif is_number(consumables_value) and firepower_value is None:
+        defects.append(Defect(
+            "口径错误", "medium", case, "firepower.ammo_endurance_s",
+            f"{float(consumables_value)!r}（与 stability.consumables 同源，应一致）",
+            "None", "同一事实两处不一致"))
+    elif firepower_value is None and consumables_value is None:
+        defects.append(Defect(
+            "字段缺失", "medium", case, "firepower.ammo_endurance_s",
+            "弹匣量 × cycle（引擎 `51` 有值，可回退）",
+            f"两处都是 None（已装弹药 {len(armed)} 组，如 {armed[0].get('name')}）",
+            "导弹武器的 item 级 cycleTime(-3) 为空，投影层未回退到 51(speed)"))
+    return defects
+
+
+def check_weapons_vs_alpha(case: str, payload: dict) -> list[Defect]:
+    """D7：`weapons[]` 与 `dph` 不得自相矛盾。
+
+    f4（Loki）实测：`weapons[]` 列出 5 门「Heavy Missile Launcher II + Caldari Navy
+    Nova Heavy Missile」，但 item 级 `-21`/`-12` 全为 0、`ship -11`(alpha) = 0、
+    `dps.base` 完全等于 `dps.drone`。武器清单说"有带弹药的武器"，火力数值说"没有"。
+    """
+    defects: list[Defect] = []
+    overview, _table = resolve_view_entry(payload.get("views", payload), "firepower")
+    if not isinstance(overview, dict):
+        return defects
+    weapons = overview.get("weapons")
+    if not isinstance(weapons, list):
+        return defects
+    dph = overview.get("dph")
+    armed = [w for w in weapons
+             if isinstance(w, dict) and w.get("ammo_name") and (w.get("count") or 0) > 0
+             and w.get("family") != "drone"]
+    if not armed:
+        return defects
+
+    firepower_flags = (payload.get("views", payload).get("firepower") or {}).get("flags") or []
+    flag_ids = {f.get("id") for f in firepower_flags if isinstance(f, dict)}
+
+    # T-22 裁决：Σ 武器槽 -21 == 0 且 -11 == 0 → `dph = null` + `weapon_damage_zero` flag。
+    # 之前这里 `if not is_number(dph): return` 会**直接短路**，dph 变 None 后反而漏检。
+    if dph is None:
+        if "weapon_damage_zero" not in flag_ids:
+            defects.append(Defect(
+                "字段缺失", "medium", case, "firepower.dph",
+                'dph=null 时必须带 `weapon_damage_zero` flag（T-22 裁决）',
+                f"dph=None，但 firepower.flags 里没有该 id（现有 {sorted(flag_ids)}）",
+                "null 的语义只由 flag 表达；没有 flag 的 null 是裸 null，下游无法区分"))
+        return defects
+
+    if not is_number(dph):
+        defects.append(Defect(
+            "口径错误", "medium", case, "firepower.dph",
+            "float 或 null", repr(dph)))
+        return defects
+    if math.isclose(float(dph), 0.0, abs_tol=1e-9):
+        defects.append(Defect(
+            "口径错误", "medium", case, "firepower.dph",
+            f'null + `weapon_damage_zero` flag（有 {len(armed)} 组带弹药的武器但齐射为 0）',
+            "0.0",
+            "T-22 裁决：这种情况必须给 null + flag，不能输出数值 0"))
+    return defects
+
+
+OVER_BUDGET_FLAG = "resource_over_budget_unflyable"
+
+
+def check_feasible(case: str, payload: dict, facts: CaseFacts) -> list[Defect]:
+    """T-23：`feasible` / `over_budget` / `resource_over_budget_unflyable` 三者必须自洽。
+
+    - `feasible == (cpu.free >= 0 and powergrid.free >= 0 and calibration.free >= 0)`
+      （`calibration.load` 为 None 时按 0 处理）
+    - `over_budget.{cpu,powergrid}` = `max(0, -free)`，可行时两项均为 0.0
+    - flag 必须与 `feasible` 同步：不可行必须有，可行必须没有
+    """
+    defects: list[Defect] = []
+    views = payload.get("views", payload)
+    overview, _table = resolve_view_entry(views, "resources")
+    if not isinstance(overview, dict):
+        return defects
+
+    feasible = overview.get("feasible")
+    if not isinstance(feasible, bool):
+        defects.append(Defect(
+            "字段缺失", "high", case, "resources.feasible",
+            "bool", repr(feasible), "T-23 新增字段：资源可行性"))
+        return defects
+
+    def free_of(field_name: str) -> float | None:
+        node = overview.get(field_name)
+        if not isinstance(node, dict):
+            return None
+        value = node.get("free")
+        return float(value) if is_number(value) else None
+
+    cpu_free = free_of("cpu")
+    pg_free = free_of("powergrid")
+    cal_free = free_of("calibration")
+    if cpu_free is None or pg_free is None:
+        return defects                       # 缺字段的问题由字段齐全检查报
+    expected = cpu_free >= 0.0 and pg_free >= 0.0 and (cal_free is None or cal_free >= 0.0)
+    if feasible != expected:
+        defects.append(Defect(
+            "口径错误", "high", case, "resources.feasible",
+            f"{expected}（cpu.free={cpu_free} / powergrid.free={pg_free} / "
+            f"calibration.free={cal_free}）",
+            repr(feasible),
+            "feasible 必须由三个余量直接决定"))
+
+    over_budget = overview.get("over_budget")
+    if not isinstance(over_budget, dict):
+        defects.append(Defect(
+            "字段缺失", "high", case, "resources.over_budget",
+            "{cpu, powergrid}", repr(over_budget), "T-23 新增字段：缺口绝对值"))
+    else:
+        for key, free in (("cpu", cpu_free), ("powergrid", pg_free)):
+            want = max(0.0, -free)
+            got = over_budget.get(key)
+            if not is_number(got):
+                defects.append(Defect(
+                    "字段缺失", "high", case, f"resources.over_budget.{key}",
+                    "float（缺口绝对值，可行时为 0.0）", repr(got)))
+            elif not math.isclose(float(got), want, abs_tol=1e-6):
+                defects.append(Defect(
+                    "口径错误", "high", case, f"resources.over_budget.{key}",
+                    f"{want:.6f}（= max(0, -{free})）", f"{float(got):.6f}",
+                    "缺口必须等于余量的绝对值"))
+
+    resources_node = views.get("resources") if isinstance(views, dict) else None
+    flags = (resources_node or {}).get("flags") or []
+    has_flag = any(isinstance(f, dict) and f.get("id") == OVER_BUDGET_FLAG for f in flags)
+    if not feasible and not has_flag:
+        defects.append(Defect(
+            "字段缺失", "medium", case, "resources.flags",
+            f'不可行时必须带 `{OVER_BUDGET_FLAG}` flag', f"现有 flags={[f.get('id') for f in flags if isinstance(f, dict)]}",
+            "T-23 裁决：资源不可行必须有对应 flag，否则下游只能自己拼"))
+    if feasible and has_flag:
+        defects.append(Defect(
+            "口径错误", "medium", case, "resources.flags",
+            f"可行时不应出现 `{OVER_BUDGET_FLAG}`", "出现了",
+            "flag 与 feasible 自相矛盾"))
+    return defects
+
+
+def check_fighter_chain(case: str, payload: dict, facts: "CaseFacts") -> list[Defect]:
+    """载机伤害链路（**T-28 实证结论**，不是"有载机就该有伤害"）。
+
+    实证：`f26 Thanatos` 的 8 架载机 flag 全是 **158 = FighterBay（机库）**，
+    不是 159–163 的 FighterTube。机库里的载机**完全不参与伤害**，
+    只计入船级 `-57`（机库占用 m³）。改造实验把 Templar 移进发射管后 `-58` 才从 0 变 240.846。
+
+    所以本检查只在这三个条件**同时成立**时才要求 `dps.fighter > 0`：
+    1. 船级 `-62 fighterTubesUsed > 0`（真有中队进了发射管）；
+    2. 进管的中队里**至少有一个不是支援型**（支援型 item 级 `-61 = 1`，不出伤害）；
+    3. 输出没有 `fighters_in_bay_only` flag（T-29 的诊断 flag，表示载机只在机库）。
+    """
+    defects: list[Defect] = []
+    overview, _table = resolve_view_entry(payload.get("views", payload), "firepower")
+    if not isinstance(overview, dict):
+        return defects
+    weapons = overview.get("weapons")
+    dps = overview.get("dps")
+    if not isinstance(weapons, list) or not isinstance(dps, dict):
+        return defects
+    fighters = [w for w in weapons
+                if isinstance(w, dict) and w.get("family") == "fighter"
+                and (w.get("count") or 0) > 0]
+    if not fighters:
+        return defects
+
+    # 3) 输出已声明"只在机库" → 合法状态
+    firepower_node = payload.get("views", payload).get("firepower") or {}
+    flag_ids = {f.get("id") for f in (firepower_node.get("flags") or []) if isinstance(f, dict)}
+    if "fighters_in_bay_only" in flag_ids:
+        return defects
+
+    # 1) 发射管是否真的被用了
+    tubes_used = float(facts.ship.get(-62) or 0.0)
+    if tubes_used <= 0.0:
+        return defects                     # 载机都在机库：`-58 = 0` 正确
+
+    # 2) 进管的中队是否全是支援型（item 级 `-61`）
+    slots = slot_types(facts)
+    launched: list[int] = [i for i, slot in enumerate(slots) if slot == "fighter_tube"]
+    if not launched:
+        return defects
+    support_only = True
+    for index in launched:
+        attrs = facts.items[index] if index < len(facts.items) else {}
+        if float(attrs.get(-61) or 0.0) < 1.0:
+            support_only = False
+            break
+    if support_only:
+        return defects                     # 支援型中队不出伤害
+
+    fighter_dps = dps.get("fighter")
+    if fighter_dps is None or (is_number(fighter_dps) and math.isclose(
+            float(fighter_dps), 0.0, abs_tol=1e-9)):
+        defects.append(Defect(
+            "口径错误", "medium", case, "firepower.dps.fighter",
+            "> 0（有已发射的作战中队）",
+            f"{fighter_dps!r}（-62 fighterTubesUsed={tubes_used}，"
+            f"进管中队 {len(launched)} 个）",
+            "-55/-56/-58 对已发射的作战中队产出 0.0"))
+    return defects
+
+
+def check_provenance_instances(case: str, payload: dict, spec: dict,
+                               oracle: "ProvenanceOracle") -> list[Defect]:
+    """T-27 实例规则 + 数组元素口径。
+
+    **实例规则**：某叶子在本次计算里**值为 `None`** → provenance 强制 `unknown`
+    （覆盖属性级静态表）；值存在时仍按静态表 `tag()`。
+
+    **数组元素口径**（Lead 裁决）：一条路径只有**一个**标签。
+    `weapons[].ammo_name` 在混装配装上「一门有弹、一门没装」→ 按缺值判 `unknown`；
+    全部有弹才算 `assumed`。所以这里按路径聚合，任一元素为 None 即按缺值处理。
+    """
+    defects: list[Defect] = []
+    views = payload.get("views", payload)
+    for view_name in spec["views"]:
+        overview, table = resolve_view_entry(views, view_name)
+        if overview is None:
+            continue
+        groups: dict[str, list[Leaf]] = {}
+        for leaf in collect_leaves(overview, table):
+            groups.setdefault(leaf.path, []).append(leaf)
+        for path, leaves in groups.items():
+            declared = next((leaf.provenance for leaf in leaves if leaf.provenance), None)
+            if declared is None:
+                continue                       # 缺键由 I6 报
+            any_none = any(leaf.value_none for leaf in leaves)
+            if any_none and declared != "unknown":
+                none_count = sum(1 for leaf in leaves if leaf.value_none)
+                defects.append(Defect(
+                    "provenance 错误", "high", case, f"{view_name}.{path}",
+                    "unknown（T-27：值缺失即 unknown）", declared,
+                    f"{none_count}/{len(leaves)} 个元素值为 None，静态表必须让位于实例规则"))
+            elif not any_none and oracle.available:
+                expected = None
+                for leaf in leaves:
+                    if leaf.source_attr is not None:
+                        expected = oracle.tag(leaf.source_attr)
+                        if expected is not None:
+                            break
+                if expected is not None and declared != expected:
+                    defects.append(Defect(
+                        "provenance 错误", "medium", case, f"{view_name}.{path}",
+                        f"{expected}（静态表 tag）", declared,
+                        "有值时 provenance 必须跟随静态表"))
+    return defects
+
+
 def check_view_structure(case: str, payload: dict, spec: dict,
                          facts: CaseFacts, oracle: "ProvenanceOracle",
                          confidence_oracle: "ConfidenceOracle" | None = None) -> list[Defect]:
@@ -1162,8 +1566,11 @@ def check_view_structure(case: str, payload: dict, spec: dict,
                                   f"{view_name}.{name}",
                                   spec_field["meaning"], "字段不存在"))
             continue
-        # 子键齐全
+        # 子键齐全（条件字段：只有该船真的有这种槽位时才要求）
+        conditional = spec_field.get("conditional_subpaths") or {}
         for sub in spec_field.get("subpaths", []):
+            if sub in conditional and not condition_holds(conditional[sub], facts):
+                continue
             if not isinstance(value, dict) or sub not in value:
                 defects.append(Defect("字段缺失", "medium", case,
                                       f"{view_name}.{name}.{sub}",
@@ -1231,7 +1638,7 @@ def check_view_structure(case: str, payload: dict, spec: dict,
                                       f"{view_name}.{leaf.path}",
                                       f"∈ {PROVENANCE_VALUES}", prov))
             # 有权威表时逐值对拍（T-08 落地后本项自动生效）
-            if leaf.source_attr is not None and oracle.available:
+            if leaf.source_attr is not None and oracle.available and not leaf.value_none:
                 authoritative = oracle.tag(leaf.source_attr)
                 if authoritative is not None and prov is not None and prov != authoritative:
                     defects.append(Defect(
@@ -1305,7 +1712,10 @@ def check_semantics(case: str, views: dict, facts: CaseFacts) -> list[Defect]:
                 expected_value = expected_value / 1000.0
             if attr_id in KILO_ATTRS:
                 expected_value = expected_value / 1000.0
-            if not rel_close(float(target), expected_value, RENDER_REL_TOL):
+            # 渲染层用 fmt(3) 压小数位；0.39744→0.397 的相对误差已达 1.1e-3，
+            # 所以必须叠加「半个末位」的绝对容差，否则会误报口径错误。
+            if not math.isclose(float(target), expected_value,
+                                rel_tol=RENDER_REL_TOL, abs_tol=5e-4):
                 category = "口径错误"
                 note = f"来源属性 {attr_id}"
                 if attr_id in MS_ATTRS and rel_close(float(target), float(expected), 1e-9):
@@ -1369,12 +1779,15 @@ def check_semantics(case: str, views: dict, facts: CaseFacts) -> list[Defect]:
 
 
 def _rounding_match(value: float, target: float) -> bool:
-    """`value` 是否等于 `target` 的某个合理四舍五入结果（0–6 位小数）。
+    """`value` 是否等于 `target` 的某个**渲染精度**四舍五入结果（3–6 位小数）。
 
-    实现通常用 `fmt()` 把输出压到 3 位小数，所以「毫秒原值」到了输出里是
-    `2304.636` 而不是 `2304.63606981011`——必须按舍入后比较，否则整类错误会漏掉。
+    渲染层用 `fmt(digits=3)` 压小数位，所以「毫秒原值」到了输出里是 `2304.636`
+    而不是 `2304.63606981011`——必须按舍入后比较，否则整类错误会漏掉。
+
+    **下界取 3 位**：取到 0–2 位会让 `3.24 → 3.2` 这种巧合也命中，
+    把合法的 GJ/s（`cap_use_gj_s: 3.2`）误报成 ×1000 原值（T-19 实测踩到）。
     """
-    for digits in range(0, 7):
+    for digits in range(3, 7):
         if abs(value - round(target, digits)) <= max(1e-12, abs(target) * 1e-12):
             return True
     return False
@@ -1422,8 +1835,12 @@ def check_units(case: str, views: dict, facts: CaseFacts) -> list[Defect]:
                         f"{value!r}（等于{kind}存储原值 {raw!r}）",
                         "红线 N5：不得输出毫秒 / ×1000 原值"))
                     flagged = True
-            # (1) 泛化扫描：任意数值等于某毫秒/×1000 属性的原值 → 单位错误
-            if not flagged:
+            # (1) 泛化扫描：仅对**带单位后缀**的字段名生效。
+            # 否则 `count: 1`、`damage_split.explosive: 1.0` 这类计数/比率
+            # 会撞上某个 ×1000 属性的舍入巧合，制造假「单位错误」。
+            unit_like = leaf_name.endswith(("_s", "_rad_s", "_au_s", "_mps", "_m",
+                                            "_pct", "_kg", "_m3"))
+            if not flagged and unit_like:
                 for attr_id, probe in probes.items():
                     if _rounding_match(value, probe.raw) and not _rounding_match(value, probe.physical):
                         defects.append(Defect(
@@ -1671,7 +2088,11 @@ def collect_eft_paths(args: argparse.Namespace) -> list[Path]:
     for raw in args.eft or []:
         path = Path(raw)
         if path.is_dir():
-            paths.extend(sorted(path.glob("*.eft")))
+            paths.extend(sorted(
+                p for pattern in ("*.eft", "*.json")
+                for p in path.glob(pattern)
+                if not p.name.endswith(".expected.json")
+            ))
         elif path.is_file():
             paths.append(path)
         else:
@@ -1680,7 +2101,12 @@ def collect_eft_paths(args: argparse.Namespace) -> list[Path]:
 
 
 def default_fixtures() -> list[Path]:
-    return sorted(FIXTURE_DIR.glob("*.eft"))
+    """默认验收样本：EFT **与** 原始 killmail JSON 都算（`.expected.json` 是期望值，不是样本）。"""
+    return sorted(
+        p for pattern in ("*.eft", "*.json")
+        for p in FIXTURE_DIR.glob(pattern)
+        if not p.name.endswith(".expected.json")
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1806,6 +2232,12 @@ def main(argv: list[str] | None = None) -> int:
             views_available = True
             defects.extend(check_render_meta(case_name, payload_views, facts))
             defects.extend(check_repair_zero(case_name, payload_views, facts, oracle))
+            defects.extend(check_cap_sentinel(case_name, payload_views))
+            defects.extend(check_ammo_endurance(case_name, payload_views, facts))
+            defects.extend(check_weapons_vs_alpha(case_name, payload_views))
+            defects.extend(check_feasible(case_name, payload_views, facts))
+            defects.extend(check_fighter_chain(case_name, payload_views, facts))
+            defects.extend(check_provenance_instances(case_name, payload_views, spec, oracle))
             defects.extend(check_view_structure(case_name, payload_views, spec, facts,
                                                 oracle, confidence_oracle))
             # modes 块（§10.2）：结构 + 方向 + 数值（对最小探针配装再对 fixture 期望值）

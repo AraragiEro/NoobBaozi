@@ -24,7 +24,8 @@ render_detail(ctx, *, view, fields=None) -> dict
 3. **不重算、不改写假设**（红线 N9）：`meta.assumptions` 就是 `ctx.assumptions`
    本身（同一个对象，不是副本、不是重新推导）。
 4. **provenance 逐字段打标**（红线 N3 / N4）：每个 overview 叶子都必须有一条三态，
-   没有映射就是 `unknown`，不猜、不拿默认值冒充。
+   没有映射就是 `unknown`，不猜、不拿默认值冒充；**本次计算里值为 `None` 也是
+   `unknown`**（T-27 实例级覆盖，见下文「三个容易踩的点」第一条）。
 
 provenance 的三条约定（六视角**同一套口径**）
 --------------------------------------------
@@ -39,10 +40,18 @@ provenance 的三条约定（六视角**同一套口径**）
 
 三个容易踩的点（本层显式处理，不在别处重复）
 
-- **`FIELD_SOURCES` 里值为 `None` 的一律 `assumed`**：那是「多属性合成值」（弹匣时长、
-  耗时差、升级空间是否装得下…）。它不是「无法推断」（`unknown` 的定义），而是
-  「建立在假设之上算出来的」，所以判 `assumed`。
-  （注意：`firepower` / `survivability` 等模块的 docstring 写的是「合成值给 None →
+- **实例级先行（T-27）：值为 `None` 的叶子一律 `unknown`**。不管 `FIELD_SOURCES` 把它
+  映射到哪个属性、静态表怎么判，只要**本次计算**里这个字段没有值，三态就落在 `unknown`
+  ——「值不可信，三态却说可信」是本轮实测的根因性缺陷（`f4` 的 `dph` 是 `None`，
+  旧口径却报 `assumed`：`-11` 在表里是 `assumed`，与这一次有没有值无关）。
+  provenance 本质上是**按配装**的性质，不是按属性的常量（PROGRESS §3 第 167 条）。
+  统一走 `provenance.resolve(来源属性, 值)`；数组元素路径上只要**任一元素**缺值就按缺值
+  处理（一条路径只有一个标签，不能比它最弱的那个出现更自信）。
+- **`FIELD_SOURCES` 里值为 `None` 且字段有值 → `assumed`**：那是「多属性合成值」
+  （弹匣时长、耗时差、升级空间是否装得下…）。它不是「无法推断」（`unknown` 的定义），
+  而是「建立在假设之上算出来的」，所以判 `assumed`。**注意与上一条的区别**：`None` 在
+  `FIELD_SOURCES` 里说的是「来源不是一个属性」，在 overview 里说的是「这次没有值」。
+  （`firepower` / `survivability` 等模块的 docstring 写的是「合成值给 None →
   渲染层据此标 unknown」。本任务书明确裁决为 `assumed`，本层按任务书执行；
   两者只是措辞口径不同，都不是「用默认值冒充 unknown」。）
 - **没有映射 → `unknown`**（红线 N4）：新加字段忘了登记 `FIELD_SOURCES` 时，
@@ -170,28 +179,46 @@ def _unique(items: list[str]) -> list[str]:
     return result
 
 
+def _leaf_values(
+    node: object, prefix: str, out: dict[str, list[object]]
+) -> dict[str, list[object]]:
+    """叶子点路径 → **该路径上所有出现过的值**（数组元素的每个元素各算一次出现）。
+
+    与 `_leaf_paths()` 同一套寻址规则（同一份语义只写一次，避免两套 walker 漂移）：
+    - 对象（dict）→ 逐键递归 `prefix.key`；**整数键也展开**（`str(key)`）；
+    - 非空且元素全是对象的列表 → 逐元素递归 `prefix[].key`（数组元素约定）；
+    - 其余（标量 / 字符串 / `None` / 空列表 / 空对象 / 标量列表）→ 记 `prefix` 本身。
+
+    为什么要收集**列表**而不是一个值：`weapons[].ammo_name` 这类数组元素路径只产生一条
+    点路径，但可能对应多个元素（f4：一门炮有弹药、另一门没装）。T-27 的实例级规则
+    （值缺失 ⇒ `unknown`）必须看到全部出现，见 `_occurrence_value()`。
+    """
+    if isinstance(node, dict) and node:
+        for key, value in node.items():
+            child = f"{prefix}.{key}" if prefix else str(key)
+            _leaf_values(value, child, out)
+        return out
+    if isinstance(node, list) and node and all(isinstance(item, dict) for item in node):
+        for item in node:
+            _leaf_values(item, f"{prefix}{ARRAY_MARKER}", out)
+        return out
+    out.setdefault(prefix, []).append(node)
+    return out
+
+
 def _leaf_paths(node: object, prefix: str) -> list[str]:
     """收集 overview 的叶子点路径（渲染层与测试共用同一套语义）。
 
-    规则（三条，都是为了让「一个数 = 一条 provenance」，六视角同一口径）：
-    - 对象（dict）→ 逐键递归 `prefix.key`；**整数键也展开**（`str(key)`），于是
-      `count_by_level` 这个 `{等级: 个数}` 变成 `count_by_level.4` / `.5` 逐条登记
-      （等级集合来自实际数据，不硬编码）；
-    - 非空且元素全是对象的列表 → 逐元素递归 `prefix[].key`（数组元素约定）；
-    - 其余（标量 / 字符串 / `None` / 空列表 / 空对象 / 标量列表）→ `prefix` 本身。
+    寻址规则见 `_leaf_values()`；这里只取路径（去重且保序），供只关心键空间的调用方用。
     """
-    if isinstance(node, dict) and node:
-        found: list[str] = []
-        for key, value in node.items():
-            child = f"{prefix}.{key}" if prefix else str(key)
-            found.extend(_leaf_paths(value, child))
-        return _unique(found)
-    if isinstance(node, list) and node and all(isinstance(item, dict) for item in node):
-        found = []
-        for item in node:
-            found.extend(_leaf_paths(item, f"{prefix}{ARRAY_MARKER}"))
-        return _unique(found) or [prefix]
-    return [prefix]
+    return _unique(list(_leaf_values(node, prefix, {})))
+
+
+def _occurrence_value(occurrences: list[object]) -> object:
+    """一条路径的多个出现 → 用来判三态的**一个**值（保守方向：任一缺值就算缺值）。"""
+    if any(value is None for value in occurrences):
+        return None
+    return occurrences[0]
 
 
 def _container_of(path: str) -> str | None:
@@ -210,33 +237,73 @@ def _int_key_container_of(path: str) -> str | None:
     return head if head and tail.isdigit() else None
 
 
+_VALUE_NOT_GIVEN: object = object()
+"""`_tag()` 的哨兵：调用方**没传实例值**（保持 T-27 之前的纯静态口径）。
+
+不能用 `None` 当哨兵——`None` 正是「值缺失」这个要判的信号。
+"""
+
+_MISSING_SOURCE: object = object()
+"""`FIELD_SOURCES` 查不到映射的哨兵（与「映射到 `None`（合成值）」区分开）。"""
+
+
 def _state_of(attribute_id: int | None) -> str:
-    """属性 ID → 三态；`None`（合成值）→ `assumed`（见模块 docstring）。"""
+    """属性 ID → 三态；`None`（合成值）→ `assumed`（**不看实例值**的旧口径）。
+
+    只给「没传值」的调用路径用（`_tag()` 的默认分支）。需要实例级覆盖时走
+    `provenance.resolve()`（`_tag()` 收到值时自动走那边）。
+    """
     if attribute_id is None:
         return "assumed"
     return _provenance.tag(int(attribute_id))
 
 
-def _tag(sources: Mapping[str, int | None], path: str) -> str:
-    """一个叶子路径 → 三态。
+def _source_of(sources: Mapping[str, int | None], path: str) -> object:
+    """叶子路径 → `FIELD_SOURCES` 里的来源（属性 ID / `None` / `_MISSING_SOURCE`）。
+
+    查表顺序（与 T-27 之前完全一致，只把「返回三态」换成「返回来源」）：
+    1. 整条路径命中；
+    2. 数组元素路径退回**容器**路径（`weapons: None` 覆盖 `weapons[].name`）；
+    3. 整数键字典的元素路径退回容器路径（`count_by_level` 覆盖 `count_by_level.4`）；
+    4. 都没有 → `_MISSING_SOURCE`。
+    """
+    if path in sources:
+        return sources[path]
+    container = _container_of(path)
+    if container is not None and container in sources:
+        return sources[container]
+    int_key_container = _int_key_container_of(path)
+    if int_key_container is not None and int_key_container in sources:
+        return sources[int_key_container]
+    return _MISSING_SOURCE
+
+
+def _tag(
+    sources: Mapping[str, int | None],
+    path: str,
+    value: object = _VALUE_NOT_GIVEN,
+) -> str:
+    """一个叶子路径（+ 本次计算里的值）→ 三态。
 
     查表顺序：
+    0. **没传值** → 旧口径（纯静态表，保持既有调用方语义不变）；**传了值** → 交
+       `provenance.resolve(来源, 值)` 判，于是「值缺失 ⇒ `unknown`」的实例级规则生效；
     1. 整条路径命中 `FIELD_SOURCES`（含 `[]` 元素约定路径）→ 用它的来源；
     2. 否则若路径在数组元素里，退回**容器**路径的来源（容器路径能覆盖整张列表，
        例如 `weapons: None` 指的是「整张武器清单都是合成值」）；
     3. 否则若路径是**整数键字典的元素路径**（`count_by_level.4`），退回容器路径的来源
        ——等级集合由数据决定，登记在容器上即可逐级继承，不硬编码等级列表；
     4. 都没有 → `unknown`（红线 N4：不猜、不用默认值冒充）。
+
+    **没有映射时永远 `unknown`，与值无关**：缺映射是「这个字段没登记来源」，比缺值更
+    根本；不能因为碰巧有值就冒充实测。
     """
-    if path in sources:
-        return _state_of(sources[path])
-    container = _container_of(path)
-    if container is not None and container in sources:
-        return _state_of(sources[container])
-    int_key_container = _int_key_container_of(path)
-    if int_key_container is not None and int_key_container in sources:
-        return _state_of(sources[int_key_container])
-    return "unknown"
+    source = _source_of(sources, path)
+    if source is _MISSING_SOURCE:
+        return "unknown"
+    if value is _VALUE_NOT_GIVEN:
+        return _state_of(source)
+    return _provenance.resolve(source, value)
 
 
 def _field_sources(view: str) -> dict[str, int | None]:
@@ -247,9 +314,17 @@ def _field_sources(view: str) -> dict[str, int | None]:
 
 
 def _provenance_block(overview: dict, view: str) -> dict[str, str]:
-    """逐字段打标：**每个 overview 叶子**都有一条（覆盖率 100%）。"""
+    """逐字段打标：**每个 overview 叶子**都有一条（覆盖率 100%）。
+
+    T-27 起把**该路径本次的值**一并交给 `_tag()` → `provenance.resolve()`：值缺失的叶子
+    强制 `unknown`，覆盖静态表的结论（实例级规则）。数组元素路径的「缺值」口径见
+    `_occurrence_value()`。
+    """
     sources = _field_sources(view)
-    return {path: _tag(sources, path) for path in _leaf_paths(overview, "")}
+    return {
+        path: _tag(sources, path, _occurrence_value(occurrences))
+        for path, occurrences in _leaf_values(overview, "", {}).items()
+    }
 
 
 def _confidence_block(overview: dict, view: str) -> dict[str, str]:

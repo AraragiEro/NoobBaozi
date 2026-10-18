@@ -52,6 +52,12 @@
    `damage_split` 四值全是 `None`——那是「无法推断」，不是「没有伤害」。
 8. **`family` 只认规格列的 7 类**；表外武器（如 Precursor 分裂炮）`family=None` 但
    仍计入伤害与射程——宁可少一个标签，也不要丢掉一门炮。
+9. **`fighter_bay` 表达「机库里的载机」（T-29）**：`count` / `types` /
+   `capacity_used_m3`（船级 `-57`）。机库载机**不进 `weapons[]`**：它们不参与任何伤害/
+   槽位计算，把它当武器会让「有战斗机在输出」变成假事实（`dps.fighter` 恒 0）。
+   无载机时给空结构（`count 0 / types [] / capacity_used_m3 0.0`），schema 恒在。
+   注意 `dps.fighter = 0.0` 在机库场景是**正确的 0**，绝不改成 `null` 或报错——
+   「有没有在打」由 `dps.fighter` 说，「机库里有没有货」由 `fighter_bay` 说。
 
 `FIELD_SOURCES` 的映射约定：能指到**唯一来源属性**的给属性 ID（归一化/聚合的量指到
 它的定义性属性，例如「四系伤害占比」→ 对应的弹药伤害属性）；由多个属性共同决定的
@@ -94,6 +100,9 @@ FIELD_SOURCES: dict[str, int | None] = {
     "weapons[].name": None,
     "weapons[].count": None,
     "weapons[].ammo_name": None,
+    "fighter_bay.count": None,
+    "fighter_bay.types": None,
+    "fighter_bay.capacity_used_m3": _a.ATTR_FIGHTER_BAY_USED,
     "dps.base": _a.ATTR_DAMAGE_DPS,
     "dps.with_reload": _a.ATTR_DAMAGE_DPS_WITH_RELOAD,
     "dps.drone": _a.ATTR_DRONE_DPS,
@@ -125,6 +134,12 @@ FIELD_SOURCES: dict[str, int | None] = {
 
 `weapons[].*` 四条是**合成值**：清单由已装模块 + SDE 索引聚合而来（`family` 来自 group
 名、`ammo_name` 来自索引库），指不到单一来源属性，故 `None`（渲染层判 `assumed`）。
+
+`fighter_bay.capacity_used_m3` 映射 `-57 fighterCapacityLoad`（机库占用 m³，**只在船级**）；
+`fighter_bay.count` / `fighter_bay.types` 是**合成值**（由已装条目数出，指不到单一属性），
+故 `None`。`fighter_bay.types` 是字符串列表，`FIELD_SOURCES` 仍必须登记：渲染层把标量列表
+当**一个**叶子（`render._leaf_values` 的「其余」分支），漏登记就会掉成 `unknown`。
+
 `range.max_range_m` / `ammo_endurance_s` / `overload.delta.*` 同样是**合成值**
 （飞行时间 × 速度、弹匣 × 周期、两次重算之差），指不到单一属性，故 `None`。
 
@@ -392,6 +407,7 @@ def build(ctx: ViewContext) -> dict:
 
     overview = {
         "weapons": _weapon_list(records),
+        "fighter_bay": shared.fighter_bay_summary(ctx, BASE),
         "dps": {
             "base": _value(attrs.get(_a.ATTR_DAMAGE_DPS)),
             "with_reload": _value(attrs.get(_a.ATTR_DAMAGE_DPS_WITH_RELOAD)),

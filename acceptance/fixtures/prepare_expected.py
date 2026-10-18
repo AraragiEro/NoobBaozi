@@ -30,7 +30,11 @@ ROOT = ACCEPTANCE.parent                       # evefit/
 WORKSPACE = ROOT.parent
 sys.path.insert(0, str(WORKSPACE))
 
-FIXTURES = ("f1-hecate-killmail", "f2-hecate-tier-violation", "f3-hecate-modes")
+def fixture_paths() -> list[Path]:
+    """所有样本（`.eft` 与原始 killmail `.json`；`.expected.json` 是产出，不是输入）。"""
+    items = [p for pattern in ("*.eft", "*.json") for p in HERE.glob(pattern)
+             if not p.name.endswith(".expected.json")]
+    return sorted(items, key=lambda item: item.stem)
 
 
 def attr_value(node: dict, attribute_id: int) -> float | None:
@@ -94,8 +98,8 @@ def main() -> int:
     meta = engine.meta()
     index = Index.open(paths_mod.db_path())
     try:
-        for stem in FIXTURES:
-            eft_path = HERE / f"{stem}.eft"
+        for eft_path in fixture_paths():
+            stem = eft_path.stem
             text = eft_path.read_text(encoding="utf-8")
             normalized = normalize_fit(text)
             if normalized["fit"] is None:

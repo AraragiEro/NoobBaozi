@@ -235,6 +235,38 @@
 165. **第 61 条被修正**：弹药四系伤害（`114/116/117/118`）与 `653 aoeVelocity` **确实在** `calculate` 的**装备条目**里（导弹发射器把已装填弹药属性合并进自己的 `attributes`；无人机条目也带四系伤害）。实测 f4 `Republic Fleet Valkyrie` → 116=32.0、f15 `Rapid Heavy Missile Launcher II` → 281=0.0/653=0.0。→ `damage_split.*` 应为 **`measured`**，不是 `unknown`。
 166. **护盾共振率 `271–274` 应变 `assumed`（原 `measured` 是单样本假象）**：f4 的 `EM Ward Field II`、f15 的 `Thermal Dissipation Field II` 是**盾抗模块**，`active` 才有抗性 → 状态轴下 `271` 从 `0.5`（online）变 `0.2969`（active）。`109–113`（结构）与 `267–270`（装甲）在本批样本仍是 `measured`。
 167. **由此得出一个根本性认知**：**provenance 本质上是「按配装」的性质，不是「按属性」的性质**。同一属性（如护盾共振率）在无盾抗模块的船上可以是 `measured`，在有盾抗模块的船上必须是 `assumed`。→ **属性级静态表只能是近似**，两层模型（欠账 24）从"应该做"升级为"必须做"。
+168. **T-14 完成多样本重推**：4 样本（f1/f4/f15/carrier）× 3 轴，技能档全部 `all4+min_required` / **512**；并集轴变化 技能 492 / 状态 33 / 剖面 24。已登记常量 **measured 66 / assumed 71 / unknown 10**（9 正 ID + 手工覆盖的 `-70`），`overlap=[]`、`consistent=True`。
+169. **11 个旧 `measured` 因技能档修好而翻 `assumed`**：`11/15/38/54/55/76/79/158/263/479/482/564`。→ **这是旧表跑在 19 技能档上的直接证据**（例如「263 shieldCapacity 三轴不变」从来是假象）。
+170. **14 个 `unknown → measured`**：`114/116/117/118`（四系伤害）、`653 aoeVelocity`、`1285/1286/1287/1289`（requiredSkill4/5）、`2215–2219`（战斗机槽位）。
+171. **12 个 `unknown → assumed`**：`-55…-62`（战斗机族）、`-14`、`-46`、`-47`、`654`。负 ID 全部 `assumed`（规则直接后果）。
+172. **战斗机必须放 `fighter_tube` 槽**；放 `fighter_bay` 只算 `-57` 机库占用，`-58/-59..-62` 全 0（`-59` 需超级航母 Nyx + 重型战斗机，`2219=4`）。
+173. **第 2 轮完成**：26 样本 × **43 字段**（新增 `feasible` / `over_budget`）= **1118/1118 = 100%**。缺陷：1 medium + 12 low 观察。
+174. **该 medium 极可能是正确行为**：f26 航母 `dps.fighter = 0.0` —— 若载机在 `fighter_bay`（未发射）则 `-58 = 0` 是对的（第 172 条已实测）。已在 T-28 核实原始 killmail 的 flag 是 `FighterTube` 还是 `FighterBay`。
+175. **一个值得记的讽刺**：验收员说「这轮最有价值的是航母那条——它安静地报了个 0」，但这条很可能**它自己误判了**。**「看起来很有道理的错误」这条判据，对验收工具自身同样适用。**
+176. 验收员本轮修了自己工具链 3 处：selftest 合成 payload 缺新字段、`fetch_fixtures.py` 重跑会覆盖已有样本（改为幂等 + `--only`）、f23/f26 判据写得过窄。
+177. **T-27 完成两层 provenance 模型**（410 passed）：新增 `resolve(attribute_id, value)` —— **值缺失（`None`）→ `unknown`**（覆盖静态表），值存在 → 走静态表；`tag()` 签名与语义未变。`audit()` 自报 `instance_missing_rule`。
+178. 因值缺失翻 `unknown` 的量级：**f1 9 个 / f4 12 个 / f5 10 个**。靶心 `f4.dph` 已从 `assumed` → `unknown`（旧口径报的是 assumed，不是 measured）。
+179. **新暴露的语义问题**：`unknown` 现在同时承载「**未知**」与「**不适用**」——纯炮台配装的 `application.explosion_radius_m` 不是"不可知"，而是"这配装没有导弹"。三态契约无法区分 → 需评估是否加 `not_applicable` 或第 4 态。
+180. **T-27 抓出我两处探针缺陷**：① `glob(name + '*')` 会先匹配到 `.expected.json`（`e` < `j`）；② 我写的「通用断言」循环体是 `pass`，**空转**。→ 教训：**验收脚本必须自证非空转**（注入一个必然失败的用例来证明它真的在断言）。
+181. **数组元素口径（本轮新裁决）**：一条路径只有一个标签；`weapons[].ammo_name` 在混装配装上「一门有弹、一门没装」→ 按缺值判 `unknown`；全部都有弹药时才算 `assumed`。
+182. **下一步顺序定为 3 → 1**（与 T-27 的建议一致）：
+ ① 先做「**全样本扫描：值为 `None` 却仍报 `assumed`/`measured` 的漏网**」（纯读不写，最快给出实例规则的覆盖面证据）；
+ ② 再做第二条实例规则（按配装检测状态敏感族 → 有盾抗模块则 `271–274` 判 `assumed`）。
+ 理由：第 ① 步能用证据证明规则真的覆盖住了，再动第 ② 步；顺序反了就是在没有度量前扩范围。
+183. **T-28 判定：`-58 = 0` 是正确的**。f26 的 8 架载机 flag = **158 FighterBay（机库）**，全 fixture 无 159–163（FighterTube）。flag 语义取自现代 SDE `invFlags`（本地 SDE zip 不含该表，`evego` 枚举只到 156）。
+184. **改造实验（决定性）**：A 全部留 `fighter_bay`（state=active）→ `-58 = 0`；B 只把 Templar 移进 `fighter_tube` → `-58 = 240.846`。**A 与 B 只差 `slot.type`** → 零值成因是「在机库」，不是 offline；**引擎伤害链路正常，无限制**。
+185. **误报有两条独立根因**：① 我方 `shared.classify_weapon` 把 `fighter_bay` 也判成 `family: "fighter"`；② 验收判据「有 fighter 武器 → `dps.fighter > 0`」过粗 —— **`Siren I` 是支援战斗机**，进管后只记 `-61=1`，仍不出 `-58`。
+186. **修正验收员的数据描述**：`-57`（fighterCapacityLoad）**只出现在船级**，item 级没有；item 级 `-55/-56 = 0.0` 只对 Templar 成立，Siren 连这两个键都没有。
+187. **未定向观察**：flag 164（`StructureServiceSlot0`）→ 引擎映射成 `service[0]`，一架载机躺进去仍算出 `-57 = 1000 / -58 = 33.86`。f26 无 164，与本次判定无关，待定性。
+188. **方法论复现**：这是第二次「可疑的零值其实是对的」（第一次是 Damnation 装甲 HP 34,142）。**直觉怀疑必须用闭式复算或对照实验证伪，不能靠"看起来不合理"下结论。**
+189. **第 3 轮完成 → 三轮验收收官**：**36 样本 × 43 字段 = 1548/1548 = 100%**；**产品缺陷 0**（medium 及以上），17 条 low 观察（多为覆盖度说明）。快照 `enforced` 保持 0 DIFF。
+190. 第 3 轮覆盖：双推进 Brutix、工业舰 Bestower、纯无人机 Vexor（**306.4 DPS 全来自无人机**）、7 门智能炸弹 Praxis、10 件 bulkhead Megathron（EHP 295k）、98 项货舱 Iteron、无弹 Maller、Jackdaw `modes=3`、Apocalypse。
+191. **验收工具这轮修了自己 4 处判据**：`check_fighter_chain` 按 `-62`+支援型+flag 三重判定；**把「I3 与算术平均差 >1%」从 blocker 降为 low**；fetch 加 `allow_reuse`；判据补 `require_all`/`min_count`/`min_cargo`/`require_no_charge`。
+192. **I3 的正确切分**：真正的**不变式**是「`Σ HP / Σ(w·r)` 按层复算」（永久有效）；「与四系算术平均差 > 1%」只是**启发式观察** —— f31 结构坦抗性近乎均匀，两者只差 0.54%，是样本性质不是缺陷。→ **启发式不能当红线**。
+193. **T-29 修掉误报根因**（417 passed）：`classify_weapon` 现在 `fighter_tube` → `family:"fighter"`、`fighter_bay` → **排除**；火力视角新增 `fighter_bay{count,types,capacity_used_m3}` + 诊断 `fighters_in_bay_only`。**medium 误报由构造消失**，且不丢事实。
+194. **`-57` 是「载机舱容占用」，含已发射的中队**：把 Templar 移进 `fighter_tube` 后 `-57` 仍为 14000 → `capacity_used_m3` **不能**改成按机库条目累加体积（两者在「有中队发射中」时会不同）。
+195. **覆盖盲区**：`fighter_bay.types` 是字符串列表，渲染层把非空标量列表当一个叶子 → 必须登记 `FIELD_SOURCES`。Hecate 样本机库为空，既有守卫测试**校验不到**这条，已在 f26 上补「叶子全覆盖 + 字符串白名单」断言。
+196. **可靠性自检的写法值得推广**：临时把 `classify_weapon` 的 bay 分支改回旧行为 → 新测试立刻 **2 failed** → 证明断言不是永真，然后还原。**每个关键断言都该能被一次故意篡改打红。**
 
 ---
 
@@ -349,6 +381,9 @@
 | 57 | 突变模块检测 → 归一化/诊断给显式 flag（覆盖 D7 与 X3 同一根因） | T-22 | **高** |
 | 58 | `firepower.py` docstring 陈旧（仍称 281 不在 `SCALE_BY_ATTR`、说「8 项」，实为 11 项 = 9 毫秒 + 2 ×1000） | 下一轮清理 | 低 |
 | 59 | 常量清单靠人工穷举必漏（281 / 56 / 1272 都是事后补的）→ 需「视角用到的 ID 必须全在常量表」的自动检查 | 待立项 | 中 |
+| 60 | **`unknown` 同时承载「未知」与「不适用」**（如纯炮台配装的 `application.explosion_radius_m`）→ 需评估第 4 态 `not_applicable` | 待评估 | 中 |
+| 61 | 数组元素粒度：一条路径一个标签，混装时任一元素缺值即整条 `unknown` | 待评估 | 低 |
+| 62 | 第二条实例规则（按配装检测状态敏感族 → 271–274）未做，当前靠静态表保守判 `assumed` | 下一轮 | 中 |
 
 ---
 
