@@ -298,18 +298,32 @@ AMAMAKE = {
 }
 
 
-def _offline_system(monkeypatch: pytest.MonkeyPatch) -> None:
-    """星系查询打桩（真实 ESI 快照：30002537 = Amamake）+ 清掉进程级缓存。"""
-    monkeypatch.setattr(api, "universe_names", lambda ids: {30002537: AMAMAKE["name"]})
+def _offline_system(monkeypatch: pytest.MonkeyPatch) -> list[list[int]]:
+    """星系查询 + 实体名都打桩（真实 ESI 快照 / 真实 names 样本）+ 清掉进程级缓存。
+
+    返回每次 `POST /universe/names/` 的请求体 —— 测试用它断言「一条战报只查一批名字」。
+    """
+    entries = json.loads(
+        (ZKB_FIXTURES / "esi-universe-names.json").read_text(encoding="utf-8")
+    )
+    calls: list[list[int]] = []
+
+    def fake_post(url: str, payload: object) -> object:
+        calls.append(list(payload))  # type: ignore[arg-type]
+        wanted = set(payload)  # type: ignore[arg-type]
+        return [entry for entry in entries if entry["id"] in wanted]
+
     monkeypatch.setattr(api, "universe_system", lambda system_id: dict(AMAMAKE))
+    monkeypatch.setattr(api, "_post_json", fake_post)
     api.clear_caches()
+    return calls
 
 
 def test_killmail_json_output_is_the_api_envelope(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """`killmail --json`：退出码 0，stdout 就是 `api.fit_killmail` 的信封原样。"""
-    _offline_system(monkeypatch)
+    calls = _offline_system(monkeypatch)
     code, out, err = _run_cli(
         ["killmail", "--fit-file", str(KILLMAIL_ZKB_PATH), "--json"], capsys
     )
@@ -323,6 +337,12 @@ def test_killmail_json_output_is_the_api_envelope(
     assert result["attackers"]["count"] == 79
     assert result["attackers"]["damage_check"] == "matches_victim"
     assert result["context"]["damage_taken_vs_ehp"]["ratio"] is not None
+    # T-52：驾驶员 / 军团 / 联盟名字都进 `--json`（受害者 + 伤害 Top + 最终一击）
+    assert result["victim"]["character"]["name"] == "Warlock Industries Event"
+    assert result["victim"]["alliance"]["name"] == "Warlock Industries Alliance"
+    assert result["attackers"]["by_pilot"][0]["character"]["name"]
+    assert result["attackers"]["final_blow"]["character"]["name"] == "Ignacious Deviant"
+    assert len(calls) == 1, "一条战报只该发一次 names 请求"
     # CLI 与 API 共用同一个函数层：两边必须一模一样
     assert envelope == api.fit_killmail(KILLMAIL_ZKB_PATH.read_text(encoding="utf-8"))
 
@@ -330,23 +350,26 @@ def test_killmail_json_output_is_the_api_envelope(
 def test_killmail_human_output_is_readable(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`killmail` 不带 `--json`：人话摘要（战报一行 + 分桶 + 伤害 vs EHP）。"""
+    """`killmail` 不带 `--json`：人话摘要（战报一行 + 分桶 + 伤害 vs EHP）**带人名**。"""
     _offline_system(monkeypatch)
     code, out, err = _run_cli(["killmail", "--fit-file", str(KILLMAIL_ZKB_PATH)], capsys)
     assert code == cli.EXIT_OK, err
     assert err == ""
     assert out.splitlines()[0].startswith("killmail 139239127")
     for block in (
-        "victim: Sarathiel (87381)",
+        "victim: Warlock Industries Event (Warlock Industries Corporation / "
+        "Warlock Industries Alliance) — Sarathiel (87381)",
+        "final_blow: Ignacious Deviant (Hierarch Apotheosis Consortium / Ruinous Powers)",
+        "Hexa 2500mm Repeating Cannon II",
+        "伤害 Top3:",
         "value:",
         "attackers: count=79",
-        "final_blow:",
         "by_ship_group(",
         "by_weapon_family(",
         "context.damage_taken_vs_ehp:",
         "warnings(",
     ):
-        assert block in out, f"人话摘要里缺少 {block}"
+        assert block in out, f"人话摘要里缺少 {block}：\n{out}"
     assert "|" not in out, "不要花哨表格"
 
 
@@ -383,7 +406,11 @@ KILLS_URL = "https://zkillboard.com/api/kills/shipTypeID/22444/pastSeconds/60480
 
 @pytest.fixture()
 def zkb_offline(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """把 api 的生产请求器换成 fixture（不联网），并清掉限流时间戳（否则要真等 1.2 s）。"""
+    """把战报查询与**实体名解析**都换成 fixture（不联网），并清掉限流时间戳。
+
+    两条 POST 端点分开打桩：`/universe/ids/`（名字 → id）走 `_zkb_default_requester`，
+    `/universe/names/`（id → 名字）走 `_post_json` —— 两个都得拦，否则会真联网。
+    """
     losses = json.loads(
         (ZKB_FIXTURES / "losses-shipTypeID-22444-pastSeconds-604800.json").read_text(
             encoding="utf-8"
@@ -392,14 +419,24 @@ def zkb_offline(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     ids = json.loads(
         (ZKB_FIXTURES / "esi-ids-sleipnir-hecate.json").read_text(encoding="utf-8")
     )
+    names = json.loads(
+        (ZKB_FIXTURES / "esi-universe-names.json").read_text(encoding="utf-8")
+    )
     seen: list[str] = []
 
     def fake(url: str, body: object | None = None) -> object:
         seen.append(url)
         return ids if body is not None else losses
 
+    def fake_names(url: str, payload: object) -> object:
+        seen.append(url)
+        wanted = set(payload)  # type: ignore[arg-type]
+        return [entry for entry in names if entry["id"] in wanted]
+
     api._reset_zkb_state()
+    api.clear_caches()  # 实体名缓存也是进程级的：不清会让「这轮发了几次请求」不可复现
     monkeypatch.setattr(api, "_zkb_default_requester", fake)
+    monkeypatch.setattr(api, "_post_json", fake_names)
     yield seen
     api._reset_zkb_state()
 
@@ -419,14 +456,22 @@ def test_search_json_is_the_api_envelope(
     assert result["query"]["resolved"]["ship"] == {"id": 22444, "name": "Sleipnir"}
     assert result["query"]["past_seconds"] == 604800
     assert result["query"]["side"] == api.ZKB_SIDE_BOTH, "没给 --side 时默认 both"
-    # 默认 both = 两条路径各一次；名字先经 ESI 解析
-    assert zkb_offline == [api.ESI_UNIVERSE_IDS_API, KILLS_URL, LOSSES_URL]
+    # T-52：每行带受害者的驾驶员 / 军团 / 联盟名字
+    for row in result["kills"]:
+        assert row["victim"]["character"]["name"], row["killmail_id"]
+    # 名字 → id 先解析，两条战报路径各一次，身份名字最后一批（一批 = 不为每行各查一次）
+    assert zkb_offline == [
+        api.ESI_UNIVERSE_IDS_API,
+        KILLS_URL,
+        LOSSES_URL,
+        api.ESI_UNIVERSE_NAMES_API,
+    ], zkb_offline
 
 
 def test_search_human_output_is_readable(
     zkb_offline: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """人话模式只排版：条件 / count / 聚合 / 每条一行 / note 的出处都在。"""
+    """人话模式只排版：条件 / count / 聚合 / 每条一行（**带受害者名字**）/ note 都在。"""
     code, out, err = _run_cli(
         ["search", "--ship", "22444", "--past-seconds", "604800", "--side", "losses"],
         capsys,
@@ -435,6 +480,8 @@ def test_search_human_output_is_readable(
     for block in ("search ·", "条件:", "count=12", "by_ship:", "time_span:", "urls:"):
         assert block in out, f"人话摘要里缺少 {block}：\n{out}"
     assert "139265742" in out, "每条战报的 killmail_id 必须出现"
+    assert "受害者=" in out, "每行必须带受害者身份"
+    assert "id:" not in out, "这批 id 全都能解析出名字，不该出现 id: 占位"
     assert "fit_killmail" in out, "必须提示明细走 fit_killmail"
     assert "|" not in out, "不要花哨表格"
 

@@ -40,4 +40,4 @@ stdio 形态、客户端 JSON、`/health`、错误语义等细节见 `evefit/mcp
 
 **② 顶层数值可能对应不可达状态。** 多件推进模块同时启用时，`speed_mps` / `signature_radius_m` 是**叠加值**，不一定是玩家能达到的状态：用 `mobility.propulsion_states.single` 看「只开某一个」的真实值，`state_exclusive` flag 会提示这种情况。转述时两件事一起说，别只念顶层数。
 
-**③ 不要自己打开 zkillboard / ESI 网页。** 单条战报的上下文由 `fit_killmail` 给，列表检索由 `zkb_search` 给，配装数值由六维度工具给。拿不到的值工具会给 `null`（原因写在 `warnings` / `unknown_reasons` 里）—— 如实转述，不要用网页正文去补。
+**③ 不要自己打开 zkillboard / ESI 网页。** 单条战报的上下文——含受害者与伤害 Top 的驾驶员 / 军团 / 联盟名字——`fit_killmail` 已给名字，不用再查 ESI；列表检索（每行也带受害者名字）由 `zkb_search` 给，配装数值由六维度工具给。拿不到的值工具会给 `null`（原因写在 `warnings` / `unknown_reasons` 里）—— 如实转述，不要用网页正文去补。

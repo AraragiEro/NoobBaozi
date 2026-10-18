@@ -898,6 +898,214 @@ def test_fit_killmail_cache_is_keyed_by_entry_name(monkeypatch: pytest.MonkeyPat
 
 
 # =============================================================================
+# 七之后、七之前：T-52 身份名字（驾驶员 / 军团 / 联盟）
+# =============================================================================
+#
+# 样本是**真实 ESI 响应**：`POST /universe/names/` 一次问 152 个 id（见
+# `tests/fixtures/zkb/esi-universe-names.json` 与同目录 README）。这些 id 覆盖
+# 139239127 这条战报（星系 + 受害者 + 79 名攻击者）与 zkb 列表样本的那 12 行。
+#
+# 三类断言缺一不可：名字**是非空真名**、请求**只发一次**、缓存与缺项都**不编**。
+
+NAMES_FIXTURE = EVEFIT_ROOT / "tests" / "fixtures" / "zkb" / "esi-universe-names.json"
+"""真实 `POST /universe/names/` 响应（裁剪版：只留这两份样本要的 id，字段一个没造）。"""
+
+VICTIM_CHARACTER = 2123771141
+VICTIM_CORPORATION = 98797773
+VICTIM_ALLIANCE = 99014589
+FINAL_BLOW_CHARACTER = 94814255
+
+
+def _names_entries() -> list[dict]:
+    return json.loads(NAMES_FIXTURE.read_text(encoding="utf-8"))
+
+
+def _serve_names(
+    monkeypatch: pytest.MonkeyPatch, *, drop: "tuple[int, ...]" = ()
+) -> list[list[int]]:
+    """把 `POST /universe/names/` 换成真实样本（**不联网**），返回每次请求的 id 批次。
+
+    `drop` 用来模拟「ESI 没给某个 id 的名字」（删号 / NPC / 缺项）。
+    """
+    hidden = set(drop)
+    entries = [entry for entry in _names_entries() if entry["id"] not in hidden]
+    calls: list[list[int]] = []
+
+    def fake_post(url: str, payload: object) -> object:
+        assert url == api.ESI_UNIVERSE_NAMES_API, f"意外的 POST：{url}"
+        wanted = list(payload)  # type: ignore[arg-type]
+        calls.append(wanted)
+        return [entry for entry in entries if entry["id"] in set(wanted)]
+
+    monkeypatch.setattr(api, "_post_json", fake_post)
+    return calls
+
+
+def _offline_identities(
+    monkeypatch: pytest.MonkeyPatch, *, drop: "tuple[int, ...]" = ()
+) -> list[list[int]]:
+    """星系详情 + 实体名都离线（真实快照 / 真实 names 样本），返回 names 请求批次。"""
+    calls = _serve_names(monkeypatch, drop=drop)
+    monkeypatch.setattr(api, "universe_system", lambda system_id: dict(AMAMAKE))
+    api.clear_caches()
+    return calls
+
+
+def test_fit_killmail_resolves_pilot_and_org_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """受害者 / 最终一击 / 伤害 Top 的驾驶员·军团·联盟名字都在，且**只发一次** names 请求。"""
+    text = KILLMAIL_ZKB_PATH.read_text(encoding="utf-8")
+    calls = _offline_identities(monkeypatch)
+
+    out = api.fit_killmail(text)
+    assert out["ok"] is True, out
+    result = out["result"]
+
+    victim = result["victim"]
+    assert victim["character"] == {"id": VICTIM_CHARACTER, "name": "Warlock Industries Event"}
+    assert victim["corporation"] == {
+        "id": VICTIM_CORPORATION,
+        "name": "Warlock Industries Corporation",
+    }
+    assert victim["alliance"] == {
+        "id": VICTIM_ALLIANCE,
+        "name": "Warlock Industries Alliance",
+    }
+    assert victim["ship"] == {"type_id": 87381, "name": "Sarathiel", "group": "Dreadnought"}
+
+    final = result["attackers"]["final_blow"]
+    assert final["character"] == {"id": FINAL_BLOW_CHARACTER, "name": "Ignacious Deviant"}
+    assert final["corporation"]["name"] == "Hierarch Apotheosis Consortium"
+    assert final["alliance"]["name"] == "Ruinous Powers"
+
+    pilots = result["attackers"]["by_pilot"]
+    assert len(pilots) == api.BY_PILOT_ROWS == 10, "只给伤害最高的前 10 名"
+    assert [row["damage"] for row in pilots] == sorted(
+        (row["damage"] for row in pilots), reverse=True
+    ), "by_pilot 必须按伤害降序"
+    assert pilots[0]["damage"] == 1086009
+    assert all(row["character"]["name"] for row in pilots), "前 10 名都该有名字"
+    assert all(row["ship"]["name"] for row in pilots), "船名来自 SDE，不该是 null"
+    assert pilots[0]["damage_pct"] is not None
+    blown = [row for row in pilots if row["final_blow"] is True]
+    assert [row["character"]["name"] for row in blown] == ["Ignacious Deviant"]
+
+    # 批量：整条战报（星系 + 受害者 + 79 名攻击者，去重后 120 个 id）只发**一次**请求
+    assert len(calls) == 1, f"一条战报只该查一批名字，实际 {[len(c) for c in calls]} 批"
+    expected = api._killmail_name_ids(json.loads(text)[0])
+    assert set(calls[0]) == set(expected)
+    assert SOLAR_SYSTEM_ID in calls[0], "星系名和实体名进同一个批次（不额外多发一次）"
+    assert len(calls[0]) == len(set(calls[0])), "请求体必须去重"
+    assert not any("实体名未解析" in warning for warning in result["warnings"])
+
+
+def test_identity_names_are_not_vacuous(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**断言非永真**：把 names 响应换成空列表 → 名字必须变 null + warnings 非空。
+
+    如果上面那条「名字非空」的断言其实是永真的（比如代码里塞了默认名），这条不会红。
+    """
+    text = KILLMAIL_ZKB_PATH.read_text(encoding="utf-8")
+    _offline_identities(monkeypatch)
+    monkeypatch.setattr(api, "_post_json", lambda url, payload: [])
+    api.clear_caches()
+
+    out = api.fit_killmail(text)
+    assert out["ok"] is True, "名字查不到不该让整条战报失败"
+    result = out["result"]
+    assert result["victim"]["character"] == {"id": VICTIM_CHARACTER, "name": None}
+    assert result["attackers"]["final_blow"]["character"]["name"] is None
+    assert any("实体名未解析" in warning for warning in result["warnings"])
+    assert result["victim"]["ship"]["name"] == "Sarathiel", "船名来自 SDE，与 ESI 无关"
+
+
+def test_identity_names_are_cached_across_killmails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同一批 id 的**第二条**战报不再发 names 请求（进程内缓存，未命中也不重问）。"""
+    zkb_text = KILLMAIL_ZKB_PATH.read_text(encoding="utf-8")
+    esi_text = KILLMAIL_ESI_PATH.read_text(encoding="utf-8")
+    calls = _offline_identities(monkeypatch)
+
+    first = api.fit_killmail(zkb_text)
+    assert first["ok"] is True
+    assert len(calls) == 1
+
+    # 同一批 id、不同内容 key → 结果缓存不命中，但实体名缓存应当全中
+    second = api.fit_killmail(esi_text)
+    assert second["ok"] is True, second
+    assert second["result"]["victim"]["character"]["name"] == "Warlock Industries Event"
+    assert len(calls) == 1, f"实体名缓存没生效：又发了 {len(calls) - 1} 次"
+
+    # 同一份输入再调一次 → 结果缓存命中，同样不发请求
+    assert api.fit_killmail(zkb_text) == first
+    assert len(calls) == 1
+
+
+def test_missing_entity_name_is_null_and_warned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """names 响应缺某个 id → 该 `name` 为 `null`（**不编**），`warnings` 说清少了几个。"""
+    text = KILLMAIL_ZKB_PATH.read_text(encoding="utf-8")
+    _offline_identities(monkeypatch, drop=(VICTIM_CORPORATION,))
+
+    out = api.fit_killmail(text)
+    assert out["ok"] is True, out
+    victim = out["result"]["victim"]
+    assert victim["corporation"] == {"id": VICTIM_CORPORATION, "name": None}
+    assert victim["character"]["name"] == "Warlock Industries Event", "缺一个不该连累别人"
+    assert any(
+        "1 个实体名未解析" in warning for warning in out["result"]["warnings"]
+    ), out["result"]["warnings"]
+
+
+def test_missing_alliance_is_a_null_object_not_a_null_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """没有联盟 → **整个 `alliance` 对象是 `null`**（不是 `{"id": null, "name": null}`）。"""
+    killmail = json.loads(KILLMAIL_ESI_PATH.read_text(encoding="utf-8"))
+    killmail.pop("zkb", None)
+    killmail["victim"].pop("alliance_id", None)
+    killmail["solar_system_id"] = SOLAR_SYSTEM_ID
+    _offline_identities(monkeypatch)
+
+    out = api.fit_killmail(json.dumps(killmail, ensure_ascii=False))
+    assert out["ok"] is True, out
+    victim = out["result"]["victim"]
+    assert victim["alliance"] is None
+    assert victim["character"]["name"] == "Warlock Industries Event"
+
+
+def test_universe_names_batches_respect_the_min_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """超过 1000 个 id 会分批，批间隔 ≥ `UNIVERSE_NAMES_MIN_INTERVAL_S`（虚拟时钟，不真等）。"""
+    clock_state = {"now": 500.0}
+    starts: list[float] = []
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return clock_state["now"]
+
+    def sleeper(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock_state["now"] += seconds
+
+    def fake_post(url: str, payload: object) -> object:
+        starts.append(clock_state["now"])
+        return [{"id": identifier, "name": f"E{identifier}"} for identifier in payload]  # type: ignore[union-attr]
+
+    monkeypatch.setattr(api, "_post_json", fake_post)
+    api.clear_caches()
+
+    names = api.universe_names(list(range(1, 1501)), clock=clock, sleeper=sleeper)
+    assert len(names) == 1500
+    assert len(starts) == 2, f"1500 个 id 应当分成 2 批，实际 {len(starts)} 批"
+    assert starts[1] - starts[0] >= api.UNIVERSE_NAMES_MIN_INTERVAL_S - 1e-9, (
+        f"两批只隔了 {starts[1] - starts[0]} s"
+    )
+    assert sleeps == [pytest.approx(api.UNIVERSE_NAMES_MIN_INTERVAL_S)]
+
+
+# =============================================================================
 # 七、`zkb_search`（T-50）：URL 拼装 / 合并去重 / 限流 / 名字解析（**全程离线**）
 # =============================================================================
 #
@@ -933,22 +1141,42 @@ def zkb_state() -> object:
 
 
 class _Recorder:
-    """假请求器：记下每个 URL（与 POST 体），按 GET / POST 回固定 payload。"""
+    """假请求器：记下每个 URL（与 POST 体），按 GET / POST 回固定 payload。
 
-    def __init__(self, *, get_payload: object = None, post_payload: object = None) -> None:
+    `POST` 有两条不同的端点：`/universe/ids/`（名字 → id）与 `/universe/names/`（id → 名字）。
+    不传 `names_payload` 时后者回空列表 —— 那正好等于「一个名字都查不到」，于是名字为
+    `null`、`warnings` 有一条，而**战报本身照常返回**（这正是降级该有的样子）。
+    """
+
+    def __init__(
+        self,
+        *,
+        get_payload: object = None,
+        post_payload: object = None,
+        names_payload: object = None,
+    ) -> None:
         self.urls: list[str] = []
         self.bodies: list[object] = []
+        self.names_batches: list[list[int]] = []
         self._get = get_payload
         self._post = post_payload
+        self._names = names_payload
 
     def __call__(self, url: str, body: object | None = None) -> object:
         self.urls.append(url)
         self.bodies.append(body)
+        if body is not None and url == api.ESI_UNIVERSE_NAMES_API:
+            self.names_batches.append(list(body))  # type: ignore[arg-type]
+            return [] if self._names is None else self._names
         return self._post if body is not None else self._get
 
     def get_urls(self) -> list[str]:
-        """只保留战报查询（去掉名字解析那次 POST）。"""
-        return [url for url in self.urls if not url.endswith("/universe/ids/")]
+        """只保留战报查询（去掉两次 ESI 实体的解析请求）。"""
+        return [
+            url
+            for url in self.urls
+            if url not in (api.ESI_UNIVERSE_IDS_API, api.ESI_UNIVERSE_NAMES_API)
+        ]
 
 
 def test_zkb_url_orders_filters_and_never_uses_start_time(zkb_state: None) -> None:
@@ -983,7 +1211,12 @@ def test_zkb_search_builds_urls_with_past_seconds_and_both_sides(
     )
     assert envelope["ok"] is True, envelope
     assert recorder.bodies[0] == ["Sleipnir"], "名字解析的请求体就是名字数组"
-    assert recorder.urls == [api.ESI_UNIVERSE_IDS_API, KILLS_EXPECTED_URL, LOSSES_EXPECTED_URL]
+    assert recorder.urls == [
+        api.ESI_UNIVERSE_IDS_API,
+        KILLS_EXPECTED_URL,
+        LOSSES_EXPECTED_URL,
+        api.ESI_UNIVERSE_NAMES_API,
+    ], "名字 → id 先解析，战报两条路径各一次，身份名字最后一批"
 
     result = envelope["result"]
     assert result["query"] == {
@@ -1012,7 +1245,7 @@ def test_zkb_search_url_assertion_would_catch_a_missing_past_seconds(
         ship=22444, past_seconds=604800, side="losses", requester=recorder
     )
     assert envelope["ok"] is True
-    real = recorder.urls[-1]
+    real = recorder.get_urls()[-1]
     without = api.zkb_url(side="losses", filters={"ship": 22444})
     assert real == LOSSES_EXPECTED_URL
     assert "pastSeconds/604800" in real
@@ -1211,3 +1444,81 @@ def test_zkb_search_rejects_bad_arguments_without_network(zkb_state: None) -> No
         assert envelope["ok"] is False, f"{name} 应该被拒绝"
         assert envelope["error"]["kind"] == "invalid_argument", (name, envelope)
         assert recorder.urls == [], f"{name} 被拒绝时不该出网：{recorder.urls}"
+
+
+# ---- T-52：列表里的受害者身份（只查返回的行 / 一次批量 / 缺项不编）------------
+
+
+def _zkb_identity_recorder(*, drop: "tuple[int, ...]" = ()) -> _Recorder:
+    """战报列表 + 真实 names 样本；名字请求仍然走注入的 requester（不联网）。"""
+    hidden = set(drop)
+    return _Recorder(
+        get_payload=_fixture(LOSSES_FIXTURE),
+        post_payload=_fixture(IDS_FIXTURE),
+        names_payload=[entry for entry in _names_entries() if entry["id"] not in hidden],
+    )
+
+
+def test_zkb_search_fills_victim_names(zkb_state: None) -> None:
+    """每行 `victim` 都带驾驶员 / 军团 / 联盟名字（**非空真名**），并且只发一次 names 请求。"""
+    api.clear_caches()
+    recorder = _zkb_identity_recorder()
+
+    envelope = api.zkb_search(
+        ship="Sleipnir", past_seconds=604800, side="losses", requester=recorder
+    )
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    assert len(result["kills"]) == 12
+    for row in result["kills"]:
+        victim = row["victim"]
+        assert victim["character"]["name"], f"killmail {row['killmail_id']} 缺驾驶员名字"
+        assert victim["corporation"]["name"], "军团名字必须有"
+        assert victim["ship"]["name"], "受害者船名来自 SDE"
+        assert victim["ship"]["type_id"] == row["ship"]["type_id"]
+    first = result["kills"][0]
+    assert first["killmail_id"] == 139265742
+    assert first["victim"]["character"]["id"] != 0
+    assert result["warnings"] == [], f"这批 id 全能解析，不该有 warning：{result['warnings']}"
+
+    assert len(recorder.names_batches) == 1, "12 行的身份应当合成一批查完"
+    expected = set(api._zkb_row_name_ids(result["kills"]))
+    assert set(recorder.names_batches[0]) == expected
+
+
+def test_zkb_search_only_resolves_names_for_returned_rows(zkb_state: None) -> None:
+    """`limit=2` 时 names 请求体里只有那 2 行的 id（**不为整页 12 条都解析**）。"""
+    api.clear_caches()
+    recorder = _zkb_identity_recorder()
+
+    envelope = api.zkb_search(
+        ship="Sleipnir", past_seconds=604800, side="losses", limit=2, requester=recorder
+    )
+    assert envelope["ok"] is True, envelope
+    shown = envelope["result"]["kills"]
+    assert len(shown) == 2
+    assert envelope["result"]["count"] == 12, "count 仍按整页算"
+
+    assert len(recorder.names_batches) == 1, "一次批量，不是逐行查"
+    asked = set(recorder.names_batches[0])
+    assert asked == set(api._zkb_row_name_ids(shown))
+    assert len(asked) <= 2 * 3, f"只该问这 2 行的身份，实际问了 {len(asked)} 个 id"
+    assert all(row["victim"]["character"]["name"] for row in shown)
+
+
+def test_zkb_search_missing_name_is_null_and_warned(zkb_state: None) -> None:
+    """names 响应缺项 → 该 `name` 为 `null` + `warnings` 说清数量（**不编名字**）。"""
+    api.clear_caches()
+    rows = _fixture(LOSSES_FIXTURE)
+    victim_character = rows[0]["victim"]["character_id"]
+    recorder = _zkb_identity_recorder(drop=(victim_character,))
+
+    envelope = api.zkb_search(
+        ship="Sleipnir", past_seconds=604800, side="losses", requester=recorder
+    )
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    victim = result["kills"][0]["victim"]
+    assert victim["character"] == {"id": victim_character, "name": None}
+    assert victim["corporation"]["name"], "缺一个不该连累别人"
+    assert any("个实体名未解析" in warning for warning in result["warnings"]), result["warnings"]

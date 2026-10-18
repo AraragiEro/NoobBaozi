@@ -656,29 +656,46 @@ def test_server_survives_garbage_input() -> None:
 # =============================================================================
 
 
-def _offline_system(monkeypatch: pytest.MonkeyPatch) -> None:
-    """星系查询打桩（真实 ESI 快照：30002537 = Amamake，lowsec）+ 清进程级缓存。"""
-    monkeypatch.setattr(api, "universe_names", lambda ids: {30002537: "Amamake"})
-    monkeypatch.setattr(
-        api,
-        "universe_system",
-        lambda system_id: {
-            "name": "Amamake",
-            "security_status": 0.43876123428344727,
-            "security_class": "E",
-            "has_class": True,
-        },
+AMAMAKE = {
+    "name": "Amamake",
+    "security_status": 0.43876123428344727,
+    "security_class": "E",
+    "has_class": True,
+}
+"""真实 ESI 快照（`GET /universe/systems/30002537/`）：lowsec，类名 `E`。"""
+
+
+def _offline_system(monkeypatch: pytest.MonkeyPatch) -> list[list[int]]:
+    """星系查询 + 实体名打桩（真实 ESI 快照 / 真实 names 样本）+ 清进程级缓存。
+
+    返回每次 `POST /universe/names/` 的请求体（用来断言「一次调用只查一批名字」）。
+    """
+    entries = json.loads(
+        (ZKB_FIXTURES / "esi-universe-names.json").read_text(encoding="utf-8")
     )
+    calls: list[list[int]] = []
+
+    def fake_post(url: str, payload: object) -> object:
+        calls.append(list(payload))  # type: ignore[arg-type]
+        wanted = set(payload)  # type: ignore[arg-type]
+        return [entry for entry in entries if entry["id"] in wanted]
+
+    monkeypatch.setattr(api, "universe_system", lambda system_id: dict(AMAMAKE))
+    monkeypatch.setattr(api, "_post_json", fake_post)
     api.clear_caches()
+    return calls
 
 
 def test_fit_killmail_schema_and_wording() -> None:
-    """`fit_killmail` 只有 `fit` + 三个共同参数；title / description 写明「别开网页」。"""
+    """`fit_killmail` 只有 `fit` + 三个共同参数；title / description 写明「别开网页」与名字。"""
     spec = _tool_spec("fit_killmail")
     assert "战报上下文" in spec["title"]
     assert "谁打的" in spec["title"]
     assert "zkillboard 网页" in spec["description"], "description 必须禁止 agent 自己开网页"
     assert "fit_parse" in spec["description"] and "fit_killmail" in spec["description"]
+    assert "包含受害者与攻击者（Top 伤害）的驾驶员 / 军团 / 联盟名字" in spec["description"], (
+        "T-52：description 必须写明名字已给（否则 agent 会自己去查 ESI）"
+    )
     schema = spec["inputSchema"]
     assert schema["required"] == ["fit"]
     assert set(schema["properties"]) == {
@@ -690,9 +707,9 @@ def test_fit_killmail_schema_and_wording() -> None:
 
 
 def test_fit_killmail_returns_battle_context(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`tools/call fit_killmail` → 战报上下文（人数 / 价值 / 伤害校验 / 比率）齐活。"""
+    """`tools/call fit_killmail` → 战报上下文（人数 / 价值 / 伤害校验 / 比率 / 人名）齐活。"""
     zkb_text = KILLMAIL_ZKB_PATH.read_text(encoding="utf-8")
-    _offline_system(monkeypatch)
+    calls = _offline_system(monkeypatch)
 
     call_result = _call("fit_killmail", {"fit": zkb_text})
     envelope = _envelope(call_result)
@@ -704,6 +721,11 @@ def test_fit_killmail_returns_battle_context(monkeypatch: pytest.MonkeyPatch) ->
     assert result["attackers"]["count"] == 79
     assert result["attackers"]["damage_check"] == "matches_victim"
     assert result["context"]["damage_taken_vs_ehp"]["ratio"] is not None
+    # T-52：MCP 出去的结果里就有名字（agent 不用再查 ESI）
+    assert result["victim"]["character"]["name"] == "Warlock Industries Event"
+    assert result["attackers"]["by_pilot"][0]["character"]["name"]
+    assert result["attackers"]["final_blow"]["character"]["name"] == "Ignacious Deviant"
+    assert len(calls) == 1
     # structuredContent 就是同一个信封；成功时不该有 isError
     assert call_result.get("structuredContent") == envelope
     assert "isError" not in call_result
@@ -735,21 +757,31 @@ def _zkb_fixture(name: str) -> object:
 
 @pytest.fixture()
 def zkb_offline(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """把**生产请求器**换成 fixture（不联网），并清掉限流时间戳（否则要真等 1.2 s）。
+    """把**生产请求器**与**实体名解析**都换成 fixture（不联网），并清掉限流时间戳。
 
-    换的是 `api._zkb_default_requester` 而不是 `api.zkb_search`：这样 MCP → api →
-    请求器整条链路都真的跑了一遍，只有「最后那一跳」是假的。
+    换的是 `api._zkb_default_requester` / `api._post_json` 而不是 `api.zkb_search`：这样
+    MCP → api → 请求器整条链路都真的跑了一遍，只有「最后那一跳」是假的。
+    两条 POST 端点必须分开拦：`/universe/ids/`（名字 → id）走请求器，
+    `/universe/names/`（id → 名字）走 `_post_json` —— 漏一个就会真联网。
     """
     losses = _zkb_fixture("losses-shipTypeID-22444-pastSeconds-604800.json")
     ids = _zkb_fixture("esi-ids-sleipnir-hecate.json")
+    names = _zkb_fixture("esi-universe-names.json")
     seen: list[str] = []
 
     def fake(url: str, body: object | None = None) -> object:
         seen.append(url)
         return ids if body is not None else losses
 
+    def fake_names(url: str, payload: object) -> object:
+        seen.append(url)
+        wanted = set(payload)  # type: ignore[arg-type]
+        return [entry for entry in names if entry["id"] in wanted]
+
     api._reset_zkb_state()
+    api.clear_caches()  # 实体名缓存是进程级的：不清就没法断言「这轮发了几次请求」
     monkeypatch.setattr(api, "_zkb_default_requester", fake)
+    monkeypatch.setattr(api, "_post_json", fake_names)
     yield seen
     api._reset_zkb_state()
 
@@ -760,6 +792,9 @@ def test_zkb_search_schema_has_no_fit() -> None:
     assert "战报列表" in spec["title"]
     for token in ("past_seconds", "startTime", "fit_killmail", "AND"):
         assert token in spec["description"], f"description 必须写清 {token}"
+    assert "每行带受害者驾驶员 / 军团 / 联盟名字" in spec["description"], (
+        "T-52：description 必须写清每行带名字（否则 agent 会自己去查 ESI）"
+    )
     schema = spec["inputSchema"]
     assert schema["required"] == []
     assert "fit" not in schema["properties"], "zkb_search 不是配装工具，不该要求 fit"
@@ -796,12 +831,18 @@ def test_zkb_search_call_round_trip(zkb_offline: list[str]) -> None:
     assert zkb_offline == [
         api.ESI_UNIVERSE_IDS_API,
         "https://zkillboard.com/api/losses/shipTypeID/22444/pastSeconds/604800/",
+        api.ESI_UNIVERSE_NAMES_API,
     ], f"URL 拼错：{zkb_offline}"
     assert not any("startTime" in url or "endTime" in url for url in zkb_offline)
     first = result["kills"][0]
     assert first["killmail_id"] == 139265742
     assert first["ship"]["name"] == "Sleipnir"
     assert first["value"] == 397729064.05
+    # T-52：每行带受害者身份（名字真的出来了，不是 null）
+    assert first["victim"]["character"]["name"]
+    assert first["victim"]["corporation"]["name"]
+    assert all(row["victim"]["character"]["name"] for row in result["kills"])
+    assert result["warnings"] == []
     assert "要明细请对具体 killmail_id 调 fit_killmail" in result["note"]
     assert call_result.get("structuredContent") == envelope
     assert "isError" not in call_result

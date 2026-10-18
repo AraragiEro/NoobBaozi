@@ -394,10 +394,11 @@ def cache_stats() -> dict[str, int]:
 def clear_caches() -> None:
     """清空结果缓存与计数（**幂等**）。测试用来把「冷启动」造出来。
 
-    顺带清空**星系名 / 星系详情**的进程内永久缓存（`fit_killmail` 用）：那条缓存的
-    失效条件只有「进程重启」或「显式清空」，所以必须挂在这里，否则测试之间会互相串味。
+    顺带清空**星系名 / 实体名**的进程内永久缓存（`fit_killmail` / `zkb_search` 用）：那条
+    缓存的失效条件只有「进程重启」或「显式清空」，所以必须挂在这里，否则测试之间会互相串味。
+    限流闸门的「上一次请求时刻」也一起归零（否则换时钟的测试会等一个不该等的间隔）。
     """
-    global _CACHE_HITS, _CACHE_MISSES
+    global _CACHE_HITS, _CACHE_MISSES, _UNIVERSE_NAMES_LAST_START
     with _CACHE_LOCK:
         _CACHE.clear()
         _CACHE_HITS = 0
@@ -405,6 +406,8 @@ def clear_caches() -> None:
     with _UNIVERSE_LOCK:
         _UNIVERSE_NAMES.clear()
         _UNIVERSE_SYSTEMS.clear()
+    with _UNIVERSE_NAMES_GATE_LOCK:
+        _UNIVERSE_NAMES_LAST_START = None
 
 
 def _cache_get(key: tuple) -> dict | None:
@@ -1500,6 +1503,20 @@ _UNIVERSE_NAMES: dict[int, str | None] = {}
 _UNIVERSE_SYSTEMS: dict[int, dict] = {}
 """星系名 / 星系详情的**进程内永久缓存**（选永久而不是 TTL，理由见 `universe_names`）。"""
 
+UNIVERSE_NAMES_MIN_INTERVAL_S: float = 0.05
+"""两批 `POST /universe/names/` 之间的**最小间隔**（秒）。
+
+ESI 比 zkb 宽松得多，但「一次调用最多 1000 个 id」这条约束下，扫描几十条战报时仍然
+会出现连续多批 —— 0.05 s 是刻意很小的值：足以避免背靠背爆冲，又不会让批量变慢。
+"""
+
+_UNIVERSE_NAMES_GATE_LOCK = threading.Lock()
+_UNIVERSE_NAMES_LAST_START: float | None = None
+"""上一次 names 请求的开始时刻（`time.monotonic`；限流闸门用，测试可注入 clock）。"""
+
+UniverseNamesRequester = Callable[[str, object], object]
+"""`POST /universe/names/` 的请求替身签名：`(url, body)`（测试注入点；生产走 urllib）。"""
+
 
 def _as_float(value: object) -> float | None:
     """`int` / `float` → `float`（**排除 `bool`**）；其它一律 `None`（不猜 0）。"""
@@ -1546,19 +1563,55 @@ def _post_json(url: str, payload: object) -> object:
     return _read_json(request, url)
 
 
-def universe_names(ids: "list[int] | tuple[int, ...]") -> dict[int, str]:
+def _universe_names_gate(
+    clock: Callable[[], float] | None = None,
+    sleeper: Callable[[float], None] | None = None,
+) -> None:
+    """names 请求的限流闸门：与上一次请求至少隔 `UNIVERSE_NAMES_MIN_INTERVAL_S`。
+
+    等待量**上下都夹住**（`[0, 0.05]`）：注入的虚拟时钟若比真实 `monotonic` 小（测试里
+    1000.0 vs 十几万秒），不夹就会算出一个几万秒的 sleep 把进程挂死。夹住之后语义仍然
+    是「别背靠背」，只是不会因为时钟不单调而自伤。
+    """
+    global _UNIVERSE_NAMES_LAST_START
+    now_fn = clock or time.monotonic
+    sleep_fn = sleeper or time.sleep
+    with _UNIVERSE_NAMES_GATE_LOCK:
+        now = float(now_fn())
+        last = _UNIVERSE_NAMES_LAST_START
+        if last is not None:
+            wait = UNIVERSE_NAMES_MIN_INTERVAL_S - (now - last)
+            wait = min(max(wait, 0.0), UNIVERSE_NAMES_MIN_INTERVAL_S)
+            if wait > 0:
+                sleep_fn(wait)
+                now = float(now_fn())
+        _UNIVERSE_NAMES_LAST_START = now
+
+
+def universe_names(
+    ids: "list[int] | tuple[int, ...]",
+    *,
+    requester: UniverseNamesRequester | None = None,
+    clock: Callable[[], float] | None = None,
+    sleeper: Callable[[float], None] | None = None,
+) -> dict[int, str]:
     """批量 `id → 名字`（走 ESI `POST /universe/names/`，**单次 ≤ 1000**，进程内永久缓存）。
 
     Args:
         ids: 想要的 id（重复的只查一次；不是整数的直接忽略）。
+        requester: 请求替身 `(url, body) → payload`（测试注入点；生产不传 = urllib）。
+        clock / sleeper: 限流闸门的时钟 / 睡眠替身（测试用虚拟时钟，避免真的等 0.05 s）。
 
     Returns:
         `{id: name}`，**只含 ESI 真的给了名字的那些 id**（查不到就不在字典里 ——
         调用方自己决定给 `null` 还是用别的来源，这里不编）。
 
-    为什么**永久缓存**而不是 TTL：星系名只在 CCP 版本更新时变，而战报分析是批量读同几个
-    星系 —— TTL 只会让「同一批战报的第 N 条」再付一次网络费，正确性一点都不多。
+    为什么**永久缓存**而不是 TTL：星系名 / 驾驶员名的失效条件只有「改名 / 删号」，
+    而战报分析是批量读同一批实体 —— TTL 只会让「同一批战报的第 N 条」再付一次网络费，
+    正确性一点都不多。**未命中（`None`）也进缓存**：删号 / NPC 的 id 不能每轮再问一次。
     进程重启即失效，`clear_caches()` 也会一并清空（换环境 / 测试用）。
+
+    多批时的节奏：每批之间至少隔 `UNIVERSE_NAMES_MIN_INTERVAL_S`（0.05 s）。
     """
     wanted: list[int] = []
     for value in ids or []:
@@ -1568,6 +1621,7 @@ def universe_names(ids: "list[int] | tuple[int, ...]") -> dict[int, str]:
     if not wanted:
         return {}
 
+    fetch = requester or _post_json
     result: dict[int, str] = {}
     missing: list[int] = []
     with _UNIVERSE_LOCK:
@@ -1581,7 +1635,8 @@ def universe_names(ids: "list[int] | tuple[int, ...]") -> dict[int, str]:
 
     for start in range(0, len(missing), UNIVERSE_NAMES_MAX_IDS):
         chunk = missing[start : start + UNIVERSE_NAMES_MAX_IDS]
-        payload = _post_json(ESI_UNIVERSE_NAMES_API, chunk)
+        _universe_names_gate(clock=clock, sleeper=sleeper)
+        payload = fetch(ESI_UNIVERSE_NAMES_API, chunk)
         entries = payload if isinstance(payload, list) else []
         found: dict[int, str] = {}
         for entry in entries:
@@ -1652,19 +1707,18 @@ def _security_band(
     return SECURITY_BAND_NULLSEC
 
 
-def _system_block(system_id: object, warnings: list[str]) -> dict:
-    """`solar_system_id` → `{id, name, security: {status, band}}`（查不到给 `null` + `warnings`）。"""
+def _system_block(system_id: object, warnings: list[str], names: dict[int, str]) -> dict:
+    """`solar_system_id` → `{id, name, security: {status, band}}`（查不到给 `null` + `warnings`）。
+
+    名字**不再单独发一次 names 请求**：`names` 是调用方一次批量查好的 `{id: name}`
+    （星系 id 一起进了那一批），这里只取。取不到就退回 ESI 星系详情自带的 `name`。
+    """
     identifier = _as_int(system_id)
     if identifier is None:
         warnings.append("killmail 没有 solar_system_id：星系名与安全等级给 null（不猜）")
         return {"id": _as_int(system_id), "name": None, "security": {"status": None, "band": None}}
 
-    name: str | None = None
-    try:
-        name = universe_names([identifier]).get(identifier)
-    except _ApiFailure as exc:
-        warnings.append(f"星系名查不到（{exc.message}）：name 给 null")
-
+    name: str | None = names.get(identifier)
     info: dict = {
         "name": None,
         "security_status": None,
@@ -1679,6 +1733,8 @@ def _system_block(system_id: object, warnings: list[str]) -> dict:
     if name is None:
         # 同一个 ESI 的星系详情也带 name（权威来源相同），不额外多花一次请求。
         name = info.get("name")
+    if name is None:
+        warnings.append("星系名查不到：solar_system.name 给 null（不猜）")
     status = _as_float(info.get("security_status"))
     return {
         "id": identifier,
@@ -1756,6 +1812,113 @@ def _type_block(type_id: object, index: Index | None) -> dict:
     }
 
 
+# ---- 十二之一半：身份（驾驶员 / 军团 / 联盟）的名字解析 ------------------------
+
+_ENTITY_KEYS: tuple[tuple[str, str], ...] = (
+    ("character", "character_id"),
+    ("corporation", "corporation_id"),
+    ("alliance", "alliance_id"),
+)
+"""战报里的三种身份：输出键 ←→ killmail 原始键（顺序固定，批量去重时可预期）。"""
+
+UNRESOLVED_NAMES_WARNING: str = (
+    "{count} 个实体名未解析（ESI `/universe/names/` 没给名字：删号 / NPC / 已迁移）："
+    "这些 name 给 null"
+)
+"""名字查不到时**唯一**该说的话（`null` 就是 `null`，不编一个占位名顶上去）。"""
+
+
+def _id_name_block(identifier: object, names: dict[int, str]) -> dict | None:
+    """一个实体 id → `{"id", "name"}`。
+
+    **id 缺失 → 整个对象 `null`**（没有联盟就是 `null`，不是 `{"id": null, "name": null}`）；
+    id 有但 ESI 没给名字 → `name: null`（查不到就老实说查不到）。
+    """
+    value = _as_int(identifier)
+    if value is None:
+        return None
+    return {"id": value, "name": names.get(value)}
+
+
+def _identity_blocks(block: dict, names: dict[int, str]) -> dict:
+    """`character_id` / `corporation_id` / `alliance_id` → `{character, corporation, alliance}`。"""
+    return {key: _id_name_block(block.get(raw), names) for key, raw in _ENTITY_KEYS}
+
+
+def _identity_ids(blocks: "list[object]") -> list[int]:
+    """若干身份块里所有**存在的** id（去重、保序：一次 `POST /universe/names/` 查完）。"""
+    ids: list[int] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        for _key, raw in _ENTITY_KEYS:
+            value = _as_int(block.get(raw))
+            if value is not None and value not in ids:
+                ids.append(value)
+    return ids
+
+
+def _resolve_identity_names(
+    ids: "list[int]",
+    warnings: list[str],
+    *,
+    requester: UniverseNamesRequester | None = None,
+) -> dict[int, str]:
+    """一批 id → `{id: name}`（**一次批量请求**；失败 / 缺项都降级成 `null` + `warnings`）。
+
+    这里的取舍：名字是**附加信息**，拿不到不该让整条战报失败 —— 所以网络失败只记一条
+    warning，实体块的 `name` 全是 `null`。但**沉默不行**：缺了几个必须说出来。
+    """
+    if not ids:
+        return {}
+    try:
+        names = (
+            universe_names(ids)
+            if requester is None
+            else universe_names(ids, requester=requester)
+        )
+    except _ApiFailure as exc:
+        warnings.append(
+            f"{len(ids)} 个实体名未解析（{exc.message}）：character / corporation / alliance "
+            "的 name 给 null"
+        )
+        return {}
+    unresolved = sum(1 for identifier in ids if identifier not in names)
+    if unresolved:
+        warnings.append(UNRESOLVED_NAMES_WARNING.format(count=unresolved))
+    return names
+
+
+def _fill_identity_names(block: object, names: dict[int, str]) -> None:
+    """就地把身份块里的 `name` 填上（`id` 为 `null` 时保持 `null`，不编）。"""
+    if not isinstance(block, dict):
+        return
+    for key, _raw in _ENTITY_KEYS:
+        entry = block.get(key)
+        if isinstance(entry, dict):
+            identifier = _as_int(entry.get("id"))
+            entry["name"] = None if identifier is None else names.get(identifier)
+
+
+def _killmail_name_ids(killmail: dict) -> list[int]:
+    """一条战报里所有要查名字的 id：**星系 + 受害者 + 全部攻击者**（一次查完，不逐条查）。
+
+    攻击者通常有几十个，但 `character / corporation / alliance` 高度重复（同一支舰队就是
+    同一批军团），去重后一条战报常常只剩十几个 —— 所以「一次 fit_killmail = 一次请求」。
+    """
+    victim = killmail.get("victim") if isinstance(killmail.get("victim"), dict) else {}
+    attackers = [
+        attacker
+        for attacker in (killmail.get("attackers") or [])
+        if isinstance(attacker, dict)
+    ]
+    ids = _identity_ids([victim, *attackers])
+    system = _as_int(killmail.get("solar_system_id"))
+    if system is not None and system not in ids:
+        ids.insert(0, system)
+    return ids
+
+
 def weapon_family(type_id: object, index: Index | None) -> str:
     """`weapon_type_id` → 武器族（`WEAPON_FAMILIES` 之一，分不清给 `other`）。
 
@@ -1806,10 +1969,69 @@ def _buckets(
     return rows
 
 
+BY_PILOT_ROWS: int = 10
+"""`attackers.by_pilot` 只给伤害最高的前 N 名（完整名单在原始 killmail 里，不值得刷屏）。"""
+
+
+def _pilot_buckets(
+    attackers: list[dict],
+    damage_total: int | None,
+    index: Index | None,
+    names: dict[int, str],
+) -> list[dict]:
+    """按**驾驶员**聚合 → `[{character, corporation, alliance, ship, damage, …}]`（伤害降序前 10）。
+
+    一个驾驶员在同一条战报里通常只有一条 attacker 记录，但模板化舰队战出现过同一角色
+    多条目 —— 所以按 `character_id` 合并（合并的是**同一个人的伤害**，不是不同的人）。
+    `character_id` 缺失时合并键是 `None`：那一 bucket 的 `character` 给 `null`，不编。
+    """
+    grouped: dict[object, dict] = {}
+    for attacker in attackers:
+        key = _as_int(attacker.get("character_id"))
+        bucket = grouped.get(key)
+        if bucket is None:
+            bucket = grouped[key] = {
+                "identity": _identity_blocks(attacker, names),
+                "ship": _type_block(attacker.get("ship_type_id"), index),
+                "damage": 0,
+                "final_blow": None,
+                "security_status": None,
+            }
+        bucket["damage"] += _as_int(attacker.get("damage_done")) or 0
+        flag = _as_bool(attacker.get("final_blow"))
+        if flag is True:
+            bucket["final_blow"] = True
+        elif bucket["final_blow"] is None:
+            bucket["final_blow"] = flag
+        if bucket["security_status"] is None:
+            bucket["security_status"] = _as_float(attacker.get("security_status"))
+
+    rows = [
+        {
+            "character": bucket["identity"]["character"],
+            "corporation": bucket["identity"]["corporation"],
+            "alliance": bucket["identity"]["alliance"],
+            "ship": bucket["ship"],
+            "damage": bucket["damage"],
+            "damage_pct": _share(bucket["damage"], damage_total),
+            "final_blow": bucket["final_blow"],
+            "security_status": bucket["security_status"],
+        }
+        for bucket in grouped.values()
+    ]
+    rows.sort(
+        key=lambda row: (-row["damage"], str((row["character"] or {}).get("name") or ""))
+    )
+    return rows[:BY_PILOT_ROWS]
+
+
 def _attacker_block(
-    attackers: list[dict], victim_damage: int | None, index: Index | None
+    attackers: list[dict],
+    victim_damage: int | None,
+    index: Index | None,
+    names: dict[int, str],
 ) -> dict:
-    """`attackers` 块：人数 / 总伤害 / 校验 / 最终一击 / 两个分桶 / 安全等级分布。"""
+    """`attackers` 块：人数 / 总伤害 / 校验 / 最终一击 / 三个分桶 / 安全等级分布。"""
     damage_total = sum(_as_int(attacker.get("damage_done")) or 0 for attacker in attackers)
     if victim_damage is None:
         damage_check: str | None = None
@@ -1827,6 +2049,9 @@ def _attacker_block(
     final_block: dict | None = None
     if final is not None:
         final_block = {
+            "character": _id_name_block(final.get("character_id"), names),
+            "corporation": _id_name_block(final.get("corporation_id"), names),
+            "alliance": _id_name_block(final.get("alliance_id"), names),
             "ship": _type_block(final.get("ship_type_id"), index),
             "weapon": _type_block(final.get("weapon_type_id"), index),
             "security_status": _as_float(final.get("security_status")),
@@ -1843,6 +2068,7 @@ def _attacker_block(
         "damage_total": damage_total,
         "damage_check": damage_check,
         "final_blow": final_block,
+        "by_pilot": _pilot_buckets(attackers, damage_total, index, names),
         "by_ship_group": _buckets(
             attackers, lambda a: _type_block(a.get("ship_type_id"), index)["group"], "group", damage_total
         ),
@@ -1923,15 +2149,19 @@ def _ehp_context(ctx: ViewContext, damage_taken: int | None) -> dict:
 
 
 def _killmail_report(
-    killmail: dict, ctx: ViewContext, killmail_source: str, warnings: list[str]
+    killmail: dict,
+    ctx: ViewContext,
+    killmail_source: str,
+    warnings: list[str],
+    names: dict[int, str],
 ) -> dict:
-    """原始 killmail + `ViewContext` → `result`（形状固定，见 `fit_killmail` 的 docstring）。"""
+    """原始 killmail + `ViewContext` + 批量查好的 `names` → `result`（形状见 `fit_killmail`）。"""
     index = ctx.index
     victim = killmail.get("victim") if isinstance(killmail.get("victim"), dict) else {}
     if not isinstance(killmail.get("zkb"), dict):
         warnings.append("没有 zkb 价值块：value / flags / labels 给 null（不猜）")
 
-    system = _system_block(killmail.get("solar_system_id"), warnings)
+    system = _system_block(killmail.get("solar_system_id"), warnings, names)
     victim_damage = _as_int(victim.get("damage_taken"))
     if victim_damage is None:
         warnings.append("killmail 没有 victim.damage_taken：damage_check 给 null（不猜）")
@@ -1956,8 +2186,9 @@ def _killmail_report(
         "victim": {
             "damage_taken": victim_damage,
             "ship": _type_block(victim.get("ship_type_id"), index),
+            **_identity_blocks(victim, names),
         },
-        "attackers": _attacker_block(attackers, victim_damage, index),
+        "attackers": _attacker_block(attackers, victim_damage, index, names),
         "context": _ehp_context(ctx, victim_damage),
         "killmail_source": killmail_source,
         "warnings": warnings,
@@ -2057,7 +2288,10 @@ def _execute_killmail(
         parsed = _parsed_fit({"text": json.dumps(killmail, ensure_ascii=False)})
         ctx = _context(parsed["fit"], str(skill_tier))
 
-        result = _killmail_report(killmail, ctx, killmail_source, warnings)
+        # 名字**一次查完**：星系 + 受害者 + 全部攻击者（去重后一批 names 请求）。
+        names = _resolve_identity_names(_killmail_name_ids(killmail), warnings)
+
+        result = _killmail_report(killmail, ctx, killmail_source, warnings, names)
         meta = _meta(
             ctx,
             source_format=str(parsed.get("source_format")),
@@ -2111,9 +2345,19 @@ def fit_killmail(
                       "value": {"fitted", "dropped", "destroyed", "total"},
                       "flags": {"npc", "solo", "awox", "points"},
                       "labels": [...]},
-         "victim": {"damage_taken", "ship": {"type_id", "name", "group"}},
+         "victim": {"damage_taken",
+                    "ship": {"type_id", "name", "group"},
+                    "character": {"id", "name"},
+                    "corporation": {"id", "name"},
+                    "alliance": {"id", "name"}},
          "attackers": {"count", "damage_total", "damage_check",
-                       "final_blow": {"ship", "weapon", "security_status"},
+                       "final_blow": {"character": {"id", "name"},
+                                      "corporation": {...}, "alliance": {...},
+                                      "ship": {...}, "weapon": {...},
+                                      "security_status"},
+                       "by_pilot": [{"character", "corporation", "alliance", "ship",
+                                     "damage", "damage_pct", "final_blow",
+                                     "security_status"}],
                        "by_ship_group": [{"group", "count", "damage", "damage_pct"}],
                        "by_weapon_family": [{"family", "count", "damage", "damage_pct"}],
                        "security": {"min", "max", "criminal_count"}},
@@ -2135,6 +2379,13 @@ def fit_killmail(
       绝不静默）；
     - `by_weapon_family` 里分不清的一律 `other`（`weapon_family()` 的启发式只认名字 /
       组名，认不出就不猜）。
+
+    **身份**（驾驶员 / 军团 / 联盟）：`character` / `corporation` / `alliance` 都是
+    `{"id", "name"}`；**id 缺失 → 整个对象 `null`**（没有联盟就是 `null`）；
+    **id 有但名字查不到 → `name: null`**，并在 `warnings` 里给「N 个实体名未解析」。
+    名字走 ESI `POST /universe/names/`，一条战报的**所有 id 合成一批**只查一次
+    （进程内缓存；同一份输入第二次调用一次请求都不发）。`attackers.by_pilot` 是
+    按伤害降序的前 `BY_PILOT_ROWS`（10）名 —— 完整名单在原始 killmail 里。
 
     `context.damage_taken_vs_ehp.ratio = damage_taken / ehp_mixed`，EHP 直接读投影层
     （`survivability.
@@ -2529,12 +2780,16 @@ def _zkb_kill_row(item: dict) -> dict | None:
     """一条 zkb 列表项 → 稳定形状（缺字段给 `None`，**绝不用 0 / false 冒充**）。
 
     连 `killmail_id` 都没有的项返回 `None`（那不是一条战报，也不该被数进 `count`）。
+
+    `victim` 块这里只放 **id**（`name` 全是 `None`）：列表一页 200 条，整页查名字是浪费；
+    名字等 `limit` 截断之后由 `zkb_search` 对**真正返回的那几行**一次补齐。
     """
     killmail_id = _as_int(item.get("killmail_id"))
     if killmail_id is None:
         return None
     zkb = item.get("zkb") if isinstance(item.get("zkb"), dict) else {}
     victim = item.get("victim") if isinstance(item.get("victim"), dict) else {}
+    ship = _zkb_ship_block(_as_int(victim.get("ship_type_id")))
     labels = zkb.get("labels")
     return {
         "killmail_id": killmail_id,
@@ -2543,7 +2798,11 @@ def _zkb_kill_row(item: dict) -> dict | None:
             if isinstance(item.get("killmail_time"), str)
             else None
         ),
-        "ship": _zkb_ship_block(_as_int(victim.get("ship_type_id"))),
+        "ship": ship,
+        "victim": {
+            **_identity_blocks(victim, {}),
+            "ship": dict(ship),
+        },
         "value": _as_float(zkb.get("totalValue")),
         "labels": [label for label in (labels or []) if isinstance(label, str)]
         if isinstance(labels, list)
@@ -2551,6 +2810,19 @@ def _zkb_kill_row(item: dict) -> dict | None:
         "npc": _as_bool(zkb.get("npc")),
         "solo": _as_bool(zkb.get("solo")),
     }
+
+
+def _zkb_row_name_ids(rows: "list[dict]") -> list[int]:
+    """若干 zkb 行 → 要查名字的 id（去重、保序；只给**真的要返回的**那几行用）。"""
+    ids: list[int] = []
+    for row in rows:
+        victim = row.get("victim") if isinstance(row.get("victim"), dict) else {}
+        for key, _raw in _ENTITY_KEYS:
+            entry = victim.get(key)
+            value = _as_int(entry.get("id")) if isinstance(entry, dict) else None
+            if value is not None and value not in ids:
+                ids.append(value)
+    return ids
 
 
 def _zkb_median(values: list[float]) -> float | None:
@@ -2649,12 +2921,23 @@ def zkb_search(
          "page": 1,
          "kills": [{"killmail_id": 139265742, "killmail_time": "2026-10-18T19:29:03Z",
                     "ship": {"type_id": 22444, "name": "Sleipnir", "group": "Command Ship"},
+                    "victim": {"character": {"id": 1, "name": "..."},
+                               "corporation": {"id": 2, "name": "..."},
+                               "alliance": {"id": 3, "name": "..."},
+                               "ship": {"type_id": 22444, "name": "Sleipnir",
+                                        "group": "Command Ship"}},
                     "value": 397729064.05, "labels": ["pvp"], "npc": false, "solo": false}],
          "aggregates": {"total_value": 123.4, "median_value": 5.6,
                         "by_ship": [{"name": "Sleipnir", "count": 3, "value": 1.2}],
                         "time_span": {"earliest": "...", "latest": "..."}},
-         "note": "list 级数据来自 zkb（无 items）；要明细请对具体 killmail_id 调 fit_killmail"}
+         "note": "list 级数据来自 zkb（无 items）；要明细请对具体 killmail_id 调 fit_killmail",
+         "warnings": []}
         ```
+
+        `kills[i].victim` 的 `character` / `corporation` / `alliance` 是 `{"id", "name"}`
+        （**id 缺失 → 整个对象 `null`；名字查不到 → `name: null`**）。名字只解析
+        **`limit` 之后真正返回的那些行**，并且所有 id 合成**一批** `POST /universe/names/`
+        （去重 + 进程内缓存）—— 不会为整页 200 条都查一次。
 
         `meta` 里给 `source` / `page_size` / `min_interval_s` 与**本次真正请求过的 URL**
         （排查「为什么是这些结果」时不用猜）。
@@ -2731,6 +3014,13 @@ def zkb_search(
         )
         aggregates = _zkb_aggregates(rows)
         shown = rows[:row_limit]
+        # 名字只解析**真的要返回的行**（limit 之后）：整页 200 条全查是浪费且慢。
+        warnings: list[str] = []
+        names = _resolve_identity_names(
+            _zkb_row_name_ids(shown), warnings, requester=requester
+        )
+        for row in shown:
+            _fill_identity_names(row.get("victim"), names)
         note = ZKB_SEARCH_NOTE
         if len(shown) < len(rows):
             note = (
@@ -2750,6 +3040,7 @@ def zkb_search(
             "kills": shown,
             "aggregates": aggregates,
             "note": note,
+            "warnings": warnings,
         }
         meta = {
             "spec_version": SPEC_VERSION,
@@ -2772,6 +3063,7 @@ def zkb_search(
 
 
 __all__ = [
+    "BY_PILOT_ROWS",
     "CACHE_MAX_ENTRIES",
     "CRIMINAL_SECURITY_THRESHOLD",
     "DAMAGE_CHECK_MATCH",
@@ -2799,6 +3091,8 @@ __all__ = [
     "STATE_POLICIES",
     "STATE_POLICY_ENGINE_DEFAULT",
     "UNIVERSE_NAMES_MAX_IDS",
+    "UNIVERSE_NAMES_MIN_INTERVAL_S",
+    "UNRESOLVED_NAMES_WARNING",
     "USER_AGENT",
     "WEAPON_FAMILIES",
     "WEAPON_FAMILY_OTHER",

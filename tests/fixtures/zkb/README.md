@@ -1,13 +1,14 @@
 # zkb 离线样本（`tests/fixtures/zkb/`）
 
-这三份都是**真实响应**（2026-10-19 用 python `urllib` 直连抓取），只做了一种处理：
-**删字段**，不造字段。
+这四份都是**真实响应**（用 python `urllib` 直连抓取；本机 `curl` / PowerShell 的 TLS
+不可用，只有 urllib 能出网），只做了一种处理：**删字段**，不造字段。
 
 | 文件 | 来源请求 | 原始条数 | 存了几条 |
 |---|---|---|---|
 | `losses-shipTypeID-22444-pastSeconds-604800.json` | `GET https://zkillboard.com/api/losses/shipTypeID/22444/pastSeconds/604800/` | 170 | 12 |
 | `kills-characterID-2121910483-pastSeconds-86400.json` | `GET https://zkillboard.com/api/kills/characterID/2121910483/pastSeconds/86400/` | 9 | 6 |
 | `esi-ids-sleipnir-hecate.json` | `POST https://esi.evetech.net/latest/universe/ids/`（请求体 `["Sleipnir","Hecate"]`） | 4 行 | 全部 |
+| `esi-universe-names.json` | `POST https://esi.evetech.net/latest/universe/names/`（请求体 = 152 个 id） | 152 行 | 全部（T-52） |
 
 ## 删掉了哪些字段（以及为什么）
 
@@ -19,12 +20,28 @@
 `solar_system_id` / `victim.{character,corporation,alliance}_id` /
 `victim.ship_type_id` / `zkb.{totalValue,labels,npc,solo,…}`。
 
+`esi-universe-names.json` 里**没有删任何一条**：那 152 个 id 正好是两份战报样本要的
+（`139239127` 的星系 + 受害者 + 79 名攻击者，加列表 12 行的受害者身份），删了就等于
+造出「这条 id 查不到名字」的假现场。
+
 ## 用途
 
 - `tests/test_api.py`：URL 拼装、`side=both` 合并去重、`limit` 只截断数组、
-  聚合口径、限流（虚拟时钟）、名字解析失败；
-- `tests/test_mcp_server.py`：`tools/call zkb_search` 的进程内往返。
+  聚合口径、限流（虚拟时钟）、名字解析失败；T-52 的**身份名字**（批量 / 缓存 / 缺项）；
+- `tests/test_mcp_server.py`：`tools/call zkb_search` / `tools/call fit_killmail` 的进程内往返；
+- `tests/test_cli.py`：`killmail` / `search` 的人话输出里**出现人名**。
 
 样本里 **Sleipnir 这一条**（`killmail_id = 139265742`，`value = 397729064.05`）同时被
 `esi-ids` 样本覆盖：`/universe/ids/` 对 `"Sleipnir"` 会同时返回一个**同名角色**
 （282567669）与**船型**（22444）—— 所以解析必须按分类取，测试钉住「拿到的是 22444」。
+
+## T-52 的真实名字（`esi-universe-names.json` 里的关键三条）
+
+| id | 类别 | name |
+|---|---|---|
+| 2123771141 | character | `Warlock Industries Event`（139239127 的受害者） |
+| 94814255 | character | `Ignacious Deviant`（最终一击：Hexa 2500mm Repeating Cannon II） |
+| 2121910483 | character | `Woof1977`（伤害第一：1,086,009，占 16.6%） |
+
+测试直接断言这三个字符串 —— 名字写错、解析漏批、返回空字典，都会当场变红。
+

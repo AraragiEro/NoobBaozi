@@ -555,6 +555,8 @@ _TOOL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
         "什么」。返回损失价值（fitted/dropped/destroyed/total）、参战方（人数 / 总伤害 / "
         "Σdamage 与 victim.damage_taken 的校验 / 最终一击 / 按舰级与武器族的分桶 / 安全等级"
         "分布）、星系与安全等级，以及「挨了多少伤害 vs 自身 EHP」。"
+        "**包含受害者与攻击者（Top 伤害）的驾驶员 / 军团 / 联盟名字**（id 与 name 一起给；"
+        "查不到就是 null，不编）。"
         "**分析一条战报时，先 fit_parse 看配装，再 fit_killmail 拿上下文；不要自己去打开 "
         "zkillboard 网页。** 限制：只接受 killmail（JSON / {killmail_id, hash} / killmail "
         "链接），EFT / DNA 会得到 not_a_killmail；拿不到的值一律 null（不猜），"
@@ -597,8 +599,11 @@ _TOOL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
         "/某星系/某区域的列表（AND 复合条件：多个条件同时给就是同时满足）。时间只能用 "
         "past_seconds（zkb 已停用起止时间：startTime/endTime 会返回 invalid_argument）；"
         "单页最多 200 条，更早的数据靠 page 往回翻。返回每条 killmail_id / killmail_time / "
-        "ship{type_id,name,group} / value / labels / npc / solo，加整页聚合（total_value / "
-        "median_value / by_ship / time_span）；side = kills / losses / both。限制：列表不含明细"
+        "ship{type_id,name,group} / victim{character,corporation,alliance,ship} / value / "
+        "labels / npc / solo，加整页聚合（total_value / median_value / by_ship / time_span）；"
+        "side = kills / losses / both。"
+        "**每行带受害者驾驶员 / 军团 / 联盟名字**（只解析真正返回的那几行，一次批量查完）。"
+        "限制：列表不含明细"
         "（明细用 fit_killmail）；limit 只截断 kills 数组，count 与 aggregates 仍按整页算；"
         "1.2 s 限流，别在循环里逐条查。",
     ),

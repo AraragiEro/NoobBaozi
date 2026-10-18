@@ -266,12 +266,12 @@ python -c "from evefit import mcp_server as m; print(m.INSTRUCTIONS); [print(n, 
 | 工具 | 一句话 |
 |---|---|
 | `fit_parse` | 第一步：把输入归一化成结构，回显「我读懂了什么」 |
-| `fit_killmail` | 战报上下文：损失价值 / 参战方 / 伤害构成 / 星系与安全等级 / 受伤 vs EHP |
+| `fit_killmail` | 战报上下文：损失价值 / 参战方 / 伤害构成 / 星系与安全等级 / 受伤 vs EHP / **受害者与伤害 Top 的驾驶员·军团·联盟名字** |
 | `fit_index` | 默认入口：六维度摘要（L0）+ flags + budget |
 | `fit_view` | 单视角全字段（L1）：overview / provenance / unknown_reasons / confidence / flags |
 | `fit_get` | 按路径精确取一个值 + 它的 provenance / reason |
 | `fit_detail` | 列表型明细（升级候选、逐模块电容、完整技能表 512 条） |
-| `zkb_search` | 战报列表检索（先筛 killmail_id，再对那条调 `fit_killmail`） |
+| `zkb_search` | 战报列表检索（先筛 killmail_id，再对那条调 `fit_killmail`）；**每行带受害者驾驶员 / 军团 / 联盟名字** |
 
 每个工具的「何时用 / 返回什么 / 限制」、每个参数的含义与默认值，都写在它的
 `description` / `inputSchema` 里 —— **别在这份 README 里补第二份**（复制就会漂移；
@@ -298,6 +298,24 @@ python -c "from evefit import mcp_server as m; print(m.INSTRUCTIONS); [print(n, 
   「一共就这么多」。
 - **有 1.2 s 硬限流**：所有出网请求串行 + 最小间隔 `ZKB_MIN_INTERVAL_S`（`both` 至少
   2.4 s），429 / 403 → `rate_limited`。别在循环里逐条查；名字 → id 的解析结果会进程内缓存。
+- **名字只为「真正返回的那几行」解析**：`limit` 截断之后才查，且所有 id 合成**一批**
+  `POST /universe/names/`（单批 ≤ 1000、批间隔 ≥ 0.05 s、进程内永久缓存）。所以
+  `limit=3` 的 200 条整页也只会发一次名字请求，不会 200 次。
+
+### 4.3 身份（驾驶员 / 军团 / 联盟）
+
+两条战报工具都会把 `character_id` / `corporation_id` / `alliance_id` 解析成名字：
+
+| 位置 | 形状 |
+|---|---|
+| `fit_killmail` → `victim` | `character` / `corporation` / `alliance` 各 `{"id", "name"}`（外加 `ship`） |
+| `fit_killmail` → `attackers.final_blow` | 同上三块 + `ship` + `weapon` + `security_status` |
+| `fit_killmail` → `attackers.by_pilot` | 按伤害降序前 10：三块身份 + `ship` + `damage` / `damage_pct` / `final_blow` / `security_status` |
+| `zkb_search` → `kills[i].victim` | 三块身份 + `ship{type_id,name,group}` |
+
+**`null` 的语义**：id 缺失 → 整个对象 `null`（没加联盟就是 `null`）；id 有但名字查不到
+（删号 / NPC / ESI 缺项）→ `name: null`，并在 `result.warnings` 里给一句「N 个实体名未解析」。
+工具**不编名字**，也不要你拿网页去补。
 
 ## 5. 返回契约
 
@@ -352,7 +370,11 @@ python -c "from evefit import mcp_server as m; print(m.INSTRUCTIONS); [print(n, 
 9. **`zkb_search` 有硬限流**：所有出网请求串行 + 最小间隔 1.2 s（`both` 至少 2.4 s），
    而且 zkb 单页最多 200 条、时间窗口只能用 `past_seconds`（起止时间已被停用）。
    它是**列表层**：拿不到完整配装，别指望用它替代 `fit_killmail`。
-10. **`unknown` 不是 0**：三态 provenance 里 `unknown` 表示「算不出来」或「不适用」，
+10. **名字要多一跳 ESI**：`fit_killmail` / `zkb_search` 的身份名字走
+    `POST /universe/names/`（单批 ≤ 1000、批间隔 0.05 s、同一进程内永久缓存）。
+    一条战报的所有 id 合成一批 → **一次调用最多一次名字请求**；命中缓存则一次都不发。
+    名字拿不到就是 `name: null` + `warnings`，**不编、不猜**。
+11. **`unknown` 不是 0**：三态 provenance 里 `unknown` 表示「算不出来」或「不适用」，
     不是零值；原因在 `unknown_reasons` 里（`not_applicable` / `input_incomplete` /
     `ambiguous` / `engine_omits`）。工具不换算、不评分、不补数。
 

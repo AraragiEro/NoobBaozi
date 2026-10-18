@@ -221,6 +221,55 @@ def _human_get(result: dict) -> str:
 _BUCKET_ROWS: int = 8
 """`killmail` 人话摘要里每个分桶最多铺几行（完整清单永远在 `--json` 里）。"""
 
+_PILOT_ROWS: int = 3
+"""`killmail` 人话摘要里「伤害 Top」铺几行（完整前 10 名在 `--json` 的 by_pilot 里）。"""
+
+
+def _entity_name(entry: object) -> str:
+    """身份块 → 名字；名字查不到时给 `id:N`（**绝不编一个名字**）。"""
+    if not isinstance(entry, dict):
+        return "-"
+    name = entry.get("name")
+    if isinstance(name, str) and name:
+        return name
+    identifier = entry.get("id")
+    return f"id:{identifier}" if identifier is not None else "-"
+
+
+def _who(block: object) -> str:
+    """身份三件套 → `Alice (Corp A / Alliance X)`（缺哪个少哪个；都没有给 `-`）。
+
+    `alliance` 缺失在 EVE 里很常见（没加联盟），所以它没有就不写，不占位。
+    """
+    if not isinstance(block, dict):
+        return "-"
+    parts: list[str] = []
+    if isinstance(block.get("character"), dict):
+        parts.append(_entity_name(block.get("character")))
+    orgs = [
+        _entity_name(block.get(key))
+        for key in ("corporation", "alliance")
+        if isinstance(block.get(key), dict)
+    ]
+    if orgs:
+        parts.append(f"({ ' / '.join(orgs) })")
+    return " ".join(parts) if parts else "-"
+
+
+def _pilot_lines(title: str, rows: object, shown: int = _PILOT_ROWS) -> list[str]:
+    """`by_pilot` → 一行「伤害 TopN: 谁 伤害 (占比) / …」（数字原样，不换算）。"""
+    if not isinstance(rows, list) or not rows:
+        return [f"{_INDENT}{title}: -"]
+    parts = [
+        f"{_who(row)} {row.get('damage')} ({row.get('damage_pct')})"
+        for row in rows[:shown]
+        if isinstance(row, dict)
+    ]
+    line = f"{_INDENT}{title} Top{len(parts)}: " + " / ".join(parts)
+    if len(rows) > shown:
+        line += f" / … 另 {len(rows) - shown} 名见 --json"
+    return [line]
+
 
 def _bucket_lines(title: str, rows: object, key: str) -> list[str]:
     """分桶列表 → 人话若干行（`key×count=damage(pct)`；超量只截断显示，不改数据）。"""
@@ -254,20 +303,25 @@ def _human_killmail(result: dict, meta: dict) -> str:
     check = f"check={attackers.get('damage_check')}"
     if "damage_diff" in attackers:
         check += f"(diff={attackers.get('damage_diff')})"
+    final = attackers.get("final_blow") if isinstance(attackers.get("final_blow"), dict) else {}
+    final_weapon = final.get("weapon") if isinstance(final.get("weapon"), dict) else {}
+    weapon_head = _header(final_weapon) if final_weapon else "-"
     lines = [
         f"killmail {km.get('killmail_id')} · {km.get('killmail_time')} · "
         f"{system.get('name')} ({system.get('id')}) · "
         f"security={security.get('status')} band={security.get('band')} · "
         f"source={result.get('killmail_source')}",
-        f"{_INDENT}victim: {_header(victim.get('ship'))} · "
+        f"{_INDENT}victim: {_who(victim)} — {_header(victim.get('ship'))} · "
         f"damage_taken={victim.get('damage_taken')}",
         f"{_INDENT}value: {_block_line(km.get('value'))}",
         f"{_INDENT}flags: {_block_line(km.get('flags'))} · labels: {_compact(km.get('labels'))}",
         f"{_INDENT}attackers: count={attackers.get('count')} · "
         f"damage_total={attackers.get('damage_total')} · {check}",
-        f"{_INDENT}final_blow: {_block_line(attackers.get('final_blow'))}",
+        f"{_INDENT}final_blow: {_who(final)} — {_header(final.get('ship'))} + {weapon_head}"
+        f" · security={final.get('security_status')}",
         f"{_INDENT}attacker security: {_block_line(attackers.get('security'))}",
     ]
+    lines.extend(_pilot_lines("伤害", attackers.get("by_pilot")))
     lines.extend(_bucket_lines("by_ship_group", attackers.get("by_ship_group"), "group"))
     lines.extend(_bucket_lines("by_weapon_family", attackers.get("by_weapon_family"), "family"))
     vs_ehp = (
@@ -311,7 +365,7 @@ def _human_detail(result: dict, meta: dict) -> str:
 
 
 def _human_search(result: dict, meta: dict) -> str:
-    """`search` 的人话摘要：条件一行 → 计数 / 聚合 → 每条战报一行（只排版，不判词）。
+    """`search` 的人话摘要：条件一行 → 计数 / 聚合 → 每条战报一行（带受害者人名）。
 
     `count` 与展示条数**分开写**（`limit` 只截断展示，聚合仍按整页算）：如果只印一行
     「200 条」而实际只给了 50 条，人会以为数据缺了。
@@ -341,11 +395,17 @@ def _human_search(result: dict, meta: dict) -> str:
         if not isinstance(row, dict):
             continue
         ship = row.get("ship") if isinstance(row.get("ship"), dict) else {}
+        victim = row.get("victim") if isinstance(row.get("victim"), dict) else {}
         lines.append(
             f"{_INDENT}{row.get('killmail_time')} · {row.get('killmail_id')} · "
-            f"{ship.get('name') or ship.get('type_id')} · value={row.get('value')} · "
+            f"{ship.get('name') or ship.get('type_id')} · "
+            f"受害者={_who(victim)} · value={row.get('value')} · "
             f"solo={row.get('solo')} npc={row.get('npc')}"
         )
+    warnings = result.get("warnings") or []
+    if warnings:
+        lines.append(f"{_INDENT}warnings({len(warnings)}):")
+        lines.extend(f"{_INDENT * 2}- {warn}" for warn in warnings)
     lines.append(f"{_INDENT}{result.get('note')}")
     if isinstance(meta, dict) and meta.get("urls"):
         lines.append(f"{_INDENT}urls: {_block_line(meta.get('urls'), 240)}")
