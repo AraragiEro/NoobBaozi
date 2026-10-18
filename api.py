@@ -15,6 +15,34 @@ fit_get(fit, path, *, ...)                                           -> dict  # 
 fit_detail(fit, view=None, path=None, *, ...)                        -> dict  # 列表型明细
 ```
 
+第六个入口（T-49，**只接受战报**）：
+
+```python
+fit_killmail(fit, *, skill_tier, damage_profile, state_policy)       -> dict  # 战报上下文
+```
+
+`fit_killmail` 回答的是「谁打的、损失多少、挨了多少伤害」——损失价值 / 参战方 / 伤害构成
+/ 最终一击 / 星系与安全等级全部由它给，agent **不需要再去打开 zkillboard 网页**。
+输入没有战报来源（EFT / DNA / structured fit）时它诚实报 `kind: "not_a_killmail"`，
+绝不拿配装猜一条战报。
+
+第七个入口（T-50，**只查列表**）：
+
+```python
+zkb_search(*, character, corporation, alliance, ship, solar_system, region,
+           past_seconds, page, side, limit, **common)                -> dict  # 战报列表
+```
+
+`zkb_search` 与 `fit_killmail` 是**同一件事的两层**，谁也不能替代谁：
+
+| 层 | 谁给 | 能回答什么 | 拿不到什么 |
+|---|---|---|---|
+| 列表（`zkb_search`） | zkillboard `/api/kills|losses/…` | 谁在哪被谁打掉、值多少钱、solo/npc、一页 200 条 | **完整配装**（列表里没有 fitted 模块） |
+| 单条（`fit_killmail`） | zkb `killID` → ESI killmail | 一条战报的完整上下文（参战方 / 伤害构成 / 损失明细） | 批量（一次一条） |
+
+所以典型链路是 `zkb_search` 先筛出 `killmail_id`，再对感兴趣的那几条调 `fit_killmail`。
+`zkb_search` **不进结果缓存**（列表数据时效性强、且带限流），只缓存「名字 → id」的解析结果。
+
 统一信封
 --------
 
@@ -92,6 +120,7 @@ import hashlib
 import json
 import re
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections import OrderedDict
@@ -152,10 +181,92 @@ ESI_KILLMAIL_API: str = "https://esi.evetech.net/latest/killmails/{killmail_id}/
 KILLMAIL_ID_FIELD: str = "killmail_id"
 KILLMAIL_HASH_FIELD: str = "hash"
 
+ZKB_API_ROOT: str = "https://zkillboard.com/api"
+"""zkillboard 的列表 API 根：`/api/<kills|losses>/<段名>/<值>/…/`（实测形态见第十三节）。"""
+
+ZKB_USER_AGENT: str = (
+    "evefit/1.0 (L5 interface layer; zkb kill list only; +https://github.com/evefit)"
+)
+"""zkb 请求的 `User-Agent`：**描述性**（zkb 按 UA 判断调用方，伪装浏览器没有好处）。"""
+
+ZKB_PAGE_SIZE: int = 200
+"""单页最多多少条（zkb 的硬上限，实测 200；要更多只能翻 `page`）。"""
+
+ZKB_SIDE_KILLS: str = "kills"
+ZKB_SIDE_LOSSES: str = "losses"
+ZKB_SIDE_BOTH: str = "both"
+"""`side` 的三个取值：`/api/kills/` 与 `/api/losses/` 是**两条独立路径**，both = 两次请求。"""
+
+ZKB_SIDES: tuple[str, ...] = (ZKB_SIDE_KILLS, ZKB_SIDE_LOSSES, ZKB_SIDE_BOTH)
+
+ZKB_MIN_INTERVAL_S: float = 1.2
+"""两次出网请求之间的最小间隔（秒）：实测 zkb 要求 ≥1.2 s，否则会被限流。"""
+
+ZKB_LIMIT_DEFAULT: int = 50
+"""`limit` 的默认值（只截断 `kills` 数组，**不影响** `count` / `aggregates`）。"""
+
+ZKB_RATE_LIMIT_STATUSES: tuple[int, ...] = (429, 403)
+"""zkb 用这两个状态码表达「你太快了」→ `rate_limited`。"""
+
+ZKB_ID_CACHE_MAX: int = 256
+"""「名字 → id」解析缓存的 LRU 容量（只存**成功**解析）。"""
+
+ZKB_SEARCH_NOTE: str = (
+    "list 级数据来自 zkb（无 items）；要明细请对具体 killmail_id 调 fit_killmail"
+)
+"""成功返回里的固定说明（形状契约的一部分，调用方可以直接转述给用户）。"""
+
+ESI_UNIVERSE_IDS_API: str = "https://esi.evetech.net/latest/universe/ids/"
+"""ESI：名字数组 → id（`POST`，请求体是 `["Sleipnir", …]`）。"""
+
+ZKB_FILTER_SEGMENTS: tuple[tuple[str, str], ...] = (
+    ("character", "characterID"),
+    ("corporation", "corporationID"),
+    ("alliance", "allianceID"),
+    ("ship", "shipTypeID"),
+    ("solar_system", "solarSystemID"),
+    ("region", "regionID"),
+)
+"""`zkb_search` 的过滤参数 → zkb 的 URL 段名，**顺序就是拼进 URL 的顺序**（AND 复合）。
+
+顺序固定（不是随人的调用顺序）：身份 → 船型 → 空间 → 时间 → 分页。这样同一次检索
+永远拼出同一个 URL —— 测试与日志才能逐字比对（`tests/test_api.py` 钉住这一点）。
+"""
+
+ESI_ID_CATEGORIES: dict[str, str] = {
+    "character": "characters",
+    "corporation": "corporations",
+    "alliance": "alliances",
+    "ship": "inventory_types",
+    "solar_system": "systems",
+    "region": "regions",
+}
+"""实体种类 → ESI `/universe/ids/` 响应里的分类键（**只认这一个对应关系**）。
+
+实测：`["Sleipnir"]` 会同时命中 `characters`（真有个角色叫 Sleipnir）与
+`inventory_types`（22444 船型）—— 所以解析必须**按分类取**，不能拿响应的第一个结果。
+"""
+
+ZKB_REJECTED_PARAMETERS: tuple[str, ...] = (
+    "start_time",
+    "end_time",
+    "startTime",
+    "endTime",
+    "start",
+    "end",
+)
+"""zkb 已停用的时间区间参数名（任一出现 → `invalid_argument`，**不发请求**）。"""
+
+ZKB_IGNORED_PARAMETERS: tuple[str, ...] = ("skill_tier", "damage_profile", "state_policy")
+"""`**common` 里允许出现但不影响结果的那三个配装参数（共用签名时会被带进来）。"""
+
 INVALID_PATH_KIND: str = "invalid_path"
 """与 §10.4 对齐的五种 `error.kind` 之外，本层另外用到（**只增不改**）：
 
-- `invalid_argument`：`skill_tier` / `damage_profile` / `state_policy` / `view` 取值不合法；
+- `invalid_argument`：`skill_tier` / `damage_profile` / `state_policy` / `view` 取值不合法，
+  以及 `zkb_search` 的时间区间参数 / 越界分页 / 一个过滤条件都不给；
+- `unknown_entity`：`zkb_search` 的名字解析不出唯一答案（`candidates` 里给候选 + `kind`）；
+- `rate_limited`：`zkb_search` 被 zkb 限流（429 / 403），间隔必须 ≥ `ZKB_MIN_INTERVAL_S`；
 - `index_unavailable`：SDE 索引库缺失或打不开（**不退回旧技能档**，那会静默降级）；
 - `internal_error`：兜底（任何未预料的异常都不许裸抛给 agent）。
 """
@@ -281,12 +392,19 @@ def cache_stats() -> dict[str, int]:
 
 
 def clear_caches() -> None:
-    """清空结果缓存与计数（**幂等**）。测试用来把「冷启动」造出来。"""
+    """清空结果缓存与计数（**幂等**）。测试用来把「冷启动」造出来。
+
+    顺带清空**星系名 / 星系详情**的进程内永久缓存（`fit_killmail` 用）：那条缓存的
+    失效条件只有「进程重启」或「显式清空」，所以必须挂在这里，否则测试之间会互相串味。
+    """
     global _CACHE_HITS, _CACHE_MISSES
     with _CACHE_LOCK:
         _CACHE.clear()
         _CACHE_HITS = 0
         _CACHE_MISSES = 0
+    with _UNIVERSE_LOCK:
+        _UNIVERSE_NAMES.clear()
+        _UNIVERSE_SYSTEMS.clear()
 
 
 def _cache_get(key: tuple) -> dict | None:
@@ -458,15 +576,33 @@ def _input_descriptor(fit: object) -> tuple[str, str | None, dict]:
 # =============================================================================
 
 
-def _http_json(url: str) -> object:
+def _http_json(url: str, *, user_agent: str = USER_AGENT) -> object:
     """GET 一个 JSON 文档（标准库 `urllib`，描述性 UA + 超时）。
+
+    Args:
+        url: 完整 URL。
+        user_agent: 覆盖 `User-Agent`（`zkb_search` 用 `ZKB_USER_AGENT`：它要说明
+            「我们在拉列表，不是在伪装浏览器」）。
 
     Raises:
         _ApiFailure: kind=`network_failed`（DNS / 超时 / HTTP 状态 / 非 JSON / I/O）。
     """
     request = urllib.request.Request(
-        url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"}
+        url, headers={"User-Agent": user_agent, "Accept": "application/json"}
     )
+    return _read_json(request, url)
+
+
+def _read_json(request: urllib.request.Request, url: str) -> object:
+    """发出一个已经构造好的请求并解析 JSON（GET / POST 共用这一条错误通道）。
+
+    为什么单独拆出来：`_post_json()`（`POST /universe/names/`）与 `_http_json()` 的错误
+    **必须是同一种**（`network_failed` + `url` / `status`），否则 agent 看到的失败形状取决
+    于「这次是哪一步联网」。异常类型只在这里列一次。
+
+    Raises:
+        _ApiFailure: kind=`network_failed`。
+    """
     try:
         with urllib.request.urlopen(request, timeout=NETWORK_TIMEOUT_S) as response:
             raw = response.read()
@@ -822,7 +958,9 @@ def _execute(
     state_policy: object,
     compute: Callable[[ViewContext, dict], tuple[object, bool]],
 ) -> dict:
-    """五个入口共用的执行骨架：校验 → 缓存 → 解析 → 上下文 → 计算 → 信封。
+    """前五个入口共用的执行骨架：校验 → 缓存 → 解析 → 上下文 → 计算 → 信封。
+
+    `fit_killmail` 走 `_execute_killmail()`（骨架同构，载荷是**原始 killmail**）。
 
     Args:
         op: 入口名（进缓存 key；不要把两个入口的 key 混在一起）。
@@ -891,7 +1029,7 @@ def _execute(
 
 
 # =============================================================================
-# 十一、五个入口（§10.1）
+# 十一、五个入口（§10.1）—— 第六个 `fit_killmail` 在第十二节
 # =============================================================================
 
 
@@ -1244,27 +1382,1457 @@ def fit_detail(
     )
 
 
+# =============================================================================
+# 十二、战报上下文（T-49）：`fit_killmail`
+# =============================================================================
+#
+# 为什么单独一条执行骨架
+# ----------------------
+# `_execute()` 只把「归一化后的 fit」交给 `compute`，而战报上下文要的是**原始 killmail**
+# （`attackers` / `zkb` 价值块 / `victim.damage_taken` / `solar_system_id`）。所以这里另起
+# `_execute_killmail()`：校验 / 缓存 / 上下文 / 信封**照样共用**，只把「取 killmail」与
+# 「组装战报块」换成这一节的实现。归一化仍然只有一处（`_parsed_fit()`）。
+#
+# 两个 API 各给一半（实测，原始响应存在 `tests/fixtures/killmail/`）
+# ----------------------------------------------------------------
+#
+# - zkillboard `/api/killID/<id>/`：**有** `zkb{...}`（价值 / points / labels），
+#   `attackers` 里**没有** `items`（items 只有 ESI 有）；
+# - ESI `/killmails/<id>/<hash>/`：**有** attackers / victim 详情与
+#   `victim.damage_taken`，**没有** `zkb` 价值块。
+#
+# 联网路径 = 两个都拉、合并成一份（ESI 当底、`zkb` 块附上去）；本地 killmail 只用调用方
+# 给的那份，缺 zkb 块时价值 / flags / labels 一律 `null` 并写进 `warnings`（不猜）。
+#
+# 三条不做的事
+# ------------
+#
+# 1. **不编造**：星系名 / 安全等级 / 武器族拿不到就给 `null` / `other`，绝不用「看着像」
+#    的值填。`security.band` 只在**真的拿到** `security_status` 时才给；
+# 2. **不重算 EHP**：`context.ehp_mixed` 直接读投影层（`survivability.ehp_mixed`），本层
+#    只做一次除法给出 `ratio`；
+# 3. **不替用户下结论**：`damage_taken_vs_ehp` 只给「挨了多少 / 自身多少」与一句固定说明，
+#    不给生死判词。
+
+KILLMAIL_OP: str = "killmail"
+"""`fit_killmail` 的入口名：**一定要进缓存 key**，否则会和 `fit_index` 的缓存串味。"""
+
+NOT_A_KILLMAIL_KIND: str = "not_a_killmail"
+"""「输入没有战报来源」的 `error.kind`（EFT / DNA / structured fit 都是这种）。
+
+与 §10.4 的五种 kind **只增不改**：宁可诚实报错，也不拿配装去猜一条战报。
+"""
+
+ESI_UNIVERSE_NAMES_API: str = "https://esi.evetech.net/latest/universe/names/"
+"""ESI 批量 id → 名字（`POST`，请求体是 id 数组）。星系名本地 SDE 索引里**没有**。"""
+
+ESI_UNIVERSE_SYSTEM_API: str = "https://esi.evetech.net/latest/universe/systems/{system_id}/"
+"""ESI 单星系详情：`name` / `security_status` / `security_class`（安全等级只有这里有）。"""
+
+UNIVERSE_NAMES_MAX_IDS: int = 1000
+"""`POST /universe/names/` 单次最多 1000 个 id（ESI 的硬上限，超了整批 400）。"""
+
+SECURITY_BAND_HIGHSEC: str = "highsec"
+SECURITY_BAND_LOWSEC: str = "lowsec"
+SECURITY_BAND_NULLSEC: str = "nullsec"
+SECURITY_BAND_WORMHOLE: str = "wormhole"
+
+HIGHSEC_THRESHOLD: float = 0.5
+"""`security_status >= 0.5` → highsec；`0 < s < 0.5` → lowsec；`s <= 0` → nullsec。"""
+
+LOWSEC_THRESHOLD: float = 0.0
+
+CRIMINAL_SECURITY_THRESHOLD: float = -5.0
+"""security status ≤ -5.0 的角色带 **Criminal** flag —— 这是游戏规则，不是本层的评分。
+
+`attackers.security.criminal_count` 用的就是它：一个可被玩家独立复核的判据，
+而不是「看起来坏不坏」的判断。
+"""
+
+WEAPON_FAMILY_OTHER: str = "other"
+"""分不清的一律 `other`（**不猜**）。族名固定 8 个，顺序即 `by_weapon_family` 的族清单。"""
+
+WEAPON_FAMILIES: tuple[str, ...] = (
+    "projectile",
+    "lazors",
+    "hybrid",
+    "missile",
+    "drone",
+    "fighter",
+    "smartbomb",
+    WEAPON_FAMILY_OTHER,
+)
+
+_WEAPON_FAMILY_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # 顺序有意义：先判「一定不是炮/导弹」的族，再判炮，最后判导弹。
+    ("smartbomb", ("smartbomb", "smart bomb")),
+    ("fighter", ("fighter",)),
+    ("drone", ("drone",)),
+    ("projectile", ("projectile", "autocannon", "artillery", "cannon")),
+    ("hybrid", ("hybrid", "railgun", "blaster")),
+    ("lazors", ("laser", "pulse", "beam", "energy weapon", "disintegrator")),
+    ("missile", ("launcher", "missile", "torpedo", "rocket", "bomb")),
+)
+"""`weapon_type_id` 的**名字 / 组名** → 武器族（启发式，命中第一条就停）。
+
+判据只来自 SDE 的名字与组名，**没有**任何「这族应该打多少」的推断；都命中不了就是
+`other`。实测覆盖：`Mega Pulse Laser II`→lazors、`Hexa 2500mm Repeating Cannon II`→
+projectile、`Mjolnir Rage Torpedo`→missile、`Garde II`/`Bouncer II`→drone、
+`Warp Scrambler II`（不是武器）→other。
+"""
+
+KILLMAIL_EHP_PATH: str = "survivability.ehp_mixed"
+"""EHP 的唯一来源（投影层路径）：本层只读它，**绝不自己算**。"""
+
+KILLMAIL_EHP_NOTE: str = "这条只说「挨了多少伤害 / 自身 EHP 多少」，不给生死结论"
+
+_SHARE_DIGITS: int = 6
+"""`damage_pct` 保留的小数位（推导值；6 位足以让 79 项之和仍是 1.0）。"""
+
+_RATIO_DIGITS: int = 3
+"""`damage_taken_vs_ehp.ratio` 保留的小数位（四舍五入；任务书的 3.065 是截断值）。"""
+
+DAMAGE_CHECK_MATCH: str = "matches_victim"
+DAMAGE_CHECK_MISMATCH: str = "mismatch"
+
+_UNIVERSE_LOCK = threading.Lock()
+_UNIVERSE_NAMES: dict[int, str | None] = {}
+_UNIVERSE_SYSTEMS: dict[int, dict] = {}
+"""星系名 / 星系详情的**进程内永久缓存**（选永久而不是 TTL，理由见 `universe_names`）。"""
+
+
+def _as_float(value: object) -> float | None:
+    """`int` / `float` → `float`（**排除 `bool`**）；其它一律 `None`（不猜 0）。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _as_int(value: object) -> int | None:
+    """`int` → `int`（排除 `bool`）；其它一律 `None`。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return int(value)
+
+
+def _as_bool(value: object) -> bool | None:
+    """`bool` → `bool`；其它一律 `None`（`zkb` 缺字段时**不是** `False`）。"""
+    return value if isinstance(value, bool) else None
+
+
+def _share(damage: int, total: int | None) -> float | None:
+    """占比（分母为 0 / 未知时给 `None`，不给 0.0 冒充）。"""
+    if not total:
+        return None
+    return round(damage / total, _SHARE_DIGITS)
+
+
+# ---- 十二之一：联网（POST /universe/names/ 与星系详情）----------------------
+
+
+def _post_json(url: str, payload: object) -> object:
+    """`POST` 一个 JSON 文档（请求体 = `payload` 的 JSON），失败一律 `network_failed`。"""
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+    )
+    return _read_json(request, url)
+
+
+def universe_names(ids: "list[int] | tuple[int, ...]") -> dict[int, str]:
+    """批量 `id → 名字`（走 ESI `POST /universe/names/`，**单次 ≤ 1000**，进程内永久缓存）。
+
+    Args:
+        ids: 想要的 id（重复的只查一次；不是整数的直接忽略）。
+
+    Returns:
+        `{id: name}`，**只含 ESI 真的给了名字的那些 id**（查不到就不在字典里 ——
+        调用方自己决定给 `null` 还是用别的来源，这里不编）。
+
+    为什么**永久缓存**而不是 TTL：星系名只在 CCP 版本更新时变，而战报分析是批量读同几个
+    星系 —— TTL 只会让「同一批战报的第 N 条」再付一次网络费，正确性一点都不多。
+    进程重启即失效，`clear_caches()` 也会一并清空（换环境 / 测试用）。
+    """
+    wanted: list[int] = []
+    for value in ids or []:
+        candidate = _as_int(value)
+        if candidate is not None and candidate not in wanted:
+            wanted.append(candidate)
+    if not wanted:
+        return {}
+
+    result: dict[int, str] = {}
+    missing: list[int] = []
+    with _UNIVERSE_LOCK:
+        for type_id in wanted:
+            if type_id in _UNIVERSE_NAMES:
+                name = _UNIVERSE_NAMES[type_id]
+                if name is not None:
+                    result[type_id] = name
+            else:
+                missing.append(type_id)
+
+    for start in range(0, len(missing), UNIVERSE_NAMES_MAX_IDS):
+        chunk = missing[start : start + UNIVERSE_NAMES_MAX_IDS]
+        payload = _post_json(ESI_UNIVERSE_NAMES_API, chunk)
+        entries = payload if isinstance(payload, list) else []
+        found: dict[int, str] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_id = _as_int(entry.get("id"))
+            name = entry.get("name")
+            if entry_id is not None and isinstance(name, str) and name:
+                found[entry_id] = name
+        with _UNIVERSE_LOCK:
+            for type_id in chunk:
+                _UNIVERSE_NAMES[type_id] = found.get(type_id)
+        result.update({key: value for key, value in found.items() if key in chunk})
+    return result
+
+
+def universe_system(system_id: int) -> dict:
+    """单个星系详情（`name` / `security_status` / `security_class`），**进程内永久缓存**。
+
+    Returns:
+        `{"name": str|None, "security_status": float|None, "security_class": ...,
+        "has_class": bool}`。`has_class` 用来区分「ESI 给了 `security_class: null`」与
+        「这个老版本响应里根本没有这个键」—— 前者是**虫洞空间的判据**（实测 Thera /
+        J220438 / Sentinel MZ 都是 `security_class: null` + `security_status: -0.99`，
+        而 k 空间一律给 `'B'` / `'H6'` / `'E'` 这样的类名）。
+
+    Raises:
+        _ApiFailure: kind=`network_failed`（调用方决定降级还是整条失败）。
+    """
+    key = int(system_id)
+    with _UNIVERSE_LOCK:
+        cached = _UNIVERSE_SYSTEMS.get(key)
+    if cached is not None:
+        return dict(cached)
+
+    url = ESI_UNIVERSE_SYSTEM_API.format(system_id=key)
+    payload = _http_json(url)
+    data = payload if isinstance(payload, dict) else {}
+    name = data.get("name")
+    block = {
+        "name": name if isinstance(name, str) and name else None,
+        "security_status": _as_float(data.get("security_status")),
+        "security_class": data.get("security_class"),
+        "has_class": "security_class" in data,
+    }
+    with _UNIVERSE_LOCK:
+        _UNIVERSE_SYSTEMS[key] = dict(block)
+    return block
+
+
+def _security_band(
+    status: float | None, security_class: object, has_class: bool
+) -> str | None:
+    """`security_status` → `highsec` / `lowsec` / `nullsec` / `wormhole`（拿不到给 `None`）。
+
+    虫洞**只按 ESI 的 `security_class` 判**：k 空间每个星系都有类名，w 空间是 `null`
+    （实测 Thera / J220438 / Sentinel MZ）。没有这个键（老响应）时不认定虫洞，退回数值
+    规则 —— 宁可按数值说 nullsec，也不凭 id 段猜。
+    """
+    if status is None:
+        return None
+    if has_class and security_class is None:
+        return SECURITY_BAND_WORMHOLE
+    if status >= HIGHSEC_THRESHOLD:
+        return SECURITY_BAND_HIGHSEC
+    if status > LOWSEC_THRESHOLD:
+        return SECURITY_BAND_LOWSEC
+    return SECURITY_BAND_NULLSEC
+
+
+def _system_block(system_id: object, warnings: list[str]) -> dict:
+    """`solar_system_id` → `{id, name, security: {status, band}}`（查不到给 `null` + `warnings`）。"""
+    identifier = _as_int(system_id)
+    if identifier is None:
+        warnings.append("killmail 没有 solar_system_id：星系名与安全等级给 null（不猜）")
+        return {"id": _as_int(system_id), "name": None, "security": {"status": None, "band": None}}
+
+    name: str | None = None
+    try:
+        name = universe_names([identifier]).get(identifier)
+    except _ApiFailure as exc:
+        warnings.append(f"星系名查不到（{exc.message}）：name 给 null")
+
+    info: dict = {
+        "name": None,
+        "security_status": None,
+        "security_class": None,
+        "has_class": False,
+    }
+    try:
+        info = universe_system(identifier)
+    except _ApiFailure as exc:
+        warnings.append(f"星系安全等级查不到（{exc.message}）：security 给 null")
+
+    if name is None:
+        # 同一个 ESI 的星系详情也带 name（权威来源相同），不额外多花一次请求。
+        name = info.get("name")
+    status = _as_float(info.get("security_status"))
+    return {
+        "id": identifier,
+        "name": name,
+        "security": {
+            "status": status,
+            "band": _security_band(status, info.get("security_class"), bool(info.get("has_class"))),
+        },
+    }
+
+
+def _zkb_entry(payload: object) -> dict:
+    """zkill 的 `killID` 响应 → 单条战报（响应可能是列表，也可能是单条对象）。"""
+    entries = payload if isinstance(payload, list) else [payload]
+    for entry in entries:
+        if isinstance(entry, dict):
+            return entry
+    return {}
+
+
+def fetch_killmail_report(killmail_id: int, digest: str | None) -> dict:
+    """取一条战报的**完整**上下文：zkillboard 的价值块 + ESI 的详情，合并成一份。
+
+    与 `fetch_killmail()`（只给配装层要的那份 ESI 原文）并列存在，两者互不影响：
+
+    1. 先 `GET zkillboard /api/killID/<id>/` —— 既拿 `zkb`（价值 / points / labels），
+       也在 `digest is None` 时拿 `zkb.hash`（ESI 原文必须要它）；
+    2. 再 `GET ESI /killmails/<id>/<hash>/` —— attackers / victim / `damage_taken`；
+    3. 合并：**ESI 当底**（items 与 damage 以它为准），`zkb` 块原样附上。
+
+    Raises:
+        _ApiFailure: kind=`network_failed`（任一步失败都**不**拿半成品继续算）。
+    """
+    zkb_url = ZKILL_KILL_API.format(killmail_id=killmail_id)
+    payload = _http_json(zkb_url)
+    entry = _zkb_entry(payload)
+    if not digest:
+        digest = _hash_from_zkill(payload)
+        if not digest:
+            raise _ApiFailure(
+                "network_failed",
+                f"zkillboard 没有给出 killmail {killmail_id} 的 hash，无法向 ESI 取原文",
+                url=zkb_url,
+            )
+
+    esi_url = ESI_KILLMAIL_API.format(killmail_id=killmail_id, hash=digest)
+    killmail = _http_json(esi_url)
+    if not isinstance(killmail, dict) or not isinstance(killmail.get("victim"), dict):
+        raise _ApiFailure(
+            "network_failed",
+            f"ESI 返回的 killmail {killmail_id} 里没有 victim 块",
+            url=esi_url,
+        )
+
+    merged = dict(killmail)
+    zkb_block = entry.get("zkb")
+    if isinstance(zkb_block, dict):
+        merged["zkb"] = zkb_block
+    return merged
+
+
+# ---- 十二之二：战报块的组装（只整理，不判断）--------------------------------
+
+
+def _type_block(type_id: object, index: Index | None) -> dict:
+    """`type_id` → `{type_id, name, group}`（名字 / 组名走本地 SDE；查不到给 `null`）。"""
+    identifier = _as_int(type_id)
+    row = None
+    if identifier is not None and index is not None:
+        row = index.get_type(identifier)
+    return {
+        "type_id": _as_int(type_id),
+        "name": (row or {}).get("name"),
+        "group": (row or {}).get("group_name"),
+    }
+
+
+def weapon_family(type_id: object, index: Index | None) -> str:
+    """`weapon_type_id` → 武器族（`WEAPON_FAMILIES` 之一，分不清给 `other`）。
+
+    只用 SDE 里的**名字 + 组名**做启发式（`_WEAPON_FAMILY_KEYWORDS`）：命中不了就是
+    `other`。这里**不猜**——ESI 常把 `weapon_type_id` 填成攻击者自己的船（如 `642`
+    Apocalypse），那种情况老实给 `other` 比硬塞一个族更有用。
+    """
+    identifier = _as_int(type_id)
+    if identifier is None or index is None:
+        return WEAPON_FAMILY_OTHER
+    row = index.get_type(identifier)
+    if not isinstance(row, dict):
+        return WEAPON_FAMILY_OTHER
+    haystack = " ".join(
+        str(row.get(field) or "") for field in ("name", "group_name")
+    ).lower()
+    if not haystack.strip():
+        return WEAPON_FAMILY_OTHER
+    for family, keywords in _WEAPON_FAMILY_KEYWORDS:
+        if any(keyword in haystack for keyword in keywords):
+            return family
+    return WEAPON_FAMILY_OTHER
+
+
+def _buckets(
+    attackers: list[dict],
+    key_of: Callable[[dict], object],
+    key_name: str,
+    damage_total: int | None,
+) -> list[dict]:
+    """按 `key_of` 分桶 → `[{<key_name>, count, damage, damage_pct}]`（按伤害降序）。"""
+    grouped: dict[object, dict] = {}
+    for attacker in attackers:
+        key = key_of(attacker)
+        bucket = grouped.setdefault(key, {"count": 0, "damage": 0})
+        bucket["count"] += 1
+        bucket["damage"] += _as_int(attacker.get("damage_done")) or 0
+    rows = [
+        {
+            key_name: key,
+            "count": bucket["count"],
+            "damage": bucket["damage"],
+            "damage_pct": _share(bucket["damage"], damage_total),
+        }
+        for key, bucket in grouped.items()
+    ]
+    rows.sort(key=lambda row: (-row["damage"], str(row[key_name] or "")))
+    return rows
+
+
+def _attacker_block(
+    attackers: list[dict], victim_damage: int | None, index: Index | None
+) -> dict:
+    """`attackers` 块：人数 / 总伤害 / 校验 / 最终一击 / 两个分桶 / 安全等级分布。"""
+    damage_total = sum(_as_int(attacker.get("damage_done")) or 0 for attacker in attackers)
+    if victim_damage is None:
+        damage_check: str | None = None
+        damage_diff: int | None = None
+    elif damage_total == victim_damage:
+        damage_check = DAMAGE_CHECK_MATCH
+        damage_diff = None
+    else:
+        damage_check = DAMAGE_CHECK_MISMATCH
+        damage_diff = damage_total - victim_damage
+
+    final = next(
+        (attacker for attacker in attackers if attacker.get("final_blow") is True), None
+    )
+    final_block: dict | None = None
+    if final is not None:
+        final_block = {
+            "ship": _type_block(final.get("ship_type_id"), index),
+            "weapon": _type_block(final.get("weapon_type_id"), index),
+            "security_status": _as_float(final.get("security_status")),
+        }
+
+    statuses = [
+        status
+        for status in (_as_float(attacker.get("security_status")) for attacker in attackers)
+        if status is not None
+    ]
+
+    block = {
+        "count": len(attackers),
+        "damage_total": damage_total,
+        "damage_check": damage_check,
+        "final_blow": final_block,
+        "by_ship_group": _buckets(
+            attackers, lambda a: _type_block(a.get("ship_type_id"), index)["group"], "group", damage_total
+        ),
+        "by_weapon_family": _buckets(
+            attackers, lambda a: weapon_family(a.get("weapon_type_id"), index), "family", damage_total
+        ),
+        "security": {
+            "min": min(statuses) if statuses else None,
+            "max": max(statuses) if statuses else None,
+            "criminal_count": sum(
+                1 for status in statuses if status <= CRIMINAL_SECURITY_THRESHOLD
+            ),
+        },
+    }
+    if damage_diff is not None:
+        block["damage_diff"] = damage_diff
+    return block
+
+
+def _killmail_block(killmail: dict, system: dict) -> dict:
+    """`killmail` 块（价值 / flags / labels 全部来自 `zkb`，没有就是 `null`）。"""
+    zkb = killmail.get("zkb") if isinstance(killmail.get("zkb"), dict) else None
+    value: dict[str, float | None] = {
+        "fitted": None,
+        "dropped": None,
+        "destroyed": None,
+        "total": None,
+    }
+    flags: dict[str, object] = {"npc": None, "solo": None, "awox": None, "points": None}
+    labels: list | None = None
+    if zkb is not None:
+        value = {
+            "fitted": _as_float(zkb.get("fittedValue")),
+            "dropped": _as_float(zkb.get("droppedValue")),
+            "destroyed": _as_float(zkb.get("destroyedValue")),
+            "total": _as_float(zkb.get("totalValue")),
+        }
+        flags = {
+            "npc": _as_bool(zkb.get("npc")),
+            "solo": _as_bool(zkb.get("solo")),
+            "awox": _as_bool(zkb.get("awox")),
+            "points": _as_int(zkb.get("points")),
+        }
+        raw_labels = zkb.get("labels")
+        if isinstance(raw_labels, list):
+            labels = [label for label in raw_labels if isinstance(label, str)]
+    return {
+        "killmail_id": _as_int(killmail.get("killmail_id")),
+        "killmail_time": (
+            killmail.get("killmail_time")
+            if isinstance(killmail.get("killmail_time"), str)
+            else None
+        ),
+        "solar_system": {"id": system["id"], "name": system["name"]},
+        "security": system["security"],
+        "value": value,
+        "flags": flags,
+        "labels": labels,
+    }
+
+
+def _ehp_context(ctx: ViewContext, damage_taken: int | None) -> dict:
+    """`context` 块：`{damage_taken_vs_ehp: {...}, note}`（EHP **只读**投影层，本层只做一次除法）。"""
+    answer = render.get_path(ctx, KILLMAIL_EHP_PATH)
+    ehp = _as_float(answer.get("value"))
+    ratio = None
+    if damage_taken is not None and ehp:
+        ratio = round(damage_taken / ehp, _RATIO_DIGITS)
+    return {
+        "damage_taken_vs_ehp": {
+            "damage_taken": damage_taken,
+            "ehp_mixed": ehp,
+            "ratio": ratio,
+            "ehp_provenance": answer.get("provenance"),
+        },
+        "note": KILLMAIL_EHP_NOTE,
+    }
+
+
+def _killmail_report(
+    killmail: dict, ctx: ViewContext, killmail_source: str, warnings: list[str]
+) -> dict:
+    """原始 killmail + `ViewContext` → `result`（形状固定，见 `fit_killmail` 的 docstring）。"""
+    index = ctx.index
+    victim = killmail.get("victim") if isinstance(killmail.get("victim"), dict) else {}
+    if not isinstance(killmail.get("zkb"), dict):
+        warnings.append("没有 zkb 价值块：value / flags / labels 给 null（不猜）")
+
+    system = _system_block(killmail.get("solar_system_id"), warnings)
+    victim_damage = _as_int(victim.get("damage_taken"))
+    if victim_damage is None:
+        warnings.append("killmail 没有 victim.damage_taken：damage_check 给 null（不猜）")
+    attackers = [
+        attacker
+        for attacker in (killmail.get("attackers") or [])
+        if isinstance(attacker, dict)
+    ]
+    untracked = sum(
+        1
+        for attacker in attackers
+        if attacker.get("weapon_type_id") is not None
+        and attacker.get("weapon_type_id") == attacker.get("ship_type_id")
+    )
+    if untracked:
+        warnings.append(
+            f"{untracked} 个攻击者的 weapon_type_id 与自己的 ship_type_id 相同"
+            "（ESI 没有记录武器）：这些按 other 计入 by_weapon_family"
+        )
+    return {
+        "killmail": _killmail_block(killmail, system),
+        "victim": {
+            "damage_taken": victim_damage,
+            "ship": _type_block(victim.get("ship_type_id"), index),
+        },
+        "attackers": _attacker_block(attackers, victim_damage, index),
+        "context": _ehp_context(ctx, victim_damage),
+        "killmail_source": killmail_source,
+        "warnings": warnings,
+    }
+
+
+# ---- 十二之三：输入判别（必须是战报）----------------------------------------
+
+
+def _killmail_descriptor(fit: object) -> tuple[str, str | None, dict]:
+    """输入 → `(形态, 缓存 key, 载荷)`；比 `_input_descriptor()` 多认一种网络形态。
+
+    多认的那一种：`{"killmail_id": N}`（**没有** hash）。它不是「本地内容」（没有
+    `victim` 就不是一份完整 killmail），hash 可以向 zkillboard 要 —— 所以直接按网络
+    输入处理，而不是判成 `not_a_killmail`。
+    """
+    if (
+        isinstance(fit, dict)
+        and "victim" not in fit
+        and KILLMAIL_ID_FIELD in fit
+    ):
+        key, params = _network_key(fit)
+        return INPUT_NETWORK, key, params
+    return _input_descriptor(fit)
+
+
+def _killmail_from_text(text: str) -> dict:
+    """本地输入文本 → killmail 对象；不是战报就 `not_a_killmail`（**不猜**）。
+
+    EFT / DNA / structured fit / ESI fitting 都在这里被挡住：它们没有 `attackers` /
+    `zkb` / `damage_taken`，硬拿配装凑一条战报是编造。
+    """
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        raise _ApiFailure(
+            NOT_A_KILLMAIL_KIND,
+            "这段输入没有战报来源（不是 killmail JSON，也不带攻击方 / 价值块）",
+            hint=[
+                "killmail JSON（zkillboard 或 ESI 的原文）",
+                '{"killmail_id": N, "hash": "..."}',
+                "https://zkillboard.com/kill/<id>/ 或 ESI 的 /killmails/<id>/<hash>/ 链接",
+            ],
+            raw=text.strip()[:200],
+        ) from None
+
+    if isinstance(data, list) and len(data) == 1:
+        data = data[0]
+    if isinstance(data, dict) and isinstance(data.get("victim"), dict):
+        return data
+    raise _ApiFailure(
+        NOT_A_KILLMAIL_KIND,
+        "这段输入里没有 victim 块，不是一条 killmail（EFT / DNA / 结构化配装都没有战报信息）",
+        hint=[
+            "看配装用 fit_parse / fit_index",
+            "要战报上下文就给 killmail JSON、{killmail_id, hash} 或 killmail 链接",
+        ],
+        raw=text.strip()[:200],
+    )
+
+
+def _execute_killmail(
+    fit: object,
+    *,
+    skill_tier: object,
+    damage_profile: object,
+    state_policy: object,
+) -> dict:
+    """`fit_killmail` 的执行骨架（与 `_execute()` 同构，只是载荷是**原始 killmail**）。
+
+    Raises: 无 —— 任何异常都变成失败信封（§10.4）。
+    """
+    try:
+        _check_params(skill_tier, damage_profile, state_policy)
+
+        kind, content_key, payload = _killmail_descriptor(fit)
+        cache_key = (
+            None
+            if content_key is None
+            else (KILLMAIL_OP, (), content_key, skill_tier, damage_profile, state_policy)
+        )
+        if cache_key is not None:
+            hit = _cache_get(cache_key)
+            if hit is not None:
+                return hit
+
+        warnings: list[str] = []
+        if kind == INPUT_NETWORK:
+            killmail = fetch_killmail_report(payload["killmail_id"], payload["hash"])
+            killmail_source = "network"
+        else:
+            killmail = _killmail_from_text(payload["text"])
+            killmail_source = "local"
+
+        # 索引先就位：船的 type/group 与武器族的判据都来自它（`_context()` 也要它）。
+        _ensure_index()
+        parsed = _parsed_fit({"text": json.dumps(killmail, ensure_ascii=False)})
+        ctx = _context(parsed["fit"], str(skill_tier))
+
+        result = _killmail_report(killmail, ctx, killmail_source, warnings)
+        meta = _meta(
+            ctx,
+            source_format=str(parsed.get("source_format")),
+            damage_profile=str(damage_profile),
+            state_policy=str(state_policy),
+        )
+        meta["killmail_source"] = killmail_source
+        envelope = _success(result, meta)
+    except _ApiFailure as exc:
+        return _failure(exc.payload())
+    except Exception as exc:  # noqa: BLE001 - 边界层：任何异常都不得裸抛给 agent
+        return _failure(
+            {
+                "kind": "internal_error",
+                "message": "接口层内部异常，本次没有可用结果",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+        )
+
+    if cache_key is not None:
+        _cache_put(cache_key, envelope)
+    return envelope
+
+
+def fit_killmail(
+    fit: object,
+    *,
+    skill_tier: str = SKILL_TIER_ALL4,
+    damage_profile: str = DAMAGE_PROFILE_UNIFORM,
+    state_policy: str = STATE_POLICY_ENGINE_DEFAULT,
+) -> dict:
+    """**战报上下文**：谁打的、损失多少、挨了多少伤害（一项都不是配装数值的复述）。
+
+    输入与其它入口一致（killmail JSON / `{"killmail_id", "hash"}` / zkillboard URL），
+    但**只接受战报**：EFT / DNA / structured fit 这类没有战报来源的输入返回
+    `{"ok": false, "error": {"kind": "not_a_killmail", ...}}`（诚实报错，不猜）。
+
+    Args:
+        fit: 四形态输入，见模块 docstring；其中三形态必须是 killmail。
+        skill_tier: 同其它入口（只影响 `context.ehp_mixed`）。
+        damage_profile: 只支持 `uniform`。
+        state_policy: 只支持 `engine_default`。
+
+    Returns:
+        成功时 `result` 是（形状固定）：
+
+        ```json
+        {"killmail": {"killmail_id", "killmail_time",
+                      "solar_system": {"id", "name"},
+                      "security": {"status", "band"},
+                      "value": {"fitted", "dropped", "destroyed", "total"},
+                      "flags": {"npc", "solo", "awox", "points"},
+                      "labels": [...]},
+         "victim": {"damage_taken", "ship": {"type_id", "name", "group"}},
+         "attackers": {"count", "damage_total", "damage_check",
+                       "final_blow": {"ship", "weapon", "security_status"},
+                       "by_ship_group": [{"group", "count", "damage", "damage_pct"}],
+                       "by_weapon_family": [{"family", "count", "damage", "damage_pct"}],
+                       "security": {"min", "max", "criminal_count"}},
+         "context": {"damage_taken_vs_ehp": {"damage_taken", "ehp_mixed", "ratio",
+                                            "ehp_provenance"},
+                     "note"},
+         "killmail_source": "network" | "local",
+         "warnings": [...]}
+        ```
+
+    `null` 的语义（**别当 0 / 别当 false**）：
+
+    - `security.status` / `band`：ESI 查不到安全等级时是 `null`（**不伪造**）；
+      `band` 只在真的拿到 status 时才出现；
+    - `value.*` / `flags.*` / `labels`：没有 `zkb` 价值块时全是 `null`（本地 ESI 形态的
+      killmail 就是这样），原因写在 `warnings` 里；
+    - `damage_check`：`victim.damage_taken` 缺失时是 `null`；两组数字不等时是
+      `"mismatch"` **并且**多给一个 `damage_diff`（= Σattackers − victim，数据质量信号，
+      绝不静默）；
+    - `by_weapon_family` 里分不清的一律 `other`（`weapon_family()` 的启发式只认名字 /
+      组名，认不出就不猜）。
+
+    `context.damage_taken_vs_ehp.ratio = damage_taken / ehp_mixed`，EHP 直接读投影层
+    （`survivability.
+    ehp_mixed`，`provenance` 一起回显），**本层不重算**；这一块只陈述「挨了多少 / 自身
+    多少」，不给生死结论。
+    """
+    return _execute_killmail(
+        fit,
+        skill_tier=skill_tier,
+        damage_profile=damage_profile,
+        state_policy=state_policy,
+    )
+
+
+# =============================================================================
+# 十三、zkb 战报检索（T-50）：`zkb_search` —— 列表级数据 + 限流 + 名字解析
+# =============================================================================
+#
+# 这里的每条口径都是**实测**的（2026-10-19，python urllib 直连 zkb；本机 curl /
+# Invoke-WebRequest 的 TLS 不可用，只有 urllib 能出网）：
+#
+# | 查询 | URL 形态 | 实测 |
+# |---|---|---|
+# | 按船型 + 近 7 天 | `/api/losses/shipTypeID/22444/pastSeconds/604800/` | 200，**170 条** |
+# | 复合（AND）：星系 + 船型 | `/api/kills/solarSystemID/30002537/shipTypeID/22444/` | 200，**200 条**（7.65 s，重查询） |
+# | 按角色 + 近 1 天 | `/api/kills/characterID/2121910483/pastSeconds/86400/` | 200，9 条 |
+# | 分页 | `/api/losses/shipTypeID/22444/page/2/` | 200，200 条 |
+# | 时间区间 | `/startTime/20261010/endTime/20261012/` | ❌ `{"error": "startTime/endTime no longer supported in api because of abuse"}` |
+#
+# 由此定下四条口径：
+#
+# 1. **`startTime` / `endTime` 已被 zkb 停用**：时间维度只能用 `pastSeconds/<n>` +
+#    `page/<n>` 回溯。调用方硬塞起止时间参数 → `invalid_argument`（**不发请求**，
+#    既省一次配额，也不给 agent 一条看不出所以然的上游 error）。
+# 2. **单页最多 200 条**：`limit` 只截断返回的 `kills` 数组，`count` 与 `aggregates`
+#    仍按**整页**算（并在 `note` 里说清楚，别让 agent 以为「一共就 50 条」）。
+# 3. **多过滤器串联即 AND**，`/kills/` 与 `/losses/` 是两条独立路径（`side="both"` =
+#    两次请求，然后按 `killmail_time` 倒序合并去重）。
+# 4. **限流是真的**：所有出网请求过同一个全局锁 + 最小间隔 `ZKB_MIN_INTERVAL_S`
+#    （1.2 s）；被限流（429 / 403）→ `rate_limited`。
+#
+# 列表里**没有完整配装**（只有被弹出的模块 `victim.items`，实测确实存在，但本工具
+# 不返回它 —— 那是单条明细的活）；要明细请对具体 `killmail_id` 调 `fit_killmail`。
+
+ZkbRequester = Callable[[str, "object | None"], object]
+"""请求替身的签名：`(url, body)`；GET 时 `body is None`，POST 时是请求体对象。"""
+
+_ZKB_LOCK = threading.Lock()
+"""出网闸门的**全局锁**：持锁期间不放第二个请求进来（串行 + 最小间隔）。"""
+
+_ZKB_LAST_START: float | None = None
+"""上一次出网请求的**开始**时刻（`time.monotonic`；测试可注入 clock）。"""
+
+_ZKB_ID_CACHE_LOCK = threading.Lock()
+_ZKB_ID_CACHE: "OrderedDict[tuple[str, str], dict]" = OrderedDict()
+"""名字 → `{"id", "name"}` 的进程内 LRU（只存**成功**解析，失败不缓存）。"""
+
+
+def _reset_zkb_state() -> None:
+    """清空「限流时间戳 + 名字解析缓存」（**测试/换环境用**，生产进程不需要调用）。"""
+    global _ZKB_LAST_START
+    with _ZKB_LOCK:
+        _ZKB_LAST_START = None
+    with _ZKB_ID_CACHE_LOCK:
+        _ZKB_ID_CACHE.clear()
+
+
+def zkb_url(
+    *,
+    side: str,
+    filters: "dict[str, int] | None" = None,
+    past_seconds: int | None = None,
+    page: int = 1,
+) -> str:
+    """拼一条 zkb 列表 URL（**纯函数**，离线可断言；`page <= 1` 时不拼 `page`）。
+
+    形态：`<root>/<side>/[<段名>/<值>/]…[pastSeconds/<n>/][page/<n>/]`，段的顺序就是
+    `ZKB_FILTER_SEGMENTS` 的顺序（AND 复合，顺序固定才可比对）。
+
+    Args:
+        side: `kills` / `losses`（**不接受** `both`：那是两次请求，不是一条 URL）。
+        filters: `{参数名: id}`，键必须来自 `ZKB_FILTER_SEGMENTS`（不认识的键忽略）。
+        past_seconds: 时间窗口；`None` = 不限制（zkb 已停用起止时间）。
+        page: 页码；`1` 时省略（`/page/1/` 与不带 page 等价，少一段更干净）。
+    """
+    parts: list[str] = [ZKB_API_ROOT, side]
+    table = filters or {}
+    for field, segment in ZKB_FILTER_SEGMENTS:
+        value = table.get(field)
+        if value is None:
+            continue
+        parts.append(segment)
+        parts.append(str(value))
+    if past_seconds is not None:
+        parts.append("pastSeconds")
+        parts.append(str(past_seconds))
+    if page and page > 1:
+        parts.append("page")
+        parts.append(str(page))
+    return "/".join(parts) + "/"
+
+
+def _zkb_default_requester(url: str, body: object | None = None) -> object:
+    """生产用的请求器：GET 走 zkb 的 UA，POST 走 ESI 的 UA（错误通道同一个 `_read_json`）。"""
+    if body is None:
+        return _http_json(url, user_agent=ZKB_USER_AGENT)
+    return _post_json(url, body)
+
+
+def _zkb_request(
+    url: str,
+    *,
+    body: object | None = None,
+    requester: ZkbRequester | None = None,
+    clock: Callable[[], float] | None = None,
+    sleeper: Callable[[float], None] | None = None,
+) -> object:
+    """一次出网请求：**全局限流**（串行 + ≥ `ZKB_MIN_INTERVAL_S`）→ 取 JSON。
+
+    Args:
+        url: 完整 URL。
+        body: `None` = GET；否则按 JSON `POST`（只有 ESI `/universe/ids/` 走这条）。
+        requester: 请求替身（测试注入；生产走 urllib）。
+        clock: 单调时钟替身（测试用虚拟时钟，避免真的等 1.2 s）。
+        sleeper: 睡眠替身（与 `clock` 配套）。
+
+    Raises:
+        _ApiFailure: `rate_limited`（429 / 403）、或上游透传的 `network_failed`。
+    """
+    global _ZKB_LAST_START
+    now_fn = clock or time.monotonic
+    sleep_fn = sleeper or time.sleep
+    fetch = requester or _zkb_default_requester
+    with _ZKB_LOCK:
+        now = float(now_fn())
+        if _ZKB_LAST_START is not None:
+            wait = ZKB_MIN_INTERVAL_S - (now - _ZKB_LAST_START)
+            if wait > 0:
+                sleep_fn(wait)
+                now = float(now_fn())
+        _ZKB_LAST_START = now
+        try:
+            return fetch(url, body)
+        except _ApiFailure as exc:
+            status = exc.extra.get("status")
+            if status in ZKB_RATE_LIMIT_STATUSES:
+                raise _ApiFailure(
+                    "rate_limited",
+                    f"被 zkb 限流（HTTP {status}）：{url}；请求间隔必须 "
+                    f"≥ {ZKB_MIN_INTERVAL_S} s，稍后重试",
+                    url=url,
+                    status=status,
+                    hint={"min_interval_s": ZKB_MIN_INTERVAL_S},
+                ) from exc
+            raise
+
+
+def _zkb_integer(
+    name: str,
+    value: object,
+    *,
+    default: int | None,
+    minimum: int,
+    maximum: int | None = None,
+) -> int:
+    """把一个参数收成整数（`None` → `default`；不合法 → `invalid_argument`）。
+
+    **不静默夹取**：超出 `maximum` 就报错并给 `hint.max`。夹取等于偷偷改了调用方的
+    请求（他说要 500 条，你给 200 条却说成功了），比直接报错更坏。
+    """
+    if value is None:
+        if default is None:
+            raise _ApiFailure("invalid_argument", f"{name} 不能为空", field=name)
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise _ApiFailure(
+            "invalid_argument",
+            f"{name} 必须是整数，收到 {type(value).__name__}",
+            field=name,
+        )
+    if isinstance(value, int):
+        number = value
+    else:
+        text = value.strip()
+        if not text.isdigit():
+            raise _ApiFailure(
+                "invalid_argument", f"{name} 必须是整数，收到 {value!r}", field=name
+            )
+        number = int(text)
+    if number < minimum:
+        raise _ApiFailure(
+            "invalid_argument",
+            f"{name} 必须 ≥ {minimum}，收到 {number}",
+            field=name,
+            hint={"min": minimum},
+        )
+    if maximum is not None and number > maximum:
+        raise _ApiFailure(
+            "invalid_argument",
+            f"{name} 必须 ≤ {maximum}（zkb 单页上限），收到 {number}",
+            field=name,
+            hint={"max": maximum},
+        )
+    return number
+
+
+def _zkb_check_common(common: dict) -> None:
+    """`**common` 只允许三项「无影响」的配装参数；时间区间类参数直接报错。
+
+    Raises:
+        _ApiFailure: `invalid_argument`（时间区间参数 / 不认识的参数名）。
+    """
+    accepted = [field for field, _segment in ZKB_FILTER_SEGMENTS] + [
+        "past_seconds",
+        "page",
+        "side",
+        "limit",
+    ]
+    for name in common:
+        if name in ZKB_REJECTED_PARAMETERS:
+            raise _ApiFailure(
+                "invalid_argument",
+                f"{name} 不受支持：zkb 已停用 startTime/endTime（abuse 防护），"
+                "时间窗口只能用 past_seconds + page 回溯",
+                field=name,
+                hint={"use": ["past_seconds", "page"]},
+            )
+        if name not in ZKB_IGNORED_PARAMETERS:
+            raise _ApiFailure(
+                "invalid_argument",
+                f"不认识的参数 {name!r}",
+                field=name,
+                hint={"accepted": accepted},
+            )
+
+
+def _zkb_id_cache_get(kind: str, key: str) -> dict | None:
+    """取「名字 → id」缓存的一条（命中时移到末尾 = LRU 的最近用过）。"""
+    with _ZKB_ID_CACHE_LOCK:
+        found = _ZKB_ID_CACHE.get((kind, key))
+        if found is None:
+            return None
+        _ZKB_ID_CACHE.move_to_end((kind, key))
+        return dict(found)
+
+
+def _zkb_id_cache_put(kind: str, key: str, entry: dict) -> None:
+    """存一条解析结果（超容量丢最久未用的那条）。"""
+    with _ZKB_ID_CACHE_LOCK:
+        _ZKB_ID_CACHE[(kind, key)] = dict(entry)
+        _ZKB_ID_CACHE.move_to_end((kind, key))
+        while len(_ZKB_ID_CACHE) > ZKB_ID_CACHE_MAX:
+            _ZKB_ID_CACHE.popitem(last=False)
+
+
+def _esi_id_candidates(payload: object) -> list[dict]:
+    """ESI `/universe/ids/` 响应 → `[{"kind", "id", "name"}]`（只收本层认得的分类）。"""
+    if not isinstance(payload, dict):
+        return []
+    reverse = {category: kind for kind, category in ESI_ID_CATEGORIES.items()}
+    rows: list[dict] = []
+    for category, entries in payload.items():
+        kind = reverse.get(category)
+        if kind is None or not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            identity = _as_int(entry.get("id"))
+            name = entry.get("name")
+            if identity is None or not isinstance(name, str) or not name:
+                continue
+            rows.append({"kind": kind, "id": identity, "name": name})
+    return rows
+
+
+def _zkb_ship_block(type_id: int | None) -> dict:
+    """`{type_id, name, group}`：名字 / 组名走 SDE 索引，查不到就是 `None`（**不编**）。"""
+    row = None
+    if type_id is not None:
+        index = _try_index()
+        if index is not None:
+            row = index.get_type(int(type_id))
+    return {
+        "type_id": type_id,
+        "name": (row or {}).get("name"),
+        "group": (row or {}).get("group_name"),
+    }
+
+
+def _zkb_resolve_entity(
+    kind: str, value: object, requester: ZkbRequester | None
+) -> dict:
+    """名字 / id → `{"id": int, "name": str|None}`（名字走 ESI，结果进进程内缓存）。
+
+    判据（**不猜**）：
+
+    - 整数（或纯数字字符串）→ 直接用，不联网；船型能顺手从 SDE 拿到名字；
+    - 名字 → `POST /universe/ids/`，**只在该分类内**选：恰好一个精确同名 → 用它；
+      没有精确同名但该分类只有一个结果 → 用它（ESI 已经给了唯一匹配）；其余
+      （多个候选 / 一个都没有）→ `unknown_entity` + `candidates`（带 `kind`）。
+
+    Raises:
+        _ApiFailure: `invalid_argument`（形态不对）/ `unknown_entity`（给不出唯一答案）。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise _ApiFailure(
+            "invalid_argument",
+            f"{kind} 必须是名字或整数 id，收到 {type(value).__name__}",
+            field=kind,
+        )
+    if isinstance(value, int):
+        return {"id": int(value), "name": _zkb_ship_block(value).get("name")}
+    text = value.strip()
+    if not text:
+        raise _ApiFailure("invalid_argument", f"{kind} 不能为空", field=kind)
+    if text.isdigit():
+        number = int(text)
+        return {"id": number, "name": _zkb_ship_block(number).get("name")}
+
+    key = text.casefold()
+    cached = _zkb_id_cache_get(kind, key)
+    if cached is not None:
+        return cached
+
+    payload = _zkb_request(ESI_UNIVERSE_IDS_API, body=[text], requester=requester)
+    rows = _esi_id_candidates(payload)
+    expected = [row for row in rows if row["kind"] == kind]
+    exact = [row for row in expected if row["name"].casefold() == key]
+    chosen: dict | None = None
+    if len(exact) == 1:
+        chosen = exact[0]
+    elif not exact and len(expected) == 1:
+        chosen = expected[0]
+    if chosen is None:
+        candidates = exact or expected or rows
+        reason = "有多个同名候选" if len(candidates) > 1 else "ESI 认不出这个名字"
+        raise _ApiFailure(
+            "unknown_entity",
+            f"解析不出唯一的 {kind}：{reason}（{text!r}）；请改用整数 id",
+            field=kind,
+            value=text,
+            candidates=[
+                {"id": row["id"], "name": row["name"], "kind": row["kind"]}
+                for row in candidates[:5]
+            ],
+        )
+    entry = {"id": int(chosen["id"]), "name": str(chosen["name"])}
+    _zkb_id_cache_put(kind, key, entry)
+    return entry
+
+
+def _zkb_filters(
+    values: dict[str, object], requester: ZkbRequester | None
+) -> tuple[dict[str, dict], dict[str, int]]:
+    """六个实体过滤参数 → `(resolved, filter_ids)`（`resolved` 回显给调用方）。"""
+    resolved: dict[str, dict] = {}
+    filter_ids: dict[str, int] = {}
+    for field, _segment in ZKB_FILTER_SEGMENTS:
+        raw = values.get(field)
+        if raw is None:
+            continue
+        entry = _zkb_resolve_entity(field, raw, requester)
+        resolved[field] = entry
+        filter_ids[field] = int(entry["id"])
+    return resolved, filter_ids
+
+
+def _zkb_payload_rows(payload: object, url: str) -> list[dict]:
+    """一次 zkb 响应 → 列表项字典（形状不对时给结构化错误，**不猜**）。
+
+    Raises:
+        _ApiFailure: `network_failed`（zkb 返回 `{"error": ...}` / 不是列表）。
+    """
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict) and payload.get("error"):
+        raise _ApiFailure(
+            "network_failed",
+            f"zkb 拒绝了这次查询：{payload.get('error')}",
+            url=url,
+            raw=str(payload.get("error")),
+        )
+    raise _ApiFailure(
+        "network_failed",
+        f"zkb 返回的不是列表：{type(payload).__name__}",
+        url=url,
+    )
+
+
+def _zkb_kill_row(item: dict) -> dict | None:
+    """一条 zkb 列表项 → 稳定形状（缺字段给 `None`，**绝不用 0 / false 冒充**）。
+
+    连 `killmail_id` 都没有的项返回 `None`（那不是一条战报，也不该被数进 `count`）。
+    """
+    killmail_id = _as_int(item.get("killmail_id"))
+    if killmail_id is None:
+        return None
+    zkb = item.get("zkb") if isinstance(item.get("zkb"), dict) else {}
+    victim = item.get("victim") if isinstance(item.get("victim"), dict) else {}
+    labels = zkb.get("labels")
+    return {
+        "killmail_id": killmail_id,
+        "killmail_time": (
+            item.get("killmail_time")
+            if isinstance(item.get("killmail_time"), str)
+            else None
+        ),
+        "ship": _zkb_ship_block(_as_int(victim.get("ship_type_id"))),
+        "value": _as_float(zkb.get("totalValue")),
+        "labels": [label for label in (labels or []) if isinstance(label, str)]
+        if isinstance(labels, list)
+        else [],
+        "npc": _as_bool(zkb.get("npc")),
+        "solo": _as_bool(zkb.get("solo")),
+    }
+
+
+def _zkb_median(values: list[float]) -> float | None:
+    """中位数（**空集给 `None`**：中位数无定义，不能用 0 冒充）。"""
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return float(ordered[middle])
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def _zkb_aggregates(rows: list[dict]) -> dict:
+    """整页的聚合：总值 / 中位数 / 按船型分组 / 时间跨度（**原样相加，不取整**）。"""
+    values = [
+        float(row["value"])
+        for row in rows
+        if isinstance(row["value"], (int, float)) and not isinstance(row["value"], bool)
+    ]
+    buckets: dict[object, dict] = {}
+    for row in rows:
+        ship = row["ship"]
+        key = ship.get("type_id")
+        bucket = buckets.get(key)
+        if bucket is None:
+            bucket = buckets[key] = {"name": ship.get("name"), "count": 0, "value": 0.0}
+        bucket["count"] += 1
+        value = row["value"]
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            bucket["value"] += float(value)
+    by_ship = sorted(
+        buckets.values(), key=lambda bucket: (-bucket["count"], -bucket["value"], str(bucket["name"]))
+    )
+    times = [
+        row["killmail_time"]
+        for row in rows
+        if isinstance(row["killmail_time"], str)
+    ]
+    return {
+        "total_value": float(sum(values)),
+        "median_value": _zkb_median(values),
+        "by_ship": by_ship,
+        "time_span": {
+            "earliest": min(times) if times else None,
+            "latest": max(times) if times else None,
+        },
+    }
+
+
+def zkb_search(
+    *,
+    character: object = None,
+    corporation: object = None,
+    alliance: object = None,
+    ship: object = None,
+    solar_system: object = None,
+    region: object = None,
+    past_seconds: object = None,
+    page: object = 1,
+    side: object = ZKB_SIDE_BOTH,
+    limit: object = ZKB_LIMIT_DEFAULT,
+    requester: ZkbRequester | None = None,
+    clock: Callable[[], float] | None = None,
+    sleeper: Callable[[float], None] | None = None,
+    **common: object,
+) -> dict:
+    """查战报**列表**（谁 / 哪个公司 / 哪个联盟 / 哪种船 / 哪个星系 / 哪个区域）。
+
+    六个实体条件**可以同时给**（zkb 的 URL 段串联即 AND），例如「Sleipnir 在 Jita 附近
+    最近的损失」。时间维度**只能用 `past_seconds`**（zkb 已停用 startTime/endTime，
+    见第十三节开头的实测表）；更早的数据靠 `page` 往回翻。
+
+    Args:
+        character: 角色（名字或 id）。
+        corporation: 公司（名字或 id）。
+        alliance: 联盟（名字或 id）。
+        ship: 船型（名字或 id；名字走 ESI `/universe/ids/` 的 `inventory_types`）。
+        solar_system: 星系（名字或 id）。
+        region: 区域（名字或 id）。
+        past_seconds: 时间窗口（秒，正整数）；**只在显式给定时**才拼进 URL。
+        page: 页码（≥1；1 = 最新一页；单页最多 `ZKB_PAGE_SIZE` = 200 条）。
+        side: `kills` / `losses` / `both`（both = 两条路径各请求一次，合并去重）。
+        limit: 只截断返回的 `kills` 数组（1..200）；`count` / `aggregates` 仍按整页算。
+        requester / clock / sleeper: 测试注入点（生产不传）。
+        **common: 允许 `skill_tier` / `damage_profile` / `state_policy`（无影响）；
+            时间区间类参数（`startTime` 等）会被明确拒绝。
+
+    Returns:
+        成功时 `result`：
+
+        ```json
+        {"query": {"resolved": {"ship": {"id": 22444, "name": "Sleipnir"}},
+                   "side": "both", "past_seconds": 604800, "page": 1},
+         "count": 170,
+         "page": 1,
+         "kills": [{"killmail_id": 139265742, "killmail_time": "2026-10-18T19:29:03Z",
+                    "ship": {"type_id": 22444, "name": "Sleipnir", "group": "Command Ship"},
+                    "value": 397729064.05, "labels": ["pvp"], "npc": false, "solo": false}],
+         "aggregates": {"total_value": 123.4, "median_value": 5.6,
+                        "by_ship": [{"name": "Sleipnir", "count": 3, "value": 1.2}],
+                        "time_span": {"earliest": "...", "latest": "..."}},
+         "note": "list 级数据来自 zkb（无 items）；要明细请对具体 killmail_id 调 fit_killmail"}
+        ```
+
+        `meta` 里给 `source` / `page_size` / `min_interval_s` 与**本次真正请求过的 URL**
+        （排查「为什么是这些结果」时不用猜）。
+
+    失败时 `error.kind` ∈ `invalid_argument` / `unknown_entity` / `network_failed` /
+    `rate_limited` / `internal_error`（见 `INVALID_PATH_KIND` 的说明）。
+    """
+    try:
+        _zkb_check_common(common)
+        _check_choice("side", side, ZKB_SIDES)
+        selected_side = str(side)
+        page_number = _zkb_integer("page", page, default=1, minimum=1)
+        row_limit = _zkb_integer(
+            "limit", limit, default=ZKB_LIMIT_DEFAULT, minimum=1, maximum=ZKB_PAGE_SIZE
+        )
+        window = (
+            None
+            if past_seconds is None
+            else _zkb_integer("past_seconds", past_seconds, default=None, minimum=1)
+        )
+
+        resolved, filter_ids = _zkb_filters(
+            {
+                "character": character,
+                "corporation": corporation,
+                "alliance": alliance,
+                "ship": ship,
+                "solar_system": solar_system,
+                "region": region,
+            },
+            requester,
+        )
+        if not filter_ids:
+            # 裸的 /api/kills/ 是全服流式数据（重查询 + 无意义），不是一次检索。
+            raise _ApiFailure(
+                "invalid_argument",
+                "至少要给一个实体过滤条件（character / corporation / alliance / "
+                "ship / solar_system / region）",
+                field="filters",
+                hint={"accepted": [field for field, _segment in ZKB_FILTER_SEGMENTS]},
+            )
+
+        sides = (
+            (ZKB_SIDE_KILLS, ZKB_SIDE_LOSSES)
+            if selected_side == ZKB_SIDE_BOTH
+            else (selected_side,)
+        )
+        urls: list[str] = []
+        rows: list[dict] = []
+        seen: set[int] = set()
+        for one_side in sides:
+            url = zkb_url(
+                side=one_side,
+                filters=filter_ids,
+                past_seconds=window,
+                page=page_number,
+            )
+            urls.append(url)
+            payload = _zkb_request(
+                url, requester=requester, clock=clock, sleeper=sleeper
+            )
+            for item in _zkb_payload_rows(payload, url):
+                row = _zkb_kill_row(item)
+                if row is None or row["killmail_id"] in seen:
+                    continue  # 去重：side=both 时同一条可能同时出现在 kills / losses
+                seen.add(row["killmail_id"])
+                rows.append(row)
+
+        # 按时间倒序（zkb 自己也是倒序，但合并两条路径后必须自己排一次）；
+        # 时间缺失的行排到最后，用 killmail_id 兜底 —— id 单调递增，顺序仍然确定。
+        rows.sort(
+            key=lambda row: (row["killmail_time"] or "", row["killmail_id"]),
+            reverse=True,
+        )
+        aggregates = _zkb_aggregates(rows)
+        shown = rows[:row_limit]
+        note = ZKB_SEARCH_NOTE
+        if len(shown) < len(rows):
+            note = (
+                f"{ZKB_SEARCH_NOTE}（kills 已按 limit={row_limit} 截断到 {len(shown)} 条；"
+                f"count 与 aggregates 仍按整页 {len(rows)} 条计算）"
+            )
+
+        result = {
+            "query": {
+                "resolved": resolved,
+                "side": selected_side,
+                "past_seconds": window,
+                "page": page_number,
+            },
+            "count": len(rows),
+            "page": page_number,
+            "kills": shown,
+            "aggregates": aggregates,
+            "note": note,
+        }
+        meta = {
+            "spec_version": SPEC_VERSION,
+            "source": "zkillboard",
+            "page_size": ZKB_PAGE_SIZE,
+            "min_interval_s": ZKB_MIN_INTERVAL_S,
+            "urls": urls,
+        }
+        return _success(result, meta)
+    except _ApiFailure as exc:
+        return _failure(exc.payload())
+    except Exception as exc:  # noqa: BLE001 - 边界层：任何异常都不得裸抛给 agent
+        return _failure(
+            {
+                "kind": "internal_error",
+                "message": "接口层内部异常，本次没有可用结果",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+        )
+
+
 __all__ = [
     "CACHE_MAX_ENTRIES",
+    "CRIMINAL_SECURITY_THRESHOLD",
+    "DAMAGE_CHECK_MATCH",
+    "DAMAGE_CHECK_MISMATCH",
     "DAMAGE_PROFILES",
     "DAMAGE_PROFILE_UNIFORM",
+    "ESI_ID_CATEGORIES",
+    "ESI_UNIVERSE_IDS_API",
+    "ESI_UNIVERSE_NAMES_API",
+    "ESI_UNIVERSE_SYSTEM_API",
+    "HIGHSEC_THRESHOLD",
+    "KILLMAIL_EHP_NOTE",
+    "KILLMAIL_EHP_PATH",
+    "LOWSEC_THRESHOLD",
     "NETWORK_TIMEOUT_S",
+    "NOT_A_KILLMAIL_KIND",
+    "SECURITY_BAND_HIGHSEC",
+    "SECURITY_BAND_LOWSEC",
+    "SECURITY_BAND_NULLSEC",
+    "SECURITY_BAND_WORMHOLE",
     "SKILL_TIERS",
     "SKILL_TIER_ALL4",
     "SKILL_TIER_ALL5",
     "SPEC_VERSION",
     "STATE_POLICIES",
     "STATE_POLICY_ENGINE_DEFAULT",
+    "UNIVERSE_NAMES_MAX_IDS",
     "USER_AGENT",
+    "WEAPON_FAMILIES",
+    "WEAPON_FAMILY_OTHER",
+    "ZKB_API_ROOT",
+    "ZKB_FILTER_SEGMENTS",
+    "ZKB_ID_CACHE_MAX",
+    "ZKB_IGNORED_PARAMETERS",
+    "ZKB_LIMIT_DEFAULT",
+    "ZKB_MIN_INTERVAL_S",
+    "ZKB_PAGE_SIZE",
+    "ZKB_RATE_LIMIT_STATUSES",
+    "ZKB_REJECTED_PARAMETERS",
+    "ZKB_SEARCH_NOTE",
+    "ZKB_SIDES",
+    "ZKB_SIDE_BOTH",
+    "ZKB_SIDE_KILLS",
+    "ZKB_SIDE_LOSSES",
+    "ZKB_USER_AGENT",
     "cache_stats",
     "clear_caches",
     "fetch_killmail",
+    "fetch_killmail_report",
     "fit_detail",
     "fit_get",
     "fit_index",
+    "fit_killmail",
     "fit_view",
     "get_engine",
     "get_index",
     "killmail_ref_from_url",
     "parse_fit",
+    "universe_names",
+    "universe_system",
+    "weapon_family",
+    "zkb_search",
+    "zkb_url",
 ]

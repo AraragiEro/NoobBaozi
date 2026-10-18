@@ -14,9 +14,12 @@
 8. **命令行开关**：默认仍是 stdio（`_parse_cli([])`）、`--transport http --host 0.0.0.0
    --port N` 真能起服务、`0.0.0.0` 绑定的服务用 `127.0.0.1` 连得上、stdout 一个字节没有。
 
-**断言非永真**：`test_health_tools_check_is_not_vacuous` 把 `/health` 的 `tools` 从 5 改成
-4，配对断言「改之前通过 / 改之后 `check_health` 必须抛」—— 证明这条断言真的在断言
-（PROGRESS 第 180 / 196 条的教训：空转的断言比没有断言更危险）。
+**断言非永真**：`test_health_tools_check_is_not_vacuous` 把 `/health` 的 `tools` 改成
+「`len(TOOL_NAMES) - 1`」，配对断言「改之前通过 / 改之后 `check_health` 必须抛」——
+证明这条断言真的在断言（PROGRESS 第 180 / 196 条的教训：空转的断言比没有断言更危险）。
+
+**工具条数不写字面量**：`TOOL_NAMES` 直接取 `mcp_server.TOOL_NAMES`（单一真源），
+所有「条数」都从 `len(TOOL_NAMES)` 算 —— 以后加工具，本文件一行都不用改。
 
 绝大多数用例起**真实 HTTP 服务**（后台线程 + 随机端口 `0`）并用真实 `http.client` 连，
 只有「命令行入口本身」必须起子进程。
@@ -42,7 +45,13 @@ EVEFIT_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_ROOT = EVEFIT_ROOT.parent
 EFT_PATH = EVEFIT_ROOT / "acceptance" / "fixtures" / "f1-hecate-killmail.eft"
 
-TOOL_NAMES = ("fit_parse", "fit_index", "fit_view", "fit_get", "fit_detail")
+TOOL_NAMES = mcp_server.TOOL_NAMES
+"""工具清单**从 `mcp_server.TOOL_NAMES` 派生**（本文件不写任何工具名 / 条数字面量）。
+
+加一个工具时这里一行都不用改 —— 这正是 T-50 把「工具清单」收敛成单一真源的目的。
+断言「名字集合 == `TOOL_NAMES`」而不是「条数 == 5」：前者能抓出改名 / 漏注册，
+后者只会在加工具时制造一次无意义的红灯。
+"""
 SPEED_PATH = "mobility.speed_mps"
 
 
@@ -195,8 +204,8 @@ def test_post_initialize_returns_session_header(http_server: str) -> None:
     }
 
 
-def test_tools_list_returns_five_tools(http_server: str) -> None:
-    """`tools/list` → 五个工具，顺序 = 推荐调用顺序。"""
+def test_tools_list_matches_the_single_source_of_truth(http_server: str) -> None:
+    """`tools/list` 的名字与顺序 == `mcp_server.TOOL_NAMES`（不比对数字）。"""
     _result, _payload, session = _initialize(http_server)
     result, payload = _rpc(http_server, "tools/list", request_id=2, session=session)
     assert result.status == 200
@@ -238,18 +247,18 @@ def test_session_is_reused_and_unknown_id_starts_a_new_one(http_server: str) -> 
     for _ in range(2):
         result, payload = _rpc(http_server, "tools/list", session=session)
         assert result.status == 200
-        assert len(payload["result"]["tools"]) == 5
+        assert len(payload["result"]["tools"]) == len(TOOL_NAMES)
         assert mcp_http.MCP_SESSION_HEADER not in result.headers, "已有会话时不该再发会话头"
 
     # 不认识的 id：回 200（新会话跑完就丢），不是 404
     bogus, payload = _rpc(http_server, "tools/list", session="0" * 32)
     assert bogus.status == 200
-    assert len(payload["result"]["tools"]) == 5
+    assert len(payload["result"]["tools"]) == len(TOOL_NAMES)
 
     # 完全不带头：同样按新会话处理
     anonymous, payload = _rpc(http_server, "tools/list")
     assert anonymous.status == 200
-    assert len(payload["result"]["tools"]) == 5
+    assert len(payload["result"]["tools"]) == len(TOOL_NAMES)
 
 
 # =============================================================================
@@ -320,7 +329,7 @@ def test_accept_event_stream_returns_sse(http_server: str) -> None:
     text = result.text
     assert text.endswith("\n\n"), f"SSE 帧必须以空行结束：{text[-40:]!r}"
     assert payload["id"] == 3
-    assert len(payload["result"]["tools"]) == 5
+    assert len(payload["result"]["tools"]) == len(TOOL_NAMES)
     # 同一请求，不带 Accept 时回 JSON（两条路走同一个 dispatch，结果同构）
     plain, plain_payload = _rpc(http_server, "tools/list", request_id=3, session=session)
     assert "application/json" in plain.content_type
@@ -356,24 +365,26 @@ def test_health_has_the_six_contract_fields(http_server: str) -> None:
     assert payload["server"] == mcp_server.SERVER_NAME
     assert payload["version"] == mcp_server.SERVER_VERSION
     assert payload["transport"] == "http"
-    assert payload["tools"] == len(mcp_server._TOOL_ORDER) == 5
+    assert payload["tools"] == mcp_server.TOOL_COUNT == len(TOOL_NAMES)
+    assert len(TOOL_NAMES) >= 7, f"本轮至少 7 个工具，实际 {TOOL_NAMES}"
     assert isinstance(payload["sessions"], int) and payload["sessions"] >= 1
 
 
 def test_health_tools_check_is_not_vacuous(
     http_server: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """**断言非永真**：`/health` 的 `tools` 改成 4 → `check_health` 必须变红。"""
+    """**断言非永真**：`/health` 的 `tools` 改成「少一个」→ `check_health` 必须变红。"""
+    expected = len(TOOL_NAMES)
     # 改之前：通过
     healthy = _request(http_server, "GET", mcp_http.HEALTH_PATH).json()
-    client_smoke_http.check_health(healthy, expected_tools=5)
+    client_smoke_http.check_health(healthy, expected_tools=expected)
 
-    # 把服务端报的条数改成 4（模拟「契约被改坏」）：字段检查必须发现
-    monkeypatch.setattr(mcp_http, "tool_count", lambda: 4)
+    # 把服务端报的条数改成「少一个」（模拟「契约被改坏」）：字段检查必须发现
+    monkeypatch.setattr(mcp_http, "tool_count", lambda: expected - 1)
     broken = _request(http_server, "GET", mcp_http.HEALTH_PATH).json()
-    assert broken["tools"] == 4
+    assert broken["tools"] == expected - 1
     with pytest.raises(AssertionError):
-        client_smoke_http.check_health(broken, expected_tools=5)
+        client_smoke_http.check_health(broken, expected_tools=expected)
 
 
 # =============================================================================
@@ -575,7 +586,7 @@ def test_handler_exception_is_500_and_service_survives(
     # 服务仍可用：同一个端口、同一条路径，再调一次成功
     healthy, payload = _rpc(http_server, "tools/list")
     assert healthy.status == 200
-    assert len(payload["result"]["tools"]) == 5
+    assert len(payload["result"]["tools"]) == len(TOOL_NAMES)
     _result, envelope = _call(http_server, "fit_get", {"fit": eft_text, "path": SPEED_PATH})
     assert envelope["ok"] is True
 
@@ -712,7 +723,7 @@ def test_http_transport_cli_serves_health_via_loopback() -> None:
             f"服务没在 180s 内就绪（pid={process.pid}, rc={process.poll()}, "
             f"轮询 {attempts} 次）"
         )
-        client_smoke_http.check_health(health, expected_tools=5)
+        client_smoke_http.check_health(health, expected_tools=len(TOOL_NAMES))
         assert health["transport"] == "http"
         assert health["sessions"] == 0, "还没握手，会话数应为 0"
     finally:

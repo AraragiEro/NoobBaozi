@@ -10,7 +10,8 @@
 3. **业务错误不是协议错误**：`ok:false` 走 `result` + `isError:true`，
    `structuredContent` 里能读到 `kind` / `candidates` / `hint`；
 4. **`structuredContent` 按协商版本开关**：`2025-06-18` 起才有，`2024-11-05` 不该有；
-5. **真起子进程**：真客户端连上、五个工具都 `ok:true`，且 **stdout 里没有一行不是
+5. **真起子进程**：真客户端连上、五个工具都 `ok:true`（冒烟用例表覆盖 5 个；
+   `fit_killmail` 由本文件的进程内用例单独钉住），且 **stdout 里没有一行不是
    JSON-RPC**（stderr 与 stdout 分开读）。
 
 **断言非永真**：`test_smoke_goes_red_when_tool_name_is_wrong` 故意把用例里的工具名
@@ -37,9 +38,19 @@ from evefit.mcp import client_smoke
 EVEFIT_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_ROOT = EVEFIT_ROOT.parent
 EFT_PATH = EVEFIT_ROOT / "acceptance" / "fixtures" / "f1-hecate-killmail.eft"
+KILLMAIL_ZKB_PATH = EVEFIT_ROOT / "tests" / "fixtures" / "killmail" / "139239127-zkb.json"
+"""`fit_killmail` 的真实样本（zkillboard 原始响应：79 attackers + zkb 价值块）。"""
 
 SIX_VIEWS = ("firepower", "survivability", "mobility", "resources", "constraints", "stability")
-TOOL_NAMES = ("fit_parse", "fit_index", "fit_view", "fit_get", "fit_detail")
+
+TOOL_NAMES = mcp_server.TOOL_NAMES
+"""工具清单**直接取 `mcp_server.TOOL_NAMES`**（单一真源）：本文件不写工具名 / 条数字面量。
+
+加一个工具时这里一行都不用改 —— 断言的是「`tools/list` == 清单」「清单里每个工具都有
+title / description / schema」，而不是「一共有几个」。
+"""
+FIT_TOOLS = tuple(name for name in TOOL_NAMES if name.startswith("fit_"))
+"""配装类工具（有 `fit` 入参的那几个）；`zkb_search` 不在其中（它查的是列表）。"""
 
 
 # =============================================================================
@@ -136,11 +147,23 @@ def _run_script(argv: list[str], *, timeout: float = 300.0) -> subprocess.Comple
 # =============================================================================
 
 
-def test_tools_list_has_five_tools_in_order() -> None:
-    """五个工具，名字与顺序照 §10.1（顺序 = 推荐调用顺序）。"""
+def test_tools_list_is_the_single_source_of_truth() -> None:
+    """`tools/list` **就是 `TOOL_NAMES` 本身**（名字、顺序、条数三者同源）。
+
+    这条是 T-50 的收敛点：以前这里断言「恰好五个名字」，加一个工具就得改测试；
+    现在断言「广告出去的就是清单本身」——加工具只改 `mcp_server.TOOL_NAMES` 一处，
+    本文件不动。顺带钉住 `fit_killmail` 紧跟在 `fit_parse` 后面（战报先 parse 再拿上下文）。
+    """
     response = _rpc("tools/list")
     tools = response["result"]["tools"]
-    assert [tool["name"] for tool in tools] == list(TOOL_NAMES)
+    advertised = [tool["name"] for tool in tools]
+    assert advertised == list(TOOL_NAMES), "tools/list 必须就是 TOOL_NAMES 本身（单一真源）"
+    assert set(advertised) == set(mcp_server._HANDLERS)
+    assert set(advertised) == set(mcp_server._TOOL_DESCRIPTIONS)
+    assert mcp_server.TOOL_COUNT == len(TOOL_NAMES) == len(advertised)
+    assert mcp_server._TOOL_ORDER is mcp_server.TOOL_NAMES, "旧别名必须是同一个对象，不是第二份清单"
+    assert len(advertised) >= 7, f"本轮至少 7 个工具，实际 {advertised}"
+    assert advertised.index("fit_killmail") == advertised.index("fit_parse") + 1
     for tool in tools:
         assert tool["title"], f"{tool['name']} 缺 title"
         assert len(tool["description"]) > 40, f"{tool['name']} 的 description 太短"
@@ -148,9 +171,13 @@ def test_tools_list_has_five_tools_in_order() -> None:
         assert tool["annotations"]["readOnlyHint"] is True
 
 
-def test_every_tool_requires_a_string_fit() -> None:
-    """`fit` 是五个工具的共同必填项，且声明成 string + 长度上下限。"""
-    for name in TOOL_NAMES:
+def test_every_fit_tool_requires_a_string_fit() -> None:
+    """`fit` 是**配装类工具**的共同必填项，且声明成 string + 长度上下限。
+
+    `zkb_search` 不在这条里：它没有 `fit`（查的是列表，不是配装）—— 见
+    `test_zkb_search_schema`。
+    """
+    for name in FIT_TOOLS:
         schema = _tool_spec(name)["inputSchema"]
         assert "fit" in schema["required"], f"{name} 没把 fit 标成必填"
         fit = schema["properties"]["fit"]
@@ -202,8 +229,8 @@ def test_fit_detail_has_optional_view_and_path() -> None:
 
 
 def test_tools_without_view_do_not_advertise_it() -> None:
-    """`fit_parse` / `fit_index` 不该带 `view` 参数（别让 agent 以为能传）。"""
-    for name in ("fit_parse", "fit_index"):
+    """`fit_parse` / `fit_killmail` / `fit_index` 不该带 `view` 参数（别让 agent 以为能传）。"""
+    for name in ("fit_parse", "fit_killmail", "fit_index"):
         properties = _tool_spec(name)["inputSchema"]["properties"]
         assert "view" not in properties
     assert "path" not in _tool_spec("fit_parse")["inputSchema"]["properties"]
@@ -525,7 +552,9 @@ def test_stdio_client_round_trip_and_stdout_purity(eft_text: str) -> None:
         assert handshake["protocolVersion"] == client_smoke.PROTOCOL_VERSION
         client.notify("notifications/initialized")
         listing = client.request("tools/list")
-        assert [tool["name"] for tool in listing["tools"]] == list(TOOL_NAMES)
+        advertised = [tool["name"] for tool in listing["tools"]]
+        assert advertised == list(mcp_server._TOOL_ORDER), "tools/list 必须就是注册表本身"
+        assert [name for name in advertised if name in TOOL_NAMES] == list(TOOL_NAMES)
 
         for tool, arguments in (
             ("fit_parse", {"fit": eft_text}),
@@ -617,3 +646,183 @@ def test_server_survives_garbage_input() -> None:
         mcp_server.INVALID_REQUEST,
         mcp_server.INVALID_REQUEST,
     ]
+
+
+# =============================================================================
+# 六、`fit_killmail`（T-49：战报上下文）
+# =============================================================================
+
+
+def _offline_system(monkeypatch: pytest.MonkeyPatch) -> None:
+    """星系查询打桩（真实 ESI 快照：30002537 = Amamake，lowsec）+ 清进程级缓存。"""
+    monkeypatch.setattr(api, "universe_names", lambda ids: {30002537: "Amamake"})
+    monkeypatch.setattr(
+        api,
+        "universe_system",
+        lambda system_id: {
+            "name": "Amamake",
+            "security_status": 0.43876123428344727,
+            "security_class": "E",
+            "has_class": True,
+        },
+    )
+    api.clear_caches()
+
+
+def test_fit_killmail_schema_and_wording() -> None:
+    """`fit_killmail` 只有 `fit` + 三个共同参数；title / description 写明「别开网页」。"""
+    spec = _tool_spec("fit_killmail")
+    assert "战报上下文" in spec["title"]
+    assert "谁打的" in spec["title"]
+    assert "zkillboard 网页" in spec["description"], "description 必须禁止 agent 自己开网页"
+    assert "fit_parse" in spec["description"] and "fit_killmail" in spec["description"]
+    schema = spec["inputSchema"]
+    assert schema["required"] == ["fit"]
+    assert set(schema["properties"]) == {
+        "fit",
+        "skill_tier",
+        "damage_profile",
+        "state_policy",
+    }
+
+
+def test_fit_killmail_returns_battle_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`tools/call fit_killmail` → 战报上下文（人数 / 价值 / 伤害校验 / 比率）齐活。"""
+    zkb_text = KILLMAIL_ZKB_PATH.read_text(encoding="utf-8")
+    _offline_system(monkeypatch)
+
+    call_result = _call("fit_killmail", {"fit": zkb_text})
+    envelope = _envelope(call_result)
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    assert result["killmail"]["killmail_id"] == 139239127
+    assert result["killmail"]["solar_system"] == {"id": 30002537, "name": "Amamake"}
+    assert result["killmail"]["value"]["total"] == 76942042803.52
+    assert result["attackers"]["count"] == 79
+    assert result["attackers"]["damage_check"] == "matches_victim"
+    assert result["context"]["damage_taken_vs_ehp"]["ratio"] is not None
+    # structuredContent 就是同一个信封；成功时不该有 isError
+    assert call_result.get("structuredContent") == envelope
+    assert "isError" not in call_result
+
+
+def test_fit_killmail_on_a_fit_is_a_business_error() -> None:
+    """给 EFT → **业务错误**（`isError:true` + `not_a_killmail`），不是协议错误。"""
+    eft = EFT_PATH.read_text(encoding="utf-8")
+    call_result = _call("fit_killmail", {"fit": eft})
+    envelope = _envelope(call_result)
+    assert envelope["ok"] is False
+    assert envelope["error"]["kind"] == "not_a_killmail"
+    assert envelope["error"]["hint"]
+    assert call_result["isError"] is True
+
+
+# =============================================================================
+# 七、`zkb_search`（T-50：战报列表检索）
+# =============================================================================
+
+ZKB_FIXTURES = EVEFIT_ROOT / "tests" / "fixtures" / "zkb"
+"""离线样本（**真实响应**：`losses/shipTypeID/22444/pastSeconds/604800` 与
+ESI `/universe/ids/`，裁剪说明见 `tests/fixtures/zkb/README.md`）。"""
+
+
+def _zkb_fixture(name: str) -> object:
+    return json.loads((ZKB_FIXTURES / name).read_text(encoding="utf-8"))
+
+
+@pytest.fixture()
+def zkb_offline(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """把**生产请求器**换成 fixture（不联网），并清掉限流时间戳（否则要真等 1.2 s）。
+
+    换的是 `api._zkb_default_requester` 而不是 `api.zkb_search`：这样 MCP → api →
+    请求器整条链路都真的跑了一遍，只有「最后那一跳」是假的。
+    """
+    losses = _zkb_fixture("losses-shipTypeID-22444-pastSeconds-604800.json")
+    ids = _zkb_fixture("esi-ids-sleipnir-hecate.json")
+    seen: list[str] = []
+
+    def fake(url: str, body: object | None = None) -> object:
+        seen.append(url)
+        return ids if body is not None else losses
+
+    api._reset_zkb_state()
+    monkeypatch.setattr(api, "_zkb_default_requester", fake)
+    yield seen
+    api._reset_zkb_state()
+
+
+def test_zkb_search_schema_has_no_fit() -> None:
+    """`zkb_search` 的 schema：**没有 `fit`**、没有必填项、`side` enum 与 api 同源。"""
+    spec = _tool_spec("zkb_search")
+    assert "战报列表" in spec["title"]
+    for token in ("past_seconds", "startTime", "fit_killmail", "AND"):
+        assert token in spec["description"], f"description 必须写清 {token}"
+    schema = spec["inputSchema"]
+    assert schema["required"] == []
+    assert "fit" not in schema["properties"], "zkb_search 不是配装工具，不该要求 fit"
+    assert set(schema["properties"]) == {
+        "character",
+        "corporation",
+        "alliance",
+        "ship",
+        "solar_system",
+        "region",
+        "past_seconds",
+        "page",
+        "side",
+        "limit",
+    }
+    assert schema["properties"]["side"]["enum"] == list(api.ZKB_SIDES)
+    assert schema["properties"]["side"]["default"] == api.ZKB_SIDE_BOTH
+    assert schema["properties"]["limit"]["maximum"] == api.ZKB_PAGE_SIZE
+    assert schema["properties"]["limit"]["default"] == api.ZKB_LIMIT_DEFAULT
+    assert "pastSeconds" not in schema["properties"], "参数名是 past_seconds，URL 段才是 pastSeconds"
+
+
+def test_zkb_search_call_round_trip(zkb_offline: list[str]) -> None:
+    """`tools/call zkb_search` → 列表 + 聚合；**URL 用 pastSeconds**，不是起止时间。"""
+    call_result = _call(
+        "zkb_search",
+        {"ship": "Sleipnir", "past_seconds": 604800, "side": "losses"},
+    )
+    envelope = _envelope(call_result)
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    assert result["count"] == 12
+    assert result["query"]["resolved"]["ship"] == {"id": 22444, "name": "Sleipnir"}
+    assert zkb_offline == [
+        api.ESI_UNIVERSE_IDS_API,
+        "https://zkillboard.com/api/losses/shipTypeID/22444/pastSeconds/604800/",
+    ], f"URL 拼错：{zkb_offline}"
+    assert not any("startTime" in url or "endTime" in url for url in zkb_offline)
+    first = result["kills"][0]
+    assert first["killmail_id"] == 139265742
+    assert first["ship"]["name"] == "Sleipnir"
+    assert first["value"] == 397729064.05
+    assert "要明细请对具体 killmail_id 调 fit_killmail" in result["note"]
+    assert call_result.get("structuredContent") == envelope
+    assert "isError" not in call_result
+
+
+def test_zkb_search_time_range_is_rejected_as_business_error(
+    zkb_offline: list[str],
+) -> None:
+    """传 `startTime` → **业务错误**（`invalid_argument`），且**一次请求都没发**。"""
+    call_result = _call(
+        "zkb_search", {"ship": 22444, "startTime": 20261010, "endTime": 20261012}
+    )
+    envelope = _envelope(call_result)
+    assert envelope["ok"] is False
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert "past_seconds" in envelope["error"]["hint"]["use"]
+    assert call_result["isError"] is True
+    assert zkb_offline == [], f"被拒绝的查询不该出网，实际发了 {zkb_offline}"
+
+
+def test_zkb_search_without_filters_is_invalid_argument(zkb_offline: list[str]) -> None:
+    """一个过滤条件都不给 → `invalid_argument`（裸的 /api/kills/ 不是一次检索）。"""
+    envelope = _envelope(_call("zkb_search", {}))
+    assert envelope["ok"] is False
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["hint"]["accepted"]
+    assert zkb_offline == []

@@ -19,9 +19,9 @@ python -m evefit.mcp.client_smoke_http --base-url http://127.0.0.1:18080
 |---|---|
 | `initialize` | `200`；**响应头有 `Mcp-Session-Id`**；协商到 `2025-06-18`；带 `instructions` |
 | `notifications/initialized` | **`202` 且 body 为空**（通知绝不回包） |
-| `tools/list` | 五个工具，名字/顺序照 §10.1 |
+| `tools/list` | 名字集合 == `mcp_server.TOOL_NAMES`（**不写数字**：加工具不用改这里） |
 | `ping`（`Accept: text/event-stream`） | `200` + `Content-Type: text/event-stream` + 至少一条 `data:` 行 |
-| 五个工具各一次 | 与 stdio 冒烟**同一张用例表**（`client_smoke.build_cases()`），`ok:true` |
+| 用例表各一次 | 与 stdio 冒烟**同一张用例表**（`client_smoke.build_cases()`），`ok:true` |
 | 两个负例 | `invalid_path` / `unknown_module`，都是 `isError:true` 的业务错误 |
 | `GET /health` | 六个字段齐全，`transport == "http"`，`tools == tools/list 的条数` |
 
@@ -284,8 +284,28 @@ def _message_from(result: HttpResult, *, accept: str) -> dict:
     return message
 
 
-def check_health(payload: dict, *, expected_tools: int = 5) -> None:
-    """`/health` 的字段契约（**容器 healthcheck 依赖它，字段名不许改**）。"""
+def expected_tool_names() -> tuple[str, ...]:
+    """本仓库服务该给的工具清单（**从 `mcp_server.TOOL_NAMES` 派生**，绝不抄数字）。
+
+    冒烟脚本可能指向**别的机器上的旧服务**，所以导入失败时不报错、返回空元组 ——
+    调用方会退化成「清单非空且包含用例里的工具」这种较弱但仍有意义的断言。
+    """
+    try:
+        from evefit.mcp_server import TOOL_NAMES
+    except Exception:  # noqa: BLE001 - 客户端不该因为「本仓库代码导入失败」而崩
+        return ()
+    return tuple(TOOL_NAMES)
+
+
+def check_health(payload: dict, *, expected_tools: int | None = None) -> None:
+    """`/health` 的字段契约（**容器 healthcheck 依赖它，字段名不许改**）。
+
+    Args:
+        expected_tools: 期望的工具条数；`None` 表示「取 `mcp_server.TOOL_NAMES` 的长度」
+            —— 这样加工具时这里不用改任何字面量。
+    """
+    if expected_tools is None:
+        expected_tools = len(expected_tool_names())
     missing = [field for field in HEALTH_FIELDS if field not in payload]
     _require(not missing, f"/health 缺字段 {missing}（实际 {sorted(payload)}）")
     _require(payload["ok"] is True, f"/health ok 应为 true，实际 {payload['ok']!r}")
@@ -462,7 +482,14 @@ def run(
             for tool in (listing.get("result") or {}).get("tools") or []
             if isinstance(tool, dict)
         ]
-        _require(len(tools) == 5, f"tools/list 应给 5 个工具，实际 {len(tools)} 个：{tools}")
+        _require(bool(tools), f"tools/list 必须返回非空工具列表，实际 {tools!r}")
+        expected = expected_tool_names()
+        if expected:
+            _require(
+                set(tools) == set(expected),
+                f"tools/list 的名字集合必须等于 mcp_server.TOOL_NAMES：\n"
+                f"  实际 {tools}\n  期望 {list(expected)}",
+            )
         for case in cases:
             _require(case["tool"] in tools, f"tools/list 里没有 {case['tool']}（实际 {tools}）")
         reporter.ok(
@@ -491,7 +518,7 @@ def run(
     except Exception as exc:  # noqa: BLE001
         reporter.fail("ping (SSE)", (time.perf_counter() - started) * 1000.0, f"{type(exc).__name__}: {exc}")
 
-    # -- 5) 五个工具 + 两个负例（用例表与 stdio 冒烟同源）--------------------
+    # -- 5) 用例表（每个工具各一次 + 两个负例；与 stdio 冒烟同源）-----------
     for case in cases:
         started_call = time.perf_counter()
         try:
@@ -526,7 +553,7 @@ def run(
     started = time.perf_counter()
     try:
         _health_result, health = client.health()
-        check_health(health, expected_tools=len(tools) or 5)
+        check_health(health, expected_tools=len(tools) or len(expected_tool_names()))
         # 冒烟里额外一条：**刚刚握过手**，所以会话数至少是 1（顺便证明会话是真被服务端记着的）
         _require(
             health["sessions"] >= 1,
@@ -548,7 +575,7 @@ def run(
             for failure in reporter.failures:
                 print(f"  - {failure}")
         else:
-            print(f"PASS  {total}/{total}（握手 + 通知 + 清单 + SSE + 五个工具 + 两个负例 + /health）")
+            print(f"PASS  {total}/{total}（握手 + 通知 + 清单 + SSE + 用例表 + /health）")
     return not reporter.failures
 
 

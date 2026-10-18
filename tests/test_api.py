@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import copy
 import json
+import statistics
 import urllib.error
 from pathlib import Path
 
@@ -557,3 +558,656 @@ def test_json_envelope_is_serialisable(eft_text: str) -> None:
         api.fit_index("[Hecate, x]\nDamage Controll II"),
     ):
         json.dumps(envelope, ensure_ascii=False)  # 不抛异常即通过
+
+
+# =============================================================================
+# 七、战报上下文（`fit_killmail`）：T-49
+# =============================================================================
+#
+# 样本来源（**真实响应**，不是编的）：
+#   `curl https://zkillboard.com/api/killID/139239127/`              -> 139239127-zkb.json
+#   `curl https://esi.evetech.net/latest/killmails/139239127/<hash>/` -> 139239127-esi.json
+# 两份都是 2026-10-17 22:31:32Z 那条 Sarathiel（Dreadnought, 87381）被 79 人打掉的原文：
+# zkillboard 那份**有** `zkb` 价值块、`attackers` 里**没有** `items`；ESI 那份相反。
+# `139239127-esi-mismatch.json` 是**故意改坏**的副本（`victim.damage_taken` -1），
+# 专门用来证明 `damage_check` 不是恒返回 matches_victim。
+#
+# 星系名 / 安全等级在测试里**一律打桩**（`_offline_system`），值取自真实 ESI：
+# 30002537 = Amamake，security_status = 0.43876123428344727，security_class = "E"。
+
+KILLMAIL_FIXTURES = EVEFIT_ROOT / "tests" / "fixtures" / "killmail"
+KILLMAIL_ZKB_PATH = KILLMAIL_FIXTURES / "139239127-zkb.json"
+KILLMAIL_ESI_PATH = KILLMAIL_FIXTURES / "139239127-esi.json"
+KILLMAIL_MISMATCH_PATH = KILLMAIL_FIXTURES / "139239127-esi-mismatch.json"
+
+KILLMAIL_ID = 139239127
+KILLMAIL_HASH = "fdd6f14f8620ba2d1e9c81eb2e53d202b3a010a0"
+SOLAR_SYSTEM_ID = 30002537
+
+AMAMAKE = {
+    "name": "Amamake",
+    "security_status": 0.43876123428344727,
+    "security_class": "E",
+    "has_class": True,
+}
+"""真实 ESI 快照（`GET /universe/systems/30002537/`）：lowsec，类名 `E`。"""
+
+
+def _offline_system(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """把星系查询换成离线桩（名字 + 安全等级都来自上面的真实快照），返回被查的 system id。
+
+    顺带 `clear_caches()`：结果缓存与星系名缓存都是**进程级**的，不清会让「上一个用例
+    造出来的缓存」悄悄变成这个用例的前提。
+    """
+    calls: list[int] = []
+
+    def fake_system(system_id: int) -> dict:
+        calls.append(system_id)
+        return dict(AMAMAKE)
+
+    monkeypatch.setattr(
+        api, "universe_names", lambda ids: {SOLAR_SYSTEM_ID: AMAMAKE["name"]}
+    )
+    monkeypatch.setattr(api, "universe_system", fake_system)
+    api.clear_caches()
+    return calls
+
+
+def test_fit_killmail_reports_the_whole_battle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """真实战报（zkb 原文）→ 价值 / 星系 / 参战方 / 最终一击 / 伤害校验，一项不少。"""
+    text = KILLMAIL_ZKB_PATH.read_text(encoding="utf-8")
+    calls = _offline_system(monkeypatch)
+
+    out = api.fit_killmail(text)
+    assert out["ok"] is True, out
+    result = out["result"]
+    killmail = result["killmail"]
+
+    assert killmail["killmail_id"] == KILLMAIL_ID
+    assert killmail["killmail_time"] == "2026-10-17T22:31:32Z"
+    assert killmail["solar_system"] == {"id": SOLAR_SYSTEM_ID, "name": "Amamake"}
+    assert calls == [SOLAR_SYSTEM_ID], "星系只该查一次"
+    assert killmail["security"]["status"] == AMAMAKE["security_status"]
+    assert killmail["security"]["band"] == "lowsec"
+    assert killmail["value"] == {
+        "fitted": 76815307221.7,
+        "dropped": 29383036870.34,
+        "destroyed": 47559005933.18,
+        "total": 76942042803.52,
+    }
+    assert killmail["flags"] == {"npc": False, "solo": False, "awox": False, "points": 1}
+    assert "capital" in killmail["labels"]
+
+    victim = result["victim"]
+    assert victim["damage_taken"] == 6558773
+    assert victim["ship"] == {
+        "type_id": 87381,
+        "name": "Sarathiel",
+        "group": "Dreadnought",
+    }
+
+    attackers = result["attackers"]
+    assert attackers["count"] == 79
+    assert attackers["damage_total"] == victim["damage_taken"] == 6558773
+    assert attackers["damage_check"] == "matches_victim"
+    assert "damage_diff" not in attackers, "相等时不该给 diff"
+
+    final = attackers["final_blow"]
+    assert final is not None, "这条战报有 final_blow=true 的攻击者"
+    assert final["ship"] == {
+        "type_id": 73787,
+        "name": "Naglfar Fleet Issue",
+        "group": "Dreadnought",
+    }
+    assert final["weapon"]["group"] == "Projectile Weapon"
+    assert final["security_status"] == pytest.approx(-7.6)
+
+    for key in ("by_ship_group", "by_weapon_family"):
+        rows = attackers[key]
+        assert rows, f"{key} 不该为空"
+        assert sum(row["damage_pct"] for row in rows) == pytest.approx(1.0, abs=1e-4)
+        assert [row["damage"] for row in rows] == sorted(
+            (row["damage"] for row in rows), reverse=True
+        ), f"{key} 应按伤害降序"
+    assert {row["group"] for row in attackers["by_ship_group"]} >= {"Dreadnought", "Battleship"}
+    assert {row["family"] for row in attackers["by_weapon_family"]} <= set(api.WEAPON_FAMILIES)
+
+    security = attackers["security"]
+    assert security["min"] == pytest.approx(-10.0)
+    assert security["max"] == pytest.approx(5.0)
+    assert security["criminal_count"] == 9, "security_status <= -5 的才算 criminal"
+
+    assert result["killmail_source"] == "local"
+    assert out["meta"]["killmail_source"] == "local"
+    assert out["meta"]["source_format"] == "killmail"
+
+
+def test_fit_killmail_ehp_comes_from_the_projection_layer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`context.ehp_mixed` 与 `fit_get("survivability.ehp_mixed")` **逐位相同**（接口层不重算）。"""
+    text = KILLMAIL_ZKB_PATH.read_text(encoding="utf-8")
+    _offline_system(monkeypatch)
+
+    out = api.fit_killmail(text)
+    assert out["ok"] is True, out
+    context = out["result"]["context"]
+    vs_ehp = context["damage_taken_vs_ehp"]
+    reference = api.fit_get(text, api.KILLMAIL_EHP_PATH)["result"]
+    assert vs_ehp["ehp_mixed"] == reference["value"]
+    assert vs_ehp["ehp_provenance"] == reference["provenance"]
+    assert vs_ehp["damage_taken"] == 6558773
+    assert vs_ehp["ratio"] == pytest.approx(6558773 / reference["value"], abs=1e-3)
+    assert "不给生死结论" in context["note"]
+
+
+def test_fit_killmail_is_not_vacuous_on_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**断言非永真**：把 `damage_check` 恒返回 matches_victim，这条必须变红。
+
+    mismatch 样本 = 真实 ESI 响应把 `victim.damage_taken` 减 1（Σattackers 还是 6558773）。
+    """
+    _offline_system(monkeypatch)
+
+    matched = api.fit_killmail(KILLMAIL_ESI_PATH.read_text(encoding="utf-8"))
+    assert matched["result"]["attackers"]["damage_check"] == "matches_victim"
+
+    broken = api.fit_killmail(KILLMAIL_MISMATCH_PATH.read_text(encoding="utf-8"))
+    assert broken["ok"] is True, broken
+    attackers = broken["result"]["attackers"]
+    victim = broken["result"]["victim"]
+    assert attackers["damage_total"] == 6558773
+    assert victim["damage_taken"] == 6558772
+    assert attackers["damage_check"] == "mismatch", "Σattackers != victim 必须报 mismatch"
+    assert attackers["damage_diff"] == 1, "差值 = Σattackers - victim"
+
+
+def test_fit_killmail_merges_zkb_and_esi(monkeypatch: pytest.MonkeyPatch) -> None:
+    """联网形态：zkillboard 给价值块、ESI 给伤害详情，**两个都拉**再合并。"""
+    zkb_payload = json.loads(KILLMAIL_ZKB_PATH.read_text(encoding="utf-8"))
+    esi_payload = json.loads(KILLMAIL_ESI_PATH.read_text(encoding="utf-8"))
+    seen: list[str] = []
+
+    def fake_http(url: str) -> object:
+        seen.append(url)
+        return zkb_payload if "zkillboard" in url else esi_payload
+
+    _offline_system(monkeypatch)
+    monkeypatch.setattr(api, "_http_json", fake_http)
+
+    out = api.fit_killmail({"killmail_id": KILLMAIL_ID, "hash": KILLMAIL_HASH})
+    assert out["ok"] is True, out
+    result = out["result"]
+    assert result["killmail_source"] == "network"
+    # 价值块来自 zkillboard
+    assert result["killmail"]["value"]["total"] == 76942042803.52
+    assert "capinv" in result["killmail"]["labels"]
+    # 伤害详情来自 ESI
+    assert result["victim"]["damage_taken"] == 6558773
+    assert result["attackers"]["count"] == 79
+    assert len(seen) == 2, f"应当恰好两个请求（zkb + ESI），实际 {seen}"
+    assert any("zkillboard" in url for url in seen)
+    assert any("esi.evetech.net" in url for url in seen)
+
+
+def test_fit_killmail_uses_the_zkb_hash_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """只给 `killmail_id`（不给 hash）也能跑：hash 从 zkillboard 的 `zkb.hash` 拿。"""
+    zkb_payload = json.loads(KILLMAIL_ZKB_PATH.read_text(encoding="utf-8"))
+    esi_payload = json.loads(KILLMAIL_ESI_PATH.read_text(encoding="utf-8"))
+    seen: list[str] = []
+
+    def fake_http(url: str) -> object:
+        seen.append(url)
+        return zkb_payload if "zkillboard" in url else esi_payload
+
+    _offline_system(monkeypatch)
+    monkeypatch.setattr(api, "_http_json", fake_http)
+
+    out = api.fit_killmail({"killmail_id": KILLMAIL_ID})
+    assert out["ok"] is True, out
+    esi_urls = [url for url in seen if "esi.evetech.net" in url]
+    assert esi_urls == [
+        f"https://esi.evetech.net/latest/killmails/{KILLMAIL_ID}/{KILLMAIL_HASH}/"
+    ], esi_urls
+
+
+def test_fit_killmail_refuses_fits_without_a_battle() -> None:
+    """EFT / DNA / 结构化配装 → `not_a_killmail`（**诚实报错，不拿配装猜一条战报**）。"""
+    eft = EFT_PATH.read_text(encoding="utf-8")
+    for label, payload in (
+        ("eft", eft),
+        ("dna", "35683:2048;1::"),
+        ("structured", {"ship": {"type_id": 35683}, "items": []}),
+    ):
+        out = api.fit_killmail(payload)
+        assert out["ok"] is False, f"{label} 不该成功"
+        assert out["error"]["kind"] == api.NOT_A_KILLMAIL_KIND == "not_a_killmail"
+        assert out["error"]["message"], f"{label} 必须给人话"
+        assert out["error"]["hint"], f"{label} 必须给「能传什么」的提示"
+        assert "result" not in out, "失败信封里不该有 result"
+
+
+def test_fit_killmail_network_failure_is_structured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """联网失败 → `network_failed`（不抛异常），且失败不进缓存。"""
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise urllib.error.URLError("no network in tests")
+
+    monkeypatch.setattr(api.urllib.request, "urlopen", boom)
+    api.clear_caches()
+    out = api.fit_killmail({"killmail_id": KILLMAIL_ID, "hash": KILLMAIL_HASH})
+    assert out["ok"] is False
+    assert out["error"]["kind"] == "network_failed"
+    assert out["error"]["url"].startswith("https://zkillboard.com/api/killID/")
+    assert api.cache_stats()["entries"] == 0
+
+
+def test_fit_killmail_never_fakes_system_or_security(monkeypatch: pytest.MonkeyPatch) -> None:
+    """星系名 / 安全等级查不到 → `null` + `warnings`（**不伪造**，也不给 band）。"""
+    text = KILLMAIL_ZKB_PATH.read_text(encoding="utf-8")
+
+    def offline(*_args: object, **_kwargs: object) -> dict:
+        raise api._ApiFailure("network_failed", "offline in tests", url="x")
+
+    monkeypatch.setattr(api, "universe_names", offline)
+    monkeypatch.setattr(api, "universe_system", offline)
+    api.clear_caches()
+
+    out = api.fit_killmail(text)
+    assert out["ok"] is True, out
+    killmail = out["result"]["killmail"]
+    assert killmail["solar_system"] == {"id": SOLAR_SYSTEM_ID, "name": None}
+    assert killmail["security"] == {"status": None, "band": None}
+    assert any("星系" in warning for warning in out["result"]["warnings"])
+
+
+def test_security_band_rules() -> None:
+    """band 的判据：highsec ≥0.5 / lowsec 0–0.5 / nullsec ≤0 / 虫洞按 `security_class`。"""
+    assert api._security_band(0.5, "B", True) == api.SECURITY_BAND_HIGHSEC
+    assert api._security_band(0.43876123428344727, "E", True) == api.SECURITY_BAND_LOWSEC
+    assert api._security_band(0.0, "H6", True) == api.SECURITY_BAND_NULLSEC
+    assert api._security_band(-0.7907073497772217, "H6", True) == api.SECURITY_BAND_NULLSEC
+    # 拿不到 status：不给 band（不猜）
+    assert api._security_band(None, "B", True) is None
+    # 虫洞：ESI 给 security_class = null（实测 Thera / J220438 / Sentinel MZ）
+    assert api._security_band(-0.99, None, True) == api.SECURITY_BAND_WORMHOLE
+    # 响应里根本没有 security_class 这个键时**不**认定虫洞（退回数值规则）
+    assert api._security_band(-0.99, None, False) == api.SECURITY_BAND_NULLSEC
+
+
+def test_weapon_family_heuristics_do_not_guess() -> None:
+    """武器族只看 SDE 名字 / 组名；认不出的（含「船名当武器」）一律 `other`。"""
+    index = api.get_index()
+    assert api.weapon_family(3057, index) == "lazors"  # Mega Pulse Laser II
+    assert api.weapon_family(37306, index) == "projectile"  # Hexa 2500mm Repeating Cannon II
+    assert api.weapon_family(24523, index) == "missile"  # Mjolnir Rage Torpedo
+    assert api.weapon_family(28211, index) == "drone"  # Garde II
+    assert api.weapon_family(448, index) == "other"  # Warp Scrambler II（不是武器）
+    assert api.weapon_family(642, index) == "other"  # Apocalypse（ESI 把船名填进武器）
+    assert api.weapon_family(None, index) == "other"
+    assert api.weapon_family("1877", index) == "other", "类型不对时不猜"
+
+
+def test_universe_names_batches_at_1000_and_is_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`POST /universe/names/` 单批 ≤ 1000；第二次调用**一次请求都不发**；查不到的不编。"""
+    batches: list[list[int]] = []
+
+    def fake_post(url: str, payload: object) -> object:
+        ids = list(payload)  # type: ignore[arg-type]
+        batches.append(ids)
+        if any(identifier >= 999_999 for identifier in ids):
+            return []
+        return [{"id": identifier, "name": f"System {identifier}"} for identifier in ids]
+
+    monkeypatch.setattr(api, "_post_json", fake_post)
+    api.clear_caches()
+
+    ids = list(range(1, 1201))
+    names = api.universe_names(ids)
+    assert len(names) == 1200
+    assert [len(batch) for batch in batches] == [1000, 200], batches
+    assert all(len(batch) <= api.UNIVERSE_NAMES_MAX_IDS for batch in batches)
+    assert names[1] == "System 1"
+
+    before = len(batches)
+    assert api.universe_names(ids) == names
+    assert len(batches) == before, "第二次应当全部命中进程内缓存"
+
+    assert api.universe_names([999_999]) == {}, "ESI 没给名字时不能编一个"
+    assert api.universe_names([]) == {}
+
+
+def test_fit_killmail_cache_is_keyed_by_entry_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """同一条战报第二次调用走缓存（命中 +1），且与 `fit_index` **不共用**缓存槽。"""
+    text = KILLMAIL_ZKB_PATH.read_text(encoding="utf-8")
+    _offline_system(monkeypatch)
+
+    first = api.fit_killmail(text)
+    assert first["ok"] is True, first
+    hits = api.cache_stats()["hits"]
+    second = api.fit_killmail(text)
+    assert second == first, "缓存必须返回同一份结果（深拷贝）"
+    assert api.cache_stats()["hits"] == hits + 1
+
+    entries = api.cache_stats()["entries"]
+    assert api.fit_index(text)["ok"] is True
+    assert api.cache_stats()["entries"] == entries + 1, "两个入口各占自己的缓存槽"
+
+
+# =============================================================================
+# 七、`zkb_search`（T-50）：URL 拼装 / 合并去重 / 限流 / 名字解析（**全程离线**）
+# =============================================================================
+#
+# 样本是**真实响应**（见 `tests/fixtures/zkb/README.md`）：170 条的列表裁成 12 条、
+# 9 条的裁成 6 条，字段一个没造。所有请求都走注入的 `requester`，测试**不联网**。
+
+ZKB_FIXTURES = EVEFIT_ROOT / "tests" / "fixtures" / "zkb"
+LOSSES_FIXTURE = ZKB_FIXTURES / "losses-shipTypeID-22444-pastSeconds-604800.json"
+IDS_FIXTURE = ZKB_FIXTURES / "esi-ids-sleipnir-hecate.json"
+
+LOSSES_EXPECTED_URL = (
+    "https://zkillboard.com/api/losses/shipTypeID/22444/pastSeconds/604800/"
+)
+KILLS_EXPECTED_URL = (
+    "https://zkillboard.com/api/kills/shipTypeID/22444/pastSeconds/604800/"
+)
+
+
+def _fixture(path: Path) -> object:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.fixture()
+def zkb_state() -> object:
+    """每条 zkb 用例前后都清掉「限流时间戳 + 名字缓存」。
+
+    不清会互相串味：上一条把 `_ZKB_LAST_START` 留在虚拟时刻上，下一条要么白等 1.2 s，
+    要么根本测不到限流。
+    """
+    api._reset_zkb_state()
+    yield None
+    api._reset_zkb_state()
+
+
+class _Recorder:
+    """假请求器：记下每个 URL（与 POST 体），按 GET / POST 回固定 payload。"""
+
+    def __init__(self, *, get_payload: object = None, post_payload: object = None) -> None:
+        self.urls: list[str] = []
+        self.bodies: list[object] = []
+        self._get = get_payload
+        self._post = post_payload
+
+    def __call__(self, url: str, body: object | None = None) -> object:
+        self.urls.append(url)
+        self.bodies.append(body)
+        return self._post if body is not None else self._get
+
+    def get_urls(self) -> list[str]:
+        """只保留战报查询（去掉名字解析那次 POST）。"""
+        return [url for url in self.urls if not url.endswith("/universe/ids/")]
+
+
+def test_zkb_url_orders_filters_and_never_uses_start_time(zkb_state: None) -> None:
+    """复合条件的 URL：段序**固定**（身份 → 船型 → 空间 → 时间 → 分页），且不用起止时间。"""
+    url = api.zkb_url(
+        side=api.ZKB_SIDE_KILLS,
+        filters={"ship": 22444, "solar_system": 30002537, "character": 2121910483},
+        past_seconds=604800,
+        page=2,
+    )
+    assert url == (
+        "https://zkillboard.com/api/kills/characterID/2121910483/shipTypeID/22444/"
+        "solarSystemID/30002537/pastSeconds/604800/page/2/"
+    )
+    assert "startTime" not in url and "endTime" not in url
+    # page=1 不拼 page（`/page/1/` 与不带等价，少一段更干净）
+    assert api.zkb_url(side="losses", filters={"ship": 22444}) == (
+        "https://zkillboard.com/api/losses/shipTypeID/22444/"
+    )
+
+
+def test_zkb_search_builds_urls_with_past_seconds_and_both_sides(
+    zkb_state: None,
+) -> None:
+    """名字 → ESI 解析成 id → 逐段拼 URL；`side="both"` = 两条独立路径（各请求一次）。"""
+    recorder = _Recorder(
+        get_payload=_fixture(LOSSES_FIXTURE), post_payload=_fixture(IDS_FIXTURE)
+    )
+    cached_before = api.cache_stats()["entries"]
+    envelope = api.zkb_search(
+        ship="Sleipnir", past_seconds=604800, side=api.ZKB_SIDE_BOTH, requester=recorder
+    )
+    assert envelope["ok"] is True, envelope
+    assert recorder.bodies[0] == ["Sleipnir"], "名字解析的请求体就是名字数组"
+    assert recorder.urls == [api.ESI_UNIVERSE_IDS_API, KILLS_EXPECTED_URL, LOSSES_EXPECTED_URL]
+
+    result = envelope["result"]
+    assert result["query"] == {
+        "resolved": {"ship": {"id": 22444, "name": "Sleipnir"}},
+        "side": "both",
+        "past_seconds": 604800,
+        "page": 1,
+    }
+    # 两条路径回的是同一份样本 → 去重后仍是 12 条（不是 24）
+    assert result["count"] == 12
+    assert len(result["kills"]) == 12
+    ids = [row["killmail_id"] for row in result["kills"]]
+    assert ids == sorted(ids, reverse=True), "合并后必须按时间倒序（killmail_id 单调递增）"
+    assert envelope["meta"]["source"] == "zkillboard"
+    assert envelope["meta"]["urls"] == [KILLS_EXPECTED_URL, LOSSES_EXPECTED_URL]
+    # 列表查询**不进结果缓存**（时效性强 + 有限流）：缓存条数一点没涨
+    assert api.cache_stats()["entries"] == cached_before
+
+
+def test_zkb_search_url_assertion_would_catch_a_missing_past_seconds(
+    zkb_state: None,
+) -> None:
+    """**断言非永真**：把 `pastSeconds` 段去掉 → URL 立刻不等（这条断言真的在断言）。"""
+    recorder = _Recorder(get_payload=_fixture(LOSSES_FIXTURE))
+    envelope = api.zkb_search(
+        ship=22444, past_seconds=604800, side="losses", requester=recorder
+    )
+    assert envelope["ok"] is True
+    real = recorder.urls[-1]
+    without = api.zkb_url(side="losses", filters={"ship": 22444})
+    assert real == LOSSES_EXPECTED_URL
+    assert "pastSeconds/604800" in real
+    assert without == "https://zkillboard.com/api/losses/shipTypeID/22444/"
+    assert without != real, "两个 URL 相等就说明这条断言没在断言时间窗口"
+
+
+def test_zkb_search_side_both_merges_and_dedupes(zkb_state: None) -> None:
+    """`both` 把 kills / losses 合并：**重叠的 killmail_id 只留一条**，不重不漏。"""
+    losses = _fixture(LOSSES_FIXTURE)
+    overlap = losses[0]
+    extra = {**losses[1], "killmail_id": 139000001, "killmail_time": "2026-10-19T00:00:01Z"}
+
+    def requester(url: str, body: object | None = None) -> object:
+        # kills 回「重叠的那一条 + 一条更新的」，losses 回「重叠的那一条 + 另一条」
+        return [overlap, extra] if "/kills/" in url else [overlap, losses[1]]
+
+    envelope = api.zkb_search(ship=22444, side="both", requester=requester)
+    assert envelope["ok"] is True, envelope
+    rows = envelope["result"]["kills"]
+    ids = [row["killmail_id"] for row in rows]
+    assert len(ids) == len(set(ids)) == 3, f"应去重到 3 条，实际 {ids}"
+    assert envelope["result"]["count"] == 3
+    assert rows[0]["killmail_id"] == 139000001, "去重后仍按时间倒序"
+    assert rows[0]["killmail_time"] >= rows[-1]["killmail_time"]
+
+
+def test_zkb_search_limit_only_truncates_the_list(zkb_state: None) -> None:
+    """`limit` 只截断 `kills`；`count` / `aggregates` 仍按整页算，并在 `note` 里说明。"""
+    payload = _fixture(LOSSES_FIXTURE)
+    recorder = _Recorder(get_payload=payload)
+
+    full = api.zkb_search(ship=22444, side="losses", limit=200, requester=recorder)
+    short = api.zkb_search(ship=22444, side="losses", limit=3, requester=recorder)
+    assert full["ok"] is True and short["ok"] is True
+
+    assert full["result"]["count"] == short["result"]["count"] == 12
+    assert len(full["result"]["kills"]) == 12
+    assert len(short["result"]["kills"]) == 3
+    assert short["result"]["aggregates"] == full["result"]["aggregates"], "聚合必须按整页算"
+    assert "limit=3" in short["result"]["note"]
+    assert "整页 12 条" in short["result"]["note"]
+    assert "limit=" not in full["result"]["note"], "没截断时不该画蛇添足"
+
+    # 聚合口径：总数 = 原样相加，中位数 = 真实中位数（不取整、不换算）
+    values = [row["zkb"]["totalValue"] for row in payload]
+    aggregates = full["result"]["aggregates"]
+    assert aggregates["total_value"] == pytest.approx(sum(values))
+    assert aggregates["median_value"] == pytest.approx(statistics.median(values))
+    assert aggregates["by_ship"] == [
+        {"name": "Sleipnir", "count": 12, "value": pytest.approx(sum(values))}
+    ]
+    times = [row["killmail_time"] for row in payload]
+    assert aggregates["time_span"] == {"earliest": min(times), "latest": max(times)}
+    assert full["result"]["note"].startswith("list 级数据来自 zkb（无 items）")
+
+
+def test_zkb_search_respects_the_1_2s_gap(zkb_state: None) -> None:
+    """**限流器真的生效**：两条请求的开始时刻相差 ≥ `ZKB_MIN_INTERVAL_S`（虚拟时钟，不真等）。"""
+    clock_state = {"now": 1000.0}
+    starts: list[float] = []
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return clock_state["now"]
+
+    def sleeper(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock_state["now"] += seconds
+
+    def requester(url: str, body: object | None = None) -> object:
+        starts.append(clock_state["now"])
+        return _fixture(LOSSES_FIXTURE)
+
+    envelope = api.zkb_search(
+        ship=22444, side="both", requester=requester, clock=clock, sleeper=sleeper
+    )
+    assert envelope["ok"] is True, envelope
+    assert len(starts) == 2
+    assert starts[1] - starts[0] >= api.ZKB_MIN_INTERVAL_S - 1e-9, (
+        f"两次请求只隔了 {starts[1] - starts[0]} s（会被 zkb 限流）"
+    )
+    assert sleeps == [pytest.approx(api.ZKB_MIN_INTERVAL_S)]
+
+
+def test_zkb_search_429_is_rate_limited(
+    zkb_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """zkb 回 429 / 403 → `rate_limited`（**不是** `network_failed`，也不抛异常）。"""
+    for status in (429, 403):
+
+        def boom(*_args: object, **_kwargs: object) -> None:
+            raise urllib.error.HTTPError(
+                "https://zkillboard.com/api/losses/shipTypeID/22444/",
+                status,
+                "too fast",
+                None,
+                None,
+            )
+
+        monkeypatch.setattr(api.urllib.request, "urlopen", boom)
+        api._reset_zkb_state()
+        envelope = api.zkb_search(ship=22444, side="losses")
+        assert envelope["ok"] is False
+        assert envelope["error"]["kind"] == "rate_limited", envelope
+        assert envelope["error"]["status"] == status
+        assert envelope["error"]["hint"]["min_interval_s"] == api.ZKB_MIN_INTERVAL_S
+        assert envelope["error"]["url"].startswith("https://zkillboard.com/api/losses/")
+
+
+def test_zkb_search_unknown_entity_gives_candidates(zkb_state: None) -> None:
+    """名字解析不出唯一答案 → `unknown_entity` + `candidates`（带 `kind`），**不出网查战报**。"""
+
+    def make(payload: dict) -> _Recorder:
+        api._reset_zkb_state()
+        return _Recorder(get_payload=_fixture(LOSSES_FIXTURE), post_payload=payload)
+
+    # ① 该分类多个同名候选 → 不猜
+    recorder = make(
+        {"systems": [{"id": 30000142, "name": "Jita"}, {"id": 30000143, "name": "Jita"}]}
+    )
+    ambiguous = api.zkb_search(solar_system="Jita", requester=recorder)
+    assert ambiguous["ok"] is False
+    assert ambiguous["error"]["kind"] == "unknown_entity"
+    assert ambiguous["error"]["field"] == "solar_system"
+    assert [row["id"] for row in ambiguous["error"]["candidates"]] == [30000142, 30000143]
+    assert recorder.get_urls() == []
+
+    # ② 名字只出现在**别的分类**里 → 仍然 unknown_entity（但把真实分类当候选给出来）
+    recorder = make({"characters": [{"id": 282567669, "name": "Sleipnir"}]})
+    wrong_kind = api.zkb_search(ship="Sleipnir", requester=recorder)
+    assert wrong_kind["ok"] is False
+    assert wrong_kind["error"]["kind"] == "unknown_entity"
+    assert wrong_kind["error"]["candidates"] == [
+        {"id": 282567669, "name": "Sleipnir", "kind": "character"}
+    ]
+    assert recorder.get_urls() == []
+
+    # ③ 一个都没有 → 照样 unknown_entity（不给假候选）
+    recorder = make({})
+    nothing = api.zkb_search(ship="Nope", requester=recorder)
+    assert nothing["ok"] is False
+    assert nothing["error"]["kind"] == "unknown_entity"
+    assert not nothing["error"].get("candidates")
+
+
+def test_zkb_ship_name_picks_the_inventory_type_not_the_character(zkb_state: None) -> None:
+    """`"Sleipnir"` 在 ESI 里同时是**角色**和**船型** → 必须取 `inventory_types`（22444）。"""
+    recorder = _Recorder(
+        get_payload=_fixture(LOSSES_FIXTURE), post_payload=_fixture(IDS_FIXTURE)
+    )
+    envelope = api.zkb_search(
+        ship="Sleipnir", past_seconds=604800, side="losses", requester=recorder
+    )
+    assert envelope["ok"] is True, envelope
+    resolved = envelope["result"]["query"]["resolved"]["ship"]
+    assert resolved == {"id": 22444, "name": "Sleipnir"}
+    assert resolved["id"] != 282567669, "282567669 是那个同名的**角色**"
+
+    # 整数 id 走另一条路：不联网解析，名字从 SDE 拿
+    api._reset_zkb_state()
+    recorder_by_id = _Recorder(get_payload=_fixture(LOSSES_FIXTURE))
+    by_id = api.zkb_search(ship=22444, side="losses", requester=recorder_by_id)
+    assert by_id["ok"] is True
+    assert by_id["result"]["query"]["resolved"]["ship"] == {"id": 22444, "name": "Sleipnir"}
+    assert api.ESI_UNIVERSE_IDS_API not in recorder_by_id.urls
+
+
+def test_zkb_name_resolution_is_cached(zkb_state: None) -> None:
+    """同一个名字第二次只解析一次（进程内缓存）—— 有限流时这一条很值钱。"""
+    recorder = _Recorder(
+        get_payload=_fixture(LOSSES_FIXTURE), post_payload=_fixture(IDS_FIXTURE)
+    )
+    for _ in range(2):
+        assert api.zkb_search(
+            ship="Sleipnir", past_seconds=604800, side="losses", requester=recorder
+        )["ok"] is True
+    assert recorder.urls.count(api.ESI_UNIVERSE_IDS_API) == 1, recorder.urls
+
+
+def test_zkb_search_rejects_bad_arguments_without_network(zkb_state: None) -> None:
+    """参数不合法 → `invalid_argument`，且**一次请求都不发**（省配额 + 错误更直接）。"""
+    cases = {
+        "startTime": {"ship": 22444, "startTime": 20261010},
+        "end_time": {"ship": 22444, "end_time": 20261012},
+        "past_seconds": {"ship": 22444, "past_seconds": "last week"},
+        "limit": {"ship": 22444, "limit": api.ZKB_PAGE_SIZE + 1},
+        "page": {"ship": 22444, "page": 0},
+        "side": {"ship": 22444, "side": "all"},
+        "typo": {"shipp": 22444},
+        "filters": {"past_seconds": 604800},
+    }
+    for name, kwargs in cases.items():
+        recorder = _Recorder(get_payload=_fixture(LOSSES_FIXTURE))
+        envelope = api.zkb_search(requester=recorder, **kwargs)
+        assert envelope["ok"] is False, f"{name} 应该被拒绝"
+        assert envelope["error"]["kind"] == "invalid_argument", (name, envelope)
+        assert recorder.urls == [], f"{name} 被拒绝时不该出网：{recorder.urls}"

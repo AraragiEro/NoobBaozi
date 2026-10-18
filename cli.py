@@ -1,12 +1,24 @@
 """L5 传输形态之一：**CLI**（开发期与人工验证的基线，文档 §10.5）。
 
 ```
-python -m evefit.cli parse  --fit-file x.eft [--json]
-python -m evefit.cli index  --fit-file x.eft [--killmail k.json] [--eft "…"] [--skill-tier all5] [--json]
-python -m evefit.cli view   --fit-file x.eft --view mobility
-python -m evefit.cli get    --fit-file x.eft --path mobility.speed_mps
-python -m evefit.cli detail --fit-file x.eft [--view stability]
+python -m evefit.cli parse    --fit-file x.eft [--json]
+python -m evefit.cli killmail --fit-file killmail.json [--json]
+python -m evefit.cli index    --fit-file x.eft [--killmail k.json] [--eft "…"] [--skill-tier all5] [--json]
+python -m evefit.cli view     --fit-file x.eft --view mobility
+python -m evefit.cli get      --fit-file x.eft --path mobility.speed_mps
+python -m evefit.cli detail   --fit-file x.eft [--view stability]
+python -m evefit.cli search   --character NAME --ship SHIP --past-seconds 604800 [--json]
 ```
+
+`killmail` 是唯一**只接受战报**的子命令（`api.fit_killmail`）：给 EFT / DNA 时它按契约
+返回 `ok:false` + `kind: "not_a_killmail"`，退出码 `1`（配装内容没问题，是这个入口不适用
+这类输入 —— 看配装请用 `parse` / `index`）。
+
+`search` 是唯一**不要配装输入**的子命令（`api.zkb_search`）：它查的是**战报列表**
+（谁 / 哪个公司 / 哪种船 / 哪个星系的战报），所以不给 `--fit-file` / `--eft` 那一套，
+只给过滤条件。时间窗口只有 `--past-seconds`（zkb 已停用起止时间，传起止时间会得到
+`invalid_argument`），更早的数据用 `--page` 往回翻；每次出网之间有 1.2 s 限流，
+所以 `search` 天然比其它子命令慢一点。
 
 三条纪律（每一条都对应 §10.7 的红线）：
 
@@ -206,6 +218,76 @@ def _human_get(result: dict) -> str:
     return "\n".join(lines)
 
 
+_BUCKET_ROWS: int = 8
+"""`killmail` 人话摘要里每个分桶最多铺几行（完整清单永远在 `--json` 里）。"""
+
+
+def _bucket_lines(title: str, rows: object, key: str) -> list[str]:
+    """分桶列表 → 人话若干行（`key×count=damage(pct)`；超量只截断显示，不改数据）。"""
+    if not isinstance(rows, list) or not rows:
+        return [f"{_INDENT}{title}: -"]
+    lines = [f"{_INDENT}{title}({len(rows)}):"]
+    for row in rows[:_BUCKET_ROWS]:
+        if not isinstance(row, dict):
+            continue
+        lines.append(
+            f"{_INDENT * 2}- {row.get(key)} × {row.get('count')} = "
+            f"{row.get('damage')} ({row.get('damage_pct')})"
+        )
+    if len(rows) > _BUCKET_ROWS:
+        lines.append(f"{_INDENT * 2}… 另 {len(rows) - _BUCKET_ROWS} 项见 --json")
+    return lines
+
+
+def _human_killmail(result: dict, meta: dict) -> str:
+    """`killmail` 的人话摘要：战报一行 + 受害者 + 攻击方分桶 + 伤害 vs EHP。
+
+    只排版、不换算、不判词：所有数字都是 `result` 里的原值（`json.dumps` 的最短表示）。
+    """
+    km = result.get("killmail") if isinstance(result.get("killmail"), dict) else {}
+    system = km.get("solar_system") if isinstance(km.get("solar_system"), dict) else {}
+    security = km.get("security") if isinstance(km.get("security"), dict) else {}
+    victim = result.get("victim") if isinstance(result.get("victim"), dict) else {}
+    attackers = result.get("attackers") if isinstance(result.get("attackers"), dict) else {}
+    context = result.get("context") if isinstance(result.get("context"), dict) else {}
+
+    check = f"check={attackers.get('damage_check')}"
+    if "damage_diff" in attackers:
+        check += f"(diff={attackers.get('damage_diff')})"
+    lines = [
+        f"killmail {km.get('killmail_id')} · {km.get('killmail_time')} · "
+        f"{system.get('name')} ({system.get('id')}) · "
+        f"security={security.get('status')} band={security.get('band')} · "
+        f"source={result.get('killmail_source')}",
+        f"{_INDENT}victim: {_header(victim.get('ship'))} · "
+        f"damage_taken={victim.get('damage_taken')}",
+        f"{_INDENT}value: {_block_line(km.get('value'))}",
+        f"{_INDENT}flags: {_block_line(km.get('flags'))} · labels: {_compact(km.get('labels'))}",
+        f"{_INDENT}attackers: count={attackers.get('count')} · "
+        f"damage_total={attackers.get('damage_total')} · {check}",
+        f"{_INDENT}final_blow: {_block_line(attackers.get('final_blow'))}",
+        f"{_INDENT}attacker security: {_block_line(attackers.get('security'))}",
+    ]
+    lines.extend(_bucket_lines("by_ship_group", attackers.get("by_ship_group"), "group"))
+    lines.extend(_bucket_lines("by_weapon_family", attackers.get("by_weapon_family"), "family"))
+    vs_ehp = (
+        context.get("damage_taken_vs_ehp")
+        if isinstance(context.get("damage_taken_vs_ehp"), dict)
+        else {}
+    )
+    lines.append(
+        f"{_INDENT}context.damage_taken_vs_ehp: damage_taken={vs_ehp.get('damage_taken')} · "
+        f"ehp_mixed={vs_ehp.get('ehp_mixed')} · ratio={vs_ehp.get('ratio')} · "
+        f"ehp_provenance={vs_ehp.get('ehp_provenance')}"
+    )
+    if context.get("note"):
+        lines.append(f"{_INDENT}{context.get('note')}")
+    warnings = result.get("warnings") or []
+    lines.append(f"{_INDENT}warnings({len(warnings)}):")
+    lines.extend(f"{_INDENT * 2}- {warn}" for warn in warnings)
+    return "\n".join(lines)
+
+
 def _human_detail(result: dict, meta: dict) -> str:
     """`detail` 的人话摘要：船一行，每个视角 2 行（overview 铺开 + 计数 / missing）。"""
     views = result.get("views") if isinstance(result.get("views"), dict) else {}
@@ -228,12 +310,56 @@ def _human_detail(result: dict, meta: dict) -> str:
     return "\n".join(lines)
 
 
+def _human_search(result: dict, meta: dict) -> str:
+    """`search` 的人话摘要：条件一行 → 计数 / 聚合 → 每条战报一行（只排版，不判词）。
+
+    `count` 与展示条数**分开写**（`limit` 只截断展示，聚合仍按整页算）：如果只印一行
+    「200 条」而实际只给了 50 条，人会以为数据缺了。
+    """
+    query = result.get("query") if isinstance(result.get("query"), dict) else {}
+    resolved = query.get("resolved") if isinstance(query.get("resolved"), dict) else {}
+    conditions = " · ".join(
+        f"{name}={entry.get('name') or entry.get('id')}"
+        for name, entry in resolved.items()
+        if isinstance(entry, dict)
+    )
+    aggregates = result.get("aggregates") if isinstance(result.get("aggregates"), dict) else {}
+    span = aggregates.get("time_span") if isinstance(aggregates.get("time_span"), dict) else {}
+    kills = result.get("kills") if isinstance(result.get("kills"), list) else []
+    lines = [
+        f"search · side={query.get('side')} · page={query.get('page')} · "
+        f"past_seconds={query.get('past_seconds')}",
+        f"{_INDENT}条件: {conditions or '-'}",
+        f"{_INDENT}count={result.get('count')}（本页）· 展示 {len(kills)} 条 · "
+        f"total_value={aggregates.get('total_value')} · median_value={aggregates.get('median_value')}",
+        f"{_INDENT}time_span: {span.get('earliest')} → {span.get('latest')}",
+    ]
+    by_ship = aggregates.get("by_ship") if isinstance(aggregates.get("by_ship"), list) else []
+    if by_ship:
+        lines.append(f"{_INDENT}by_ship: {_block_line(by_ship, 240)}")
+    for row in kills:
+        if not isinstance(row, dict):
+            continue
+        ship = row.get("ship") if isinstance(row.get("ship"), dict) else {}
+        lines.append(
+            f"{_INDENT}{row.get('killmail_time')} · {row.get('killmail_id')} · "
+            f"{ship.get('name') or ship.get('type_id')} · value={row.get('value')} · "
+            f"solo={row.get('solo')} npc={row.get('npc')}"
+        )
+    lines.append(f"{_INDENT}{result.get('note')}")
+    if isinstance(meta, dict) and meta.get("urls"):
+        lines.append(f"{_INDENT}urls: {_block_line(meta.get('urls'), 240)}")
+    return "\n".join(lines)
+
+
 _HUMAN: dict[str, Callable[[dict, dict], str]] = {
     "parse": lambda result, _meta: _human_parse(result),
+    "killmail": lambda result, _meta: _human_killmail(result, _meta),
     "index": lambda result, _meta: _human_index(result),
     "view": lambda result, _meta: _human_view(result),
     "get": lambda result, _meta: _human_get(result),
     "detail": _human_detail,
+    "search": _human_search,
 }
 
 
@@ -322,7 +448,10 @@ def _pick_fit(args: argparse.Namespace) -> tuple[object | None, str | None]:
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
-    """五个子命令共用的选项（来源 / 三个共同参数 / `--json`，§10.2）。"""
+    """配装类子命令共用的选项（来源 / 三个共同参数 / `--json`，§10.2）。
+
+    `search` **不用**这一套（它没有配装输入，见 `build_parser` 里的 `search_cmd`）。
+    """
     parser.add_argument(
         "--fit-file",
         metavar="PATH",
@@ -360,7 +489,7 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """命令行定义（五个子命令 + 共同选项）。"""
+    """命令行定义（配装类子命令 + `search`）。"""
     parser = argparse.ArgumentParser(
         prog="python -m evefit.cli",
         description="evefit L5 接口层的 CLI 基线（与 MCP 共用 evefit/api.py 的逻辑）",
@@ -369,6 +498,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     parse_cmd = subparsers.add_parser("parse", help="把输入归一化成结构（确认读懂了没有）")
     _add_common(parse_cmd)
+
+    killmail_cmd = subparsers.add_parser(
+        "killmail", help="战报上下文（谁打的、损失多少、挨了多少伤害）"
+    )
+    _add_common(killmail_cmd)
 
     index_cmd = subparsers.add_parser("index", help="六维度摘要（L0，默认入口）")
     _add_common(index_cmd)
@@ -388,6 +522,46 @@ def build_parser() -> argparse.ArgumentParser:
     detail_cmd.add_argument("--view", metavar="NAME", help="只给这个视角（默认六个全给）")
     detail_cmd.add_argument("--path", metavar="PATH", help="只给这些字段（<视角>.<字段>）")
 
+    search_cmd = subparsers.add_parser(
+        "search", help="战报列表检索（谁在打谁 / 这个公司最近损失了什么）"
+    )
+    search_cmd.add_argument("--character", metavar="NAME", help="角色（名字或整数 id）")
+    search_cmd.add_argument("--corporation", metavar="NAME", help="公司（名字或整数 id）")
+    search_cmd.add_argument("--alliance", metavar="NAME", help="联盟（名字或整数 id）")
+    search_cmd.add_argument(
+        "--ship", metavar="NAME", help="船型（名字或整数 id，如 Sleipnir / 22444）"
+    )
+    search_cmd.add_argument("--solar-system", metavar="NAME", help="星系（名字或整数 id）")
+    search_cmd.add_argument("--region", metavar="NAME", help="区域（名字或整数 id）")
+    search_cmd.add_argument(
+        "--past-seconds",
+        type=int,
+        metavar="N",
+        help="时间窗口（秒）：604800 = 近 7 天；zkb 已停用起止时间，时间只能这样给",
+    )
+    search_cmd.add_argument(
+        "--page", type=int, default=1, metavar="N", help="页码（默认 1；单页最多 200 条）"
+    )
+    search_cmd.add_argument(
+        "--side",
+        choices=api.ZKB_SIDES,
+        default=api.ZKB_SIDE_BOTH,
+        help=f"kills / losses / both（默认 {api.ZKB_SIDE_BOTH}：两条路径各查一次）",
+    )
+    search_cmd.add_argument(
+        "--limit",
+        type=int,
+        default=api.ZKB_LIMIT_DEFAULT,
+        metavar="N",
+        help=(
+            f"只截断展示条数（默认 {api.ZKB_LIMIT_DEFAULT}，上限 {api.ZKB_PAGE_SIZE}）；"
+            "count 与 aggregates 仍按整页算"
+        ),
+    )
+    search_cmd.add_argument(
+        "--json", action="store_true", help="输出机器可读 JSON（api 返回值原样）"
+    )
+
     return parser
 
 
@@ -400,6 +574,8 @@ def _dispatch(args: argparse.Namespace, fit: object) -> dict:
     }
     if args.command == "parse":
         return api.parse_fit(fit, **params)
+    if args.command == "killmail":
+        return api.fit_killmail(fit, **params)
     if args.command == "index":
         return api.fit_index(fit, **params)
     if args.command == "view":
@@ -409,9 +585,49 @@ def _dispatch(args: argparse.Namespace, fit: object) -> dict:
     return api.fit_detail(fit, getattr(args, "view", None), getattr(args, "path", None), **params)
 
 
+def _dispatch_search(args: argparse.Namespace) -> dict:
+    """`search` → 一次 `api.zkb_search()`（**本文件不做任何逻辑**）。
+
+    只把命令行选项原样递过去：条件校验 / 名字解析 / 限流全在 `api` 层（CLI 与 MCP
+    必须共用同一套判断，否则「同一个查询两个出口不同结果」）。
+    """
+    return api.zkb_search(
+        character=args.character,
+        corporation=args.corporation,
+        alliance=args.alliance,
+        ship=args.ship,
+        solar_system=args.solar_system,
+        region=args.region,
+        past_seconds=args.past_seconds,
+        page=args.page,
+        side=args.side,
+        limit=args.limit,
+    )
+
+
 # =============================================================================
 # 四、入口
 # =============================================================================
+
+
+def _report(args: argparse.Namespace, envelope: dict) -> int:
+    """把信封写到 stdout / stderr 并给出退出码（人话与 `--json` 的唯一分岔点）。"""
+    if args.json:
+        print(json.dumps(envelope, ensure_ascii=False))
+        return EXIT_OK if envelope.get("ok") else EXIT_API_FAILURE
+
+    if envelope.get("ok"):
+        printer = _HUMAN.get(args.command)
+        text = (
+            printer(envelope.get("result") or {}, envelope.get("meta") or {})
+            if printer
+            else _compact(envelope)
+        )
+        print(text)
+        return EXIT_OK
+
+    print(_human_error(envelope.get("error")), file=sys.stderr)
+    return EXIT_API_FAILURE
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -431,28 +647,16 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:  # argparse 已经打过用法；这里只把退出码返回去
         return exc.code if isinstance(exc.code, int) else EXIT_USAGE
 
+    if args.command == "search":
+        # `search` 没有配装输入：跳过 `_pick_fit`（它要求恰好一个来源，会直接报参数错）
+        return _report(args, _dispatch_search(args))
+
     fit, problem = _pick_fit(args)
     if problem is not None:
         print(f"参数错误：{problem}", file=sys.stderr)
         return EXIT_USAGE
 
-    envelope = _dispatch(args, fit)
-    if args.json:
-        print(json.dumps(envelope, ensure_ascii=False))
-        return EXIT_OK if envelope.get("ok") else EXIT_API_FAILURE
-
-    if envelope.get("ok"):
-        printer = _HUMAN.get(args.command)
-        text = (
-            printer(envelope.get("result") or {}, envelope.get("meta") or {})
-            if printer
-            else _compact(envelope)
-        )
-        print(text)
-        return EXIT_OK
-
-    print(_human_error(envelope.get("error")), file=sys.stderr)
-    return EXIT_API_FAILURE
+    return _report(args, _dispatch(args, fit))
 
 
 if __name__ == "__main__":  # pragma: no cover - 进程入口

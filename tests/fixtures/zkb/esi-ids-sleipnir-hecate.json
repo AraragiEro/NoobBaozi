@@ -1,0 +1,22 @@
+{
+ "characters": [
+  {
+   "id": 282567669,
+   "name": "Sleipnir"
+  },
+  {
+   "id": 145229815,
+   "name": "Hecate"
+  }
+ ],
+ "inventory_types": [
+  {
+   "id": 22444,
+   "name": "Sleipnir"
+  },
+  {
+   "id": 35683,
+   "name": "Hecate"
+  }
+ ]
+}

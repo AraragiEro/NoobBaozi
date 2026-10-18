@@ -1,7 +1,8 @@
 # evefit MCP server（stdio + HTTP）
 
-把 `evefit/api.py` 的五个函数暴露成 **MCP 工具**，让 agent（Claude Desktop / Cursor /
-自研 agent…）能直接问「这套 Hecate 的机动怎么样」，而不是让 agent 自己写 Python。
+把 `evefit/api.py` 的六个函数暴露成 **MCP 工具**，让 agent（Claude Desktop / Cursor /
+自研 agent…）能直接问「这套 Hecate 的机动怎么样」「这条战报是谁打的、损失多少」，而不是
+让 agent 自己写 Python —— 更不是让 agent 自己去打开 zkillboard 网页。
 
 两种传输，**同一套协议实现**（同一个 `dispatch()`、同一套错误码、同一个信封）：
 
@@ -117,7 +118,7 @@ python -m evefit.mcp.client_smoke_http --base-url http://127.0.0.1:18080
 | `server` | `evefit` |
 | `version` | `1.0.0`（= `mcp_server.SERVER_VERSION`） |
 | `transport` | `http` |
-| `tools` | 工具条数（5，与 `tools/list` 同源） |
+| `tools` | 工具条数（`= len(mcp_server.TOOL_NAMES)`，与 `tools/list` 同源；**别抄数字**） |
 | `sessions` | 当前会话数（没握手过就是 `0`） |
 
 **字段名别改** —— 容器 healthcheck 按名取值。
@@ -234,24 +235,31 @@ Invoke-WebRequest -Method Post -Uri http://127.0.0.1:8080/mcp -Body $body -Conte
 
 ### 3.3 客户端连上之后
 
-先 `tools/list`（应看到 5 个工具），再按第 5 节的顺序调。服务的 `initialize` 结果里
+先 `tools/list`（列出服务当前注册的工具），再按第 5 节的顺序调。服务的 `initialize` 结果里
 带一段 `instructions`，多数 agent 会自己读它来排调用顺序。
 
 当前握手信息：`serverInfo = {"name": "evefit", "version": "1.0.0"}`，
 `capabilities.tools = {"listChanged": false}`，
 支持协议版本 `2026-07-28 / 2025-11-25 / 2025-06-18 / 2025-03-26 / 2024-11-05`。
 
-## 4. 五个工具
+## 4. 工具清单
+
+**条数与名字的唯一真源是 `mcp_server.TOOL_NAMES`**：`tools/list`、`/health` 的 `tools`、
+客户端冒烟、验收测试全部从它派生。下面这张表是**给人看的说明**，不是第二个清单 ——
+加工具时改 `TOOL_NAMES` 一处 + `_HANDLERS` + `_TOOL_DESCRIPTIONS`，测试与冒烟一行都不用动。
+
+### 4.1 配装类六个工具
 
 | 工具 | 一句话 | 体量 | 参数 |
 |---|---|---|---|
 | `fit_parse` | 把输入归一化成结构，回显「我读懂了什么」（格式 / 船 / 模块件数 / 技能档 / warnings） | 中（~4 KB） | `fit` |
+| `fit_killmail` | **战报上下文**：损失价值 / 参战方 / 伤害构成 / 最终一击 / 星系与安全等级 / 挨了多少伤害 vs 自身 EHP | 小（~1.5 KB） | `fit` |
 | `fit_index` | **默认入口**：六维度摘要（L0）+ flags + budget | ~2 KB | `fit` |
 | `fit_view` | 单视角全字段（L1）：overview / provenance / unknown_reasons / confidence / flags | 2–3 KB | `fit`, `view`* |
 | `fit_get` | 按路径精确取一个值 + 它的 provenance / reason | 极小（~0.3 KB） | `fit`, `path`* |
 | `fit_detail` | 列表型明细（升级候选、逐模块电容、**完整技能表 512 条**） | 大（10 KB 起） | `fit`, `view`?, `path`? |
 
-`*` = 必填。五个工具都还接受三个可选参数（§10.2）：
+`*` = 必填。这六个工具都还接受三个可选参数（§10.2）；不接 `fit` 的检索类工具（`zkb_search`）不接受它们：
 
 | 参数 | 默认 | 可用值 |
 |---|---|---|
@@ -266,26 +274,74 @@ Invoke-WebRequest -Method Post -Uri http://127.0.0.1:8080/mcp -Body $body -Conte
 文本，或者 zkillboard / ESI 的 killmail 链接（后两种会联网）。字典 / 数组也接受
 （会被直接递进 `api`），但 schema 里只广告 string。
 
+### `fit_killmail`：为什么要有它
+
+zkillboard 与 ESI **各给一半**：zkillboard 有 `zkb` 价值块（fitted / dropped /
+destroyed / total、points、labels），ESI 有 `attackers` / `victim.damage_taken` 与逐件
+`items`。之前只把 `victim.ship_type_id + victim.items` 转成配装，其余全丢了，于是 agent
+会**自己开浏览器去看 zkillboard 网页**。这个工具把两半合起来给（`killmail_source` 回显
+`network` / `local`，`warnings` 说明哪些值缺失）。
+
+- 只接受 killmail：EFT / DNA / 结构化配装 → `ok:false` + `kind: "not_a_killmail"`；
+- 拿不到的值一律 `null`（星系名 / 安全等级 / 价值块），**不伪造**；
+- `attackers.damage_check`：`Σ attackers.damage_done == victim.damage_taken` 时是
+  `matches_victim`，否则 `mismatch` + `damage_diff`（数据质量信号，绝不静默）；
+- `by_weapon_family` 只有 `projectile` / `lazors` / `hybrid` / `missile` / `drone` /
+  `fighter` / `smartbomb` / `other`；分不清就是 `other`（不猜）；
+- `context.damage_taken_vs_ehp.ratio = damage_taken / ehp_mixed`，EHP **来自投影层**（`survivability.ehp_mixed`），
+  接口层不重算，也不给生死结论。
+
+### `zkb_search`：列表层（`pastSeconds` + 分页 + 限流）
+
+`fit_killmail` 是「一条战报有多细」，`zkb_search` 是「这段时间有哪些战报」：
+先用它筛出 `killmail_id`，再对感兴趣的那几条调 `fit_killmail`。
+
+| 维度 | 口径（都是实测） |
+|---|---|
+| 过滤条件 | `character` / `corporation` / `alliance` / `ship` / `solar_system` / `region`，**可同时给 = AND 复合**；名字或整数 id 都行（名字走 ESI `POST /universe/ids/`，结果进程内缓存） |
+| 时间 | **只能用 `past_seconds`**（秒）。`startTime` / `endTime` 已被 zkb 停用（`{"error": "startTime/endTime no longer supported in api because of abuse"}`），传了会得到 `invalid_argument`，**一次请求都不会发** |
+| 分页 | `page`（1 = 最新一页），**单页最多 200 条**；更早的数据靠往回翻页，没有别的回溯手段 |
+| `side` | `kills` / `losses` / `both`。`/api/kills/` 与 `/api/losses/` 是**两条独立路径**，`both` = 两次请求 + 合并去重 + 按 `killmail_time` 倒序 |
+| `limit` | 只截断返回的 `kills` 数组（1..200）；`count` 与 `aggregates` **仍按整页算**，截断这件事写在 `note` 里 |
+| 限流 | 所有出网请求串行 + 最小间隔 **1.2 s**（`ZKB_MIN_INTERVAL_S`）；被限流（429 / 403）→ `rate_limited`（带 `hint.min_interval_s`）。所以 `both` 至少花 2.4 s，别在循环里逐条查 |
+| 返回 | 每条 `killmail_id` / `killmail_time` / `ship{type_id,name,group}` / `value` / `labels` / `npc` / `solo`，加整页聚合 `total_value` / `median_value` / `by_ship` / `time_span`；`meta.urls` 回显**本次真正请求过的 URL** |
+| 不受支持 | 一个过滤条件都不给（裸的 `/api/kills/` 是全服流式数据，不是一次检索）→ `invalid_argument` |
+
+**`ship` 是受害者那艘船**，不是过滤条件本身：`side="kills"` + `ship=Sleipnir` 的意思是
+「Sleipnir 参与击杀的那些战报」，其中有些战报的受害者是别的船（实测第二行就是一艘
+Sabre）。想看「Sleipnir 自己怎么死的」用 `side="losses"`。
+
+**列表里没有完整配装**：`victim.items` 确实存在（实测：被弹出的模块），但本工具不返回它
+—— 明细一律走 `fit_killmail`。这条契约在 `note` 里也写着。
+
 ### 典型调用顺序
 
 ```
+zkb_search     ⓪ **要先找战报**时用它：「谁在打这个星系」「这公司最近损失了什么」
+   ↓            条件复合（AND）；时间只有 past_seconds；一页 200 条，更早的翻 page
 fit_parse      ① 先确认这套配装被正确读懂了（船对不对、模块读进来几件、有没有 warning）
    ↓
-fit_index      ② 看六维度摘要，定位可疑的那个维度
+fit_killmail   ② 分析战报时拿上下文（价值 / 参战方 / 伤害构成 / 星系与安全等级）
+   ↓            ↑ 这一行就是为了**不让你去开 zkillboard 网页**
+fit_index      ③ 看六维度摘要，定位可疑的那个维度
    ↓
-fit_view       ③ 展开可疑维度（要看全字段时）
-fit_get        ④ 或者只要一个数：mobility.speed_mps / firepower.dps.total / budget.chars
+fit_view       ④ 展开可疑维度（要看全字段时）
+fit_get        ⑤ 或者只要一个数：mobility.speed_mps / firepower.dps.total / budget.chars
    ↓
-fit_detail     ⑤ 真需要明细时才调（升级候选、逐模块电容、完整技能表）
+fit_detail     ⑥ 真需要明细时才调（升级候选、逐模块电容、完整技能表）
 ```
 
 举例：
 
 ```json
-{"name": "fit_index", "arguments": {"fit": "[Hecate, 139246907]\nDamage Control II\n..."}}
-{"name": "fit_get",   "arguments": {"fit": "...", "path": "mobility.speed_mps"}}
-{"name": "fit_view",  "arguments": {"fit": "...", "view": "mobility"}}
-{"name": "fit_detail","arguments": {"fit": "...", "view": "stability"}}
+{"name": "zkb_search",  "arguments": {"ship": "Sleipnir", "solar_system": "Amamake", "past_seconds": 604800, "side": "losses"}}
+{"name": "zkb_search",  "arguments": {"character": 2121910483, "past_seconds": 86400, "side": "kills", "limit": 10}}
+{"name": "fit_parse",   "arguments": {"fit": "[Hecate, 139246907]\nDamage Control II\n..."}}
+{"name": "fit_killmail","arguments": {"fit": "https://zkillboard.com/kill/139239127/"}}
+{"name": "fit_index",   "arguments": {"fit": "[Hecate, 139246907]\nDamage Control II\n..."}}
+{"name": "fit_get",     "arguments": {"fit": "...", "path": "mobility.speed_mps"}}
+{"name": "fit_view",    "arguments": {"fit": "...", "view": "mobility"}}
+{"name": "fit_detail",  "arguments": {"fit": "...", "view": "stability"}}
 ```
 
 ## 5. 返回契约
@@ -313,7 +369,8 @@ fit_detail     ⑤ 真需要明细时才调（升级候选、逐模块电容、�
 `error` 里的结构化原因」—— 比如 `unknown_module` 会带上 `candidates`（只报候选、绝不
 代填），`invalid_path` 会带上可用前缀列表。`error.kind` 的取值集合：
 `parse_failed` / `ambiguous_ship` / `unknown_module` / `invalid_path` / `invalid_argument` /
-`index_unavailable` / `network_failed` / `internal_error`。
+`not_a_killmail` / `unknown_entity` / `rate_limited` / `index_unavailable` /
+`network_failed` / `internal_error`。
 
 ## 6. 已知限制
 
@@ -337,14 +394,17 @@ fit_detail     ⑤ 真需要明细时才调（升级候选、逐模块电容、�
 8. **http 是明文 HTTP（没有 TLS）**，也没有鉴权：`--host 0.0.0.0` 就是「谁连都能用」。
    只在可信网段（本机 / 局域网 / 容器内网）这么跑；要暴露到公网，得在前面放一层反向代理
    （TLS + token）。默认 `127.0.0.1` 就是为了不误暴露。
+9. **`zkb_search` 有硬限流**：所有出网请求串行 + 最小间隔 1.2 s（`both` 至少 2.4 s），
+   而且 zkb 单页最多 200 条、时间窗口只能用 `past_seconds`（起止时间已被停用）。
+   它是**列表层**：拿不到完整配装，别指望用它替代 `fit_killmail`。
 
 ## 7. 自检 / 排查
 
 ```powershell
-# 真实客户端冒烟（stdio）：起子进程 → initialize → tools/list → 五个工具 + 两个负例
+# 真实客户端冒烟（stdio）：起子进程 → initialize → tools/list → 用例表（每个工具 + 两个负例）
 uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m evefit.mcp.client_smoke
 
-# 真实 HTTP 客户端冒烟：握手 → 202 通知 → 清单 → SSE → 五个工具 + 两个负例 → /health
+# 真实 HTTP 客户端冒烟：握手 → 202 通知 → 清单 → SSE → 用例表 → /health
 #   （先按 1.2 起服务；绑 0.0.0.0 时也用 127.0.0.1 连，这本身就是局域网可达的证据）
 uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m evefit.mcp.client_smoke_http
 uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m evefit.mcp.client_smoke_http --base-url http://127.0.0.1:18080

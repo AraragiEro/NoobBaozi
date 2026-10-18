@@ -60,7 +60,7 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 ----------
 
 `api` 的 `Engine` / `Index` 是**进程级单例**，这里直接复用（`_api()` 拿模块本身，
-不缓存任何结果）：同一份配装连续调五个工具，只有第一次付引擎 / 开库的成本。
+不缓存任何结果）：同一份配装连续调多个工具，只有第一次付引擎 / 开库的成本。
 `evefit.api` 的 LRU 命中时一次引擎调用都不发生（见 `api.py` 模块 docstring）。
 """
 
@@ -124,17 +124,41 @@ JSON 文本都在几 KB 量级（实测 f1 的 killmail JSON ≈ 12 KB），256 
 MAX_PATH_CHARS: int = 4096
 """`path` 的长度上限（路径表达式是几百字符量级，4096 已极宽松）。"""
 
-_TOOL_ORDER: tuple[str, ...] = (
+TOOL_NAMES: tuple[str, ...] = (
     "fit_parse",
+    "fit_killmail",
     "fit_index",
     "fit_view",
     "fit_get",
     "fit_detail",
+    "zkb_search",
 )
-"""工具在 `tools/list` 里的顺序：**就是推荐调用顺序**（§10.1 的表格顺序）。"""
+"""**工具清单的唯一真源**（单数真理）：`tools/list`、`/health` 的 `tools`、客户端冒烟、
+验收测试全部从这里派生 —— 本文件之外**不许再出现工具名清单或工具条数的字面量**。
+
+顺序就是推荐调用顺序：
+
+1. `fit_parse` —— 先确认这套配装被正确读懂了；
+2. `fit_killmail` —— 分析一条战报时拿上下文（损失价值 / 参战方 / 伤害构成）；
+3. `fit_index` / `fit_view` / `fit_get` / `fit_detail` —— 六维度从摘要到深挖；
+4. `zkb_search` —— 先按条件筛出 `killmail_id`，再回头对具体那条用 `fit_killmail`。
+
+加工具的正确姿势：往这个元组里加一个名字、在 `_HANDLERS` 里加实现、在
+`_TOOL_DESCRIPTIONS` 里加文案、(必要时) 在 `_schema_for()` 里加 schema ——
+**测试一条都不用改**（它们只断言「`tools/list` 的名字集合 == `TOOL_NAMES`」）。
+"""
+
+TOOL_COUNT: int = len(TOOL_NAMES)
+"""工具条数（**派生值**，不许手写数字；`/health` 与冒烟都读它）。"""
+
+_TOOL_ORDER: tuple[str, ...] = TOOL_NAMES
+"""`TOOL_NAMES` 的历史别名（`mcp_http.tool_count()` 等既有调用点仍在用它）。
+
+保留它是为了「单一真源」而不是「两份清单」：它**就是**同一个元组对象。
+"""
 
 _COMMON_PARAMETERS: tuple[str, ...] = ("skill_tier", "damage_profile", "state_policy")
-"""五个工具共用的三个可选参数（§10.2）。"""
+"""配装类工具共用的三个可选参数（§10.2）；`zkb_search` 不接受它们（传了会报错）。"""
 
 _DEBUG: bool = os.environ.get("EVEFIT_MCP_DEBUG", "").strip().lower() not in (
     "",
@@ -418,13 +442,18 @@ def _common_arguments(arguments: dict) -> dict:
 
 
 # =============================================================================
-# 五、五个工具的实现（每个都是一次 `api` 调用，**不做任何加工**）
+# 五、工具实现（每个都是一次 `api` 调用，**不做任何加工**）
 # =============================================================================
 
 
 def _tool_fit_parse(arguments: dict) -> dict:
     """`fit_parse` → `api.parse_fit()`。"""
     return _api().parse_fit(_fit_argument(arguments), **_common_arguments(arguments))
+
+
+def _tool_fit_killmail(arguments: dict) -> dict:
+    """`fit_killmail` → `api.fit_killmail()`（**只接受战报**；EFT 会得到 not_a_killmail）。"""
+    return _api().fit_killmail(_fit_argument(arguments), **_common_arguments(arguments))
 
 
 def _tool_fit_index(arguments: dict) -> dict:
@@ -460,14 +489,36 @@ def _tool_fit_detail(arguments: dict) -> dict:
     )
 
 
+_ZKB_INJECTION_KEYS: tuple[str, ...] = ("requester", "clock", "sleeper")
+"""`api.zkb_search` 的三个**测试注入点**：MCP 层不转发（客户端不该能塞一个请求替身）。"""
+
+
+def _tool_zkb_search(arguments: dict) -> dict:
+    """`zkb_search` → `api.zkb_search(**arguments)`（**不做任何加工**）。
+
+    为什么不在这里挑参数：`api.zkb_search` 的 `**common` 已经会对「时间区间类参数」
+    和「不认识的参数」给出最好的解释（`invalid_argument` + `field` + `hint`）。
+    本层再筛一遍只会把同一个错误说得更模糊 —— 纪律：api 能解释得更好，就不要抢在
+    它前面拒绝。唯一例外是三个注入点（那是测试用的，不是协议表面）。
+    """
+    params = {
+        key: value
+        for key, value in arguments.items()
+        if key not in _ZKB_INJECTION_KEYS
+    }
+    return _api().zkb_search(**params)
+
+
 _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "fit_parse": _tool_fit_parse,
+    "fit_killmail": _tool_fit_killmail,
     "fit_index": _tool_fit_index,
     "fit_view": _tool_fit_view,
     "fit_get": _tool_fit_get,
     "fit_detail": _tool_fit_detail,
+    "zkb_search": _tool_zkb_search,
 }
-"""工具名 → 实现（键集合必须与 `_TOOL_ORDER` 一致，`_build_tool_specs()` 会核对）。"""
+"""工具名 → 实现（键集合必须与 `TOOL_NAMES` 一致，`_build_tool_specs()` 会核对）。"""
 
 
 # =============================================================================
@@ -496,6 +547,16 @@ _TOOL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
         "stability 各 3–5 个数，加 flags（id + hint）、provenance_counts 与 budget。"
         "实测约 2k 字符 —— **默认入口**，批量看战报、快速判断时用它，不要一上来就 detail。",
     ),
+    "fit_killmail": (
+        "战报上下文（谁打的、损失多少、挨了多少伤害）",
+        "战报上下文：损失价值（fitted/dropped/destroyed/total）、参战方（人数 / 总伤害 / "
+        "Σdamage 与 victim.damage_taken 的校验 / 最终一击 / 按舰级与武器族的分桶 / 安全等级"
+        "分布）、星系与安全等级、以及「挨了多少伤害 vs 自身 EHP」。"
+        "**分析一条战报时，先 fit_parse 看配装，再 fit_killmail 拿上下文；不要自己去打开 "
+        "zkillboard 网页。** 只接受 killmail（JSON / {killmail_id, hash} / killmail 链接）："
+        "EFT / DNA / 结构化配装会得到 not_a_killmail。拿不到的值一律 null（不猜），"
+        "damage_check 不等时给 mismatch + damage_diff（数据质量信号）。",
+    ),
     "fit_view": (
         "单视角全字段（L1）",
         "单视角全字段：overview + provenance（measured/assumed/unknown 三态表）+ "
@@ -515,6 +576,17 @@ _TOOL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
         "不指定 view 时返回**六个视角全部**，体量很大（实测 10 KB 起）——"
         "先 fit_view 定位，再 fit_detail(view=\"...\")；path 走 '<视角>.<字段>'。",
     ),
+    "zkb_search": (
+        "战报列表检索（谁在打谁 / 最近损失了什么）",
+        "查某人/某公司/某联盟/某船型/某星系/某区域的战报列表（AND 复合条件："
+        "多个条件同时给就是同时满足）。时间只能用 past_seconds（zkb 已停用起止时间："
+        "startTime/endTime 会返回 invalid_argument）；单页最多 200 条，更早的数据靠 "
+        "page 往回翻。side = kills / losses / both（both 合并去重并按 killmail_time 倒序）。"
+        "返回每条的 killmail_id / killmail_time / ship{type_id,name,group} / value / "
+        "labels / npc / solo，加整页聚合（total_value / median_value / by_ship / "
+        "time_span）；limit 只截断 kills 数组，count 与 aggregates 仍按整页算。"
+        "列表不含明细，明细用 fit_killmail。",
+    ),
 }
 
 _TOOL_ANNOTATIONS: dict[str, Any] = {
@@ -526,7 +598,10 @@ _TOOL_ANNOTATIONS: dict[str, Any] = {
 
 
 def _common_properties() -> dict:
-    """五个工具共用的属性（§10.2）：`fit` 必填，其余可选并写明默认值。"""
+    """配装类工具共用的属性（§10.2）：`fit` 必填，其余可选并写明默认值。
+
+    `zkb_search` **不在这里** —— 它没有 `fit`，走 `_zkb_input_schema()`。
+    """
     api = _api()
     return {
         "fit": {
@@ -602,34 +677,110 @@ def _input_schema(*, view: str = "none", path: str = "none") -> dict:
     }
 
 
+def _zkb_input_schema() -> dict:
+    """`zkb_search` 的 `inputSchema`（**没有 `fit`**：它不是配装工具）。
+
+    六个实体条件都是 `string|integer`（名字或整数 id）且可同时给（AND 复合）；
+    再给 `past_seconds` / `page` / `side` / `limit` 四个开关。**没有 `required`**：
+    「至少要给一个实体条件」由 api 判（它给得出比 schema 更有用的解释）。
+    """
+    api = _api()
+
+    def _entity(label: str, segment: str) -> dict:
+        return {
+            "type": ["string", "integer"],
+            "description": (
+                f"{label}（名字或整数 id），对应 zkb 的 {segment} 段；"
+                "可与其它条件同时给（同时满足 = AND）。名字走 ESI /universe/ids/ 解析。"
+            ),
+        }
+
+    properties: dict[str, Any] = {
+        "character": _entity("角色", "characterID"),
+        "corporation": _entity("公司", "corporationID"),
+        "alliance": _entity("联盟", "allianceID"),
+        "ship": _entity("船型", "shipTypeID"),
+        "solar_system": _entity("星系", "solarSystemID"),
+        "region": _entity("区域", "regionID"),
+        "past_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "时间窗口（秒）：只查最近这么多秒的战报（604800 = 7 天，86400 = 1 天）。"
+                "**时间只能这样给**：zkb 已停用 startTime / endTime（abuse 防护），"
+                "传起止时间会得到 invalid_argument。"
+            ),
+        },
+        "page": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1,
+            "description": (
+                "页码（1 = 最新一页）。单页最多 200 条（pastSeconds 窗口内的更早数据"
+                "靠 page 往回翻）。"
+            ),
+        },
+        "side": {
+            "type": "string",
+            "enum": list(api.ZKB_SIDES),
+            "default": api.ZKB_SIDE_BOTH,
+            "description": (
+                "kills = 击杀 / losses = 损失 / both = 两者都要"
+                "（两条路径各请求一次，合并去重后按 killmail_time 倒序）。"
+            ),
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": api.ZKB_PAGE_SIZE,
+            "default": api.ZKB_LIMIT_DEFAULT,
+            "description": (
+                "只截断返回的 kills 数组；count 与 aggregates 仍按整页算"
+                "（截断这件事会写在 note 里）。"
+            ),
+        },
+    }
+    return {"type": "object", "properties": properties, "required": []}
+
+
+def _schema_for(name: str) -> dict:
+    """工具 → `inputSchema`（`zkb_search` 不是配装工具，走自己那一套）。"""
+    if name == "zkb_search":
+        return _zkb_input_schema()
+    return _input_schema(
+        view={"fit_view": "required", "fit_detail": "optional"}.get(name, "none"),
+        path={"fit_get": "required", "fit_detail": "optional"}.get(name, "none"),
+    )
+
+
 _SPECS_CACHE: tuple[dict, ...] | None = None
 
 
 def _build_tool_specs() -> tuple[dict, ...]:
-    """构建 `tools/list` 的 `tools`（**懒构建 + 缓存**：enum 要等 api 导入后才准）。"""
+    """构建 `tools/list` 的 `tools`（**懒构建 + 缓存**：enum 要等 api 导入后才准）。
+
+    清单的唯一来源是 `TOOL_NAMES`；这里只做两件事：核对实现齐了没有、按名字取
+    `(title, description, inputSchema)`。**没有第二个工具名清单。**
+    """
     global _SPECS_CACHE
     if _SPECS_CACHE is not None:
         return _SPECS_CACHE
-    if set(_HANDLERS) != set(_TOOL_ORDER):  # pragma: no cover - 结构自检
+    if set(_HANDLERS) != set(TOOL_NAMES):  # pragma: no cover - 结构自检
         raise RuntimeError(
-            f"_HANDLERS 与 _TOOL_ORDER 不一致：{sorted(_HANDLERS)} vs {sorted(_TOOL_ORDER)}"
+            f"_HANDLERS 与 TOOL_NAMES 不一致：{sorted(_HANDLERS)} vs {sorted(TOOL_NAMES)}"
         )
+    missing = [name for name in TOOL_NAMES if name not in _TOOL_DESCRIPTIONS]
+    if missing:  # pragma: no cover - 结构自检
+        raise RuntimeError(f"这些工具没有 title / description：{missing}")
     specs: list[dict] = []
-    for name in _TOOL_ORDER:
+    for name in TOOL_NAMES:
         title, description = _TOOL_DESCRIPTIONS[name]
         specs.append(
             {
                 "name": name,
                 "title": title,
                 "description": description,
-                "inputSchema": _input_schema(
-                    view={"fit_view": "required", "fit_detail": "optional"}.get(
-                        name, "none"
-                    ),
-                    path={"fit_get": "required", "fit_detail": "optional"}.get(
-                        name, "none"
-                    ),
-                ),
+                "inputSchema": _schema_for(name),
                 "annotations": dict(_TOOL_ANNOTATIONS),
             }
         )
@@ -640,15 +791,24 @@ def _build_tool_specs() -> tuple[dict, ...]:
 INSTRUCTIONS: str = (
     "evefit 配装分析（EVE Online）。典型顺序："
     "① fit_parse —— 先确认这套配装被正确读懂了（船 / 模块件数 / warnings）；"
-    "② fit_index —— 默认入口，六维度摘要（约 2k 字符）；"
-    "③ fit_view / fit_get —— 某维度可疑就展开它，或按路径精确取一个数；"
-    "④ fit_detail —— 深挖（升级候选、完整技能表），只在需要时调，返回很大。"
+    "② fit_killmail —— **分析一条战报时**拿上下文（损失价值 / 参战方 / 伤害构成 / 最终一击 / "
+    "星系与安全等级 / 挨了多少伤害 vs 自身 EHP）；不要自己去打开 zkillboard 网页；"
+    "③ fit_index —— 默认入口，六维度摘要（约 2k 字符）；"
+    "④ fit_view / fit_get —— 某维度可疑就展开它，或按路径精确取一个数；"
+    "⑤ zkb_search —— **要先找战报**时用它：「谁在打这个星系」「这个公司最近损失了什么」"
+    "这类问法先 zkb_search 筛出 killmail_id，再对具体那条调 fit_killmail。"
+    "条件可复合（AND）；时间**只能用 past_seconds**（zkb 已停用 startTime/endTime），"
+    "单页最多 200 条、更早的靠 page 翻；它有 1.2 s 限流，别在循环里逐条查；"
+    "⑥ fit_detail —— 深挖（升级候选、完整技能表），只在需要时调，返回很大。"
     "返回统一信封：成功 {ok:true, result, meta}，失败 {ok:false, error:{kind, ...}}。"
     "业务失败时 isError=true 但仍是正常响应：读 error.kind（parse_failed / "
     "ambiguous_ship / unknown_module / invalid_path / invalid_argument / "
-    "network_failed / internal_error）以及 candidates / hint / line / raw。"
+    "not_a_killmail / unknown_entity / rate_limited / network_failed / internal_error）"
+    "以及 candidates / hint / line / raw。"
     "数值一律来自投影层，工具不做换算、不做评分与判词；"
     "provenance 有三种状态（measured / assumed / unknown），unknown 不是 0，别当 0 用。"
+    "fit_killmail 里 null 不等于 0：拿不到的星系名 / 安全等级 / 价值块一律 null，"
+    "原因写在 warnings 里。"
 )
 
 
@@ -774,7 +934,7 @@ def _initialize(params: dict, session: _Session) -> dict:
 
 
 def _list_tools() -> dict:
-    """`tools/list`：五个工具 + 完整 JSON Schema（顺序 = 推荐调用顺序）。"""
+    """`tools/list`：`TOOL_NAMES` 里的全部工具 + 完整 JSON Schema（顺序 = 推荐调用顺序）。"""
     return {"tools": list(_build_tool_specs())}
 
 
@@ -788,12 +948,12 @@ def _call_tool(params: dict, session: _Session) -> dict:
     name = params.get("name")
     if not isinstance(name, str) or not name:
         raise _InvalidParams(
-            "缺少 tools/call 的 name", field="name", hint=list(_TOOL_ORDER)
+            "缺少 tools/call 的 name", field="name", hint=list(TOOL_NAMES)
         )
     handler = _HANDLERS.get(name)
     if handler is None:
         raise _UnknownTool(
-            f"未知工具 {name!r}；可用工具：{list(_TOOL_ORDER)}"
+            f"未知工具 {name!r}；可用工具：{list(TOOL_NAMES)}"
         )
     raw_arguments = params.get("arguments")
     if raw_arguments is None:
@@ -935,7 +1095,7 @@ def dispatch(message: object, session: _Session) -> dict | None:
         return _error_response(request_id, METHOD_NOT_FOUND, str(exc))
     except _UnknownTool as exc:
         return _error_response(
-            request_id, INVALID_PARAMS, str(exc), data={"hint": list(_TOOL_ORDER)}
+            request_id, INVALID_PARAMS, str(exc), data={"hint": list(TOOL_NAMES)}
         )
     except Exception as exc:  # noqa: BLE001 - 最后一层兜底：不让进程倒下
         _log(f"{method} 内部异常：\n{traceback.format_exc()}")
@@ -1291,7 +1451,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         _api()
         _build_tool_specs()
-        _log(f"工具就绪：{list(_TOOL_ORDER)}（{(time.perf_counter() - started) * 1000:.0f}ms）")
+        _log(f"工具就绪：{list(TOOL_NAMES)}（{(time.perf_counter() - started) * 1000:.0f}ms）")
     except BaseException as exc:  # noqa: BLE001 - **不在这里退出**：让客户端看到结构化错误
         _log(
             "预热失败（服务继续，调用时返回 internal_error）："

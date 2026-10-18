@@ -1,0 +1,396 @@
+[
+ {
+  "killmail_id": 139265742,
+  "killmail_time": "2026-10-18T19:29:03Z",
+  "solar_system_id": 31002496,
+  "victim": {
+   "alliance_id": 99011699,
+   "character_id": 2121531136,
+   "corporation_id": 840323545,
+   "damage_taken": 17699,
+   "ship_type_id": 22444
+  },
+  "zkb": {
+   "locationID": 40479483,
+   "hash": "ca138b661cd6f1384fd7815e30c19da353d5d3bd",
+   "fittedValue": 338444588.4,
+   "droppedValue": 79596627.41,
+   "destroyedValue": 318132436.64,
+   "totalValue": 397729064.05,
+   "totalDroppableValue": 84038769.11,
+   "points": 7,
+   "npc": false,
+   "solo": false,
+   "awox": false,
+   "labels": [
+    "tz:eu",
+    "cat:6",
+    "#:2+",
+    "pvp",
+    "loc:w-space",
+    "isk:under1b"
+   ]
+  }
+ },
+ {
+  "killmail_id": 139264484,
+  "killmail_time": "2026-10-18T18:49:23Z",
+  "solar_system_id": 30000774,
+  "victim": {
+   "alliance_id": 1354830081,
+   "character_id": 302631173,
+   "corporation_id": 98370861,
+   "damage_taken": 23671,
+   "ship_type_id": 22444
+  },
+  "zkb": {
+   "locationID": 40048869,
+   "hash": "abde1e7fbd3e953ad1e8abfceb5d05652f6392f2",
+   "fittedValue": 616223048.43,
+   "droppedValue": 266774066.94,
+   "destroyedValue": 361985180.78,
+   "totalValue": 628759247.72,
+   "totalDroppableValue": 268154569.63,
+   "points": 4,
+   "npc": false,
+   "solo": false,
+   "awox": false,
+   "labels": [
+    "tz:eu",
+    "cat:6",
+    "#:5+",
+    "pvp",
+    "loc:nullsec",
+    "isk:under1b"
+   ]
+  }
+ },
+ {
+  "killmail_id": 139262157,
+  "killmail_time": "2026-10-18T17:42:44Z",
+  "solar_system_id": 30002101,
+  "victim": {
+   "character_id": 2119889760,
+   "corporation_id": 98747770,
+   "damage_taken": 23175,
+   "ship_type_id": 22444
+  },
+  "zkb": {
+   "locationID": 40134077,
+   "hash": "3f5943dbaa5bfb97dbc65dedde2a07be38a56666",
+   "fittedValue": 533705176.42,
+   "droppedValue": 245865599.7,
+   "destroyedValue": 326153449.02,
+   "totalValue": 572019048.72,
+   "totalDroppableValue": 252567703.97,
+   "points": 1,
+   "npc": false,
+   "solo": false,
+   "awox": false,
+   "labels": [
+    "tz:eu",
+    "cat:6",
+    "#:10+",
+    "pvp",
+    "loc:lowsec",
+    "isk:under1b"
+   ]
+  }
+ },
+ {
+  "killmail_id": 139262140,
+  "killmail_time": "2026-10-18T17:42:21Z",
+  "solar_system_id": 30002101,
+  "victim": {
+   "character_id": 2119509469,
+   "corporation_id": 98527592,
+   "damage_taken": 28317,
+   "ship_type_id": 22444
+  },
+  "zkb": {
+   "locationID": 40134077,
+   "hash": "7e49e87d64b15693a4fabfca74909b06f6aa51a3",
+   "fittedValue": 533682052.12,
+   "droppedValue": 93245570.59,
+   "destroyedValue": 493297200.81,
+   "totalValue": 586542771.4,
+   "totalDroppableValue": 267091426.65,
+   "points": 1,
+   "npc": false,
+   "solo": false,
+   "awox": false,
+   "labels": [
+    "tz:eu",
+    "cat:6",
+    "#:5+",
+    "pvp",
+    "loc:lowsec",
+    "isk:under1b"
+   ]
+  }
+ },
+ {
+  "killmail_id": 139260619,
+  "killmail_time": "2026-10-18T16:39:21Z",
+  "solar_system_id": 30002768,
+  "victim": {
+   "alliance_id": 99012181,
+   "character_id": 2119679925,
+   "corporation_id": 98726959,
+   "damage_taken": 14880,
+   "ship_type_id": 22444
+  },
+  "zkb": {
+   "locationID": 50014089,
+   "hash": "0329e3e84ad883573336f4e07b20e683f9621742",
+   "fittedValue": 352369578.45,
+   "droppedValue": 37014690.07,
+   "destroyedValue": 328543877.51,
+   "totalValue": 365558567.58,
+   "totalDroppableValue": 61953347.35,
+   "points": 62,
+   "npc": false,
+   "solo": true,
+   "awox": false,
+   "labels": [
+    "tz:ru",
+    "cat:6",
+    "solo",
+    "pvp",
+    "loc:highsec",
+    "isk:under1b"
+   ]
+  }
+ },
+ {
+  "killmail_id": 139260500,
+  "killmail_time": "2026-10-18T16:34:09Z",
+  "solar_system_id": 30002090,
+  "victim": {
+   "alliance_id": 99002584,
+   "character_id": 1680926139,
+   "corporation_id": 98232099,
+   "damage_taken": 100820,
+   "ship_type_id": 22444
+  },
+  "zkb": {
+   "locationID": 50007989,
+   "hash": "e82e4dfb6cbd171a2f1da2b840ea88cc7961842f",
+   "fittedValue": 644605955.15,
+   "droppedValue": 439145038.77,
+   "destroyedValue": 353145691.59,
+   "totalValue": 792290730.36,
+   "totalDroppableValue": 452262718.94,
+   "points": 29,
+   "npc": false,
+   "solo": true,
+   "awox": false,
+   "labels": [
+    "tz:ru",
+    "cat:6",
+    "solo",
+    "pvp",
+    "loc:lowsec",
+    "isk:under1b"
+   ]
+  }
+ },
+ {
+  "killmail_id": 139255953,
+  "killmail_time": "2026-10-18T13:27:33Z",
+  "solar_system_id": 30004710,
+  "victim": {
+   "alliance_id": 1354830081,
+   "character_id": 225035532,
+   "corporation_id": 98127387,
+   "damage_taken": 21542,
+   "ship_type_id": 22444
+  },
+  "zkb": {
+   "locationID": 50009866,
+   "hash": "3f718d7de1258c7c24d1b9889a348c877933391f",
+   "fittedValue": 370947871.24,
+   "droppedValue": 27504035.29,
+   "destroyedValue": 346505008.09,
+   "totalValue": 374009043.38,
+   "totalDroppableValue": 29137698.62,
+   "points": 1,
+   "npc": false,
+   "solo": false,
+   "awox": false,
+   "labels": [
+    "tz:au",
+    "cat:6",
+    "#:5+",
+    "pvp",
+    "loc:nullsec",
+    "isk:under1b"
+   ]
+  }
+ },
+ {
+  "killmail_id": 139254278,
+  "killmail_time": "2026-10-18T12:25:59Z",
+  "solar_system_id": 30004722,
+  "victim": {
+   "alliance_id": 99003214,
+   "character_id": 2119211898,
+   "corporation_id": 98224835,
+   "damage_taken": 22256,
+   "ship_type_id": 22444
+  },
+  "zkb": {
+   "locationID": 40298964,
+   "hash": "698e4201b739d3f1ee3c65bbed733714e33d876a",
+   "fittedValue": 430225327.56,
+   "droppedValue": 124211693.88,
+   "destroyedValue": 330606043.55,
+   "totalValue": 454817737.43,
+   "totalDroppableValue": 152071858.16,
+   "points": 1,
+   "npc": false,
+   "solo": false,
+   "awox": false,
+   "labels": [
+    "tz:au",
+    "cat:6",
+    "#:5+",
+    "pvp",
+    "loc:nullsec",
+    "isk:under1b"
+   ]
+  }
+ },
+ {
+  "killmail_id": 139251576,
+  "killmail_time": "2026-10-18T09:43:42Z",
+  "solar_system_id": 30003467,
+  "victim": {
+   "alliance_id": 99003214,
+   "character_id": 2117764044,
+   "corporation_id": 98169165,
+   "damage_taken": 26110,
+   "ship_type_id": 22444
+  },
+  "zkb": {
+   "locationID": 50010225,
+   "hash": "37b70da972e4dcdad8a24a587e6275f422f5386c",
+   "fittedValue": 521660196.17,
+   "droppedValue": 60622891.38,
+   "destroyedValue": 480516214.32,
+   "totalValue": 541139105.7,
+   "totalDroppableValue": 234230039.51,
+   "points": 1,
+   "npc": false,
+   "solo": false,
+   "awox": false,
+   "labels": [
+    "tz:au",
+    "cat:6",
+    "#:5+",
+    "pvp",
+    "loc:lowsec",
+    "isk:under1b"
+   ]
+  }
+ },
+ {
+  "killmail_id": 139249625,
+  "killmail_time": "2026-10-18T08:09:36Z",
+  "solar_system_id": 31002241,
+  "victim": {
+   "alliance_id": 551692893,
+   "character_id": 95277885,
+   "corporation_id": 220243444,
+   "damage_taken": 447466,
+   "ship_type_id": 22444
+  },
+  "zkb": {
+   "locationID": 40487531,
+   "hash": "b2b3d6ab9e562f04b5240273c1ca9f7ee69f6756",
+   "fittedValue": 644919316.5,
+   "droppedValue": 376136981.03,
+   "destroyedValue": 400398263.1,
+   "totalValue": 776535244.13,
+   "totalDroppableValue": 479099999.38,
+   "points": 1,
+   "npc": false,
+   "solo": false,
+   "awox": false,
+   "labels": [
+    "tz:au",
+    "cat:6",
+    "#:5+",
+    "pvp",
+    "loc:w-space",
+    "isk:under1b"
+   ]
+  }
+ },
+ {
+  "killmail_id": 139249078,
+  "killmail_time": "2026-10-18T07:34:26Z",
+  "solar_system_id": 30004953,
+  "victim": {
+   "alliance_id": 99009163,
+   "character_id": 2122977793,
+   "corporation_id": 98738067,
+   "damage_taken": 22100,
+   "ship_type_id": 22444
+  },
+  "zkb": {
+   "locationID": 40313654,
+   "hash": "327591fa8045da26c93de495d08c3321ac7b57a4",
+   "fittedValue": 505068974.36,
+   "droppedValue": 188550265.66,
+   "destroyedValue": 330962678.1,
+   "totalValue": 519512943.76,
+   "totalDroppableValue": 190374932.33,
+   "points": 54,
+   "npc": false,
+   "solo": true,
+   "awox": false,
+   "labels": [
+    "tz:usw",
+    "cat:6",
+    "solo",
+    "pvp",
+    "loc:nullsec",
+    "isk:under1b"
+   ]
+  }
+ },
+ {
+  "killmail_id": 139247131,
+  "killmail_time": "2026-10-18T05:38:20Z",
+  "solar_system_id": 30001381,
+  "victim": {
+   "alliance_id": 99013846,
+   "character_id": 93818484,
+   "corporation_id": 98772776,
+   "damage_taken": 23132,
+   "ship_type_id": 22444
+  },
+  "zkb": {
+   "locationID": 50016530,
+   "hash": "86e48614084b23c2384f4477044e9954da9c37f7",
+   "fittedValue": 567810709.25,
+   "droppedValue": 476104448.53,
+   "destroyedValue": 313529278.54,
+   "totalValue": 789633727.07,
+   "totalDroppableValue": 478187211.66,
+   "points": 1,
+   "npc": false,
+   "solo": false,
+   "awox": false,
+   "labels": [
+    "tz:usw",
+    "cat:6",
+    "#:10+",
+    "pvp",
+    "loc:pochven",
+    "isk:under1b"
+   ]
+  }
+ }
+]
