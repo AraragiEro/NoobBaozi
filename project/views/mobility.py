@@ -20,9 +20,22 @@
      所以与 `"active"` 数值相同，但语义不同，照实分开给）；
    - `"off"` = 全部模块 `offline`（任务书里写作 `offline` 档，`acceptance/field_spec.json`
      的子键名是 `off`，此处取后者以免下游对不上）；
+   - `"propulsion_off"` = **只把推进模块置 offline**、其余模块保持当前状态
+     （T-35 补的第五档：这才是「推进关闭」的真实状态，也是 `mwd_sig_increase` 文案
+     里「关闭时」那个数的来源，见下）；
    - `"active"` = 全部模块 `active`（用 `engine/scenarios.build_variant` 造变体，
      不手写状态注入——变体语义只有 `scenarios` 一份）；
    - `"overload"` = 全部模块 `overload`。
+   **为什么必须有第五档（T-35 / f67 实测）**：`off` 是**全部模块**离线，f67 里
+   `off.sig_m = 60.0`（船体裸值）；而诊断 flag 说的「推进关闭」是只关推进，
+   实测 `65.72 m` —— 差的 5.72 m 是 `Small Shield Extender II` 这类模块的信号半径罚值，
+   它不属于推进模块。两个数各自都对，但**同一视角里出现两个「关闭时」**就是自相矛盾
+   （agent 无法判断该信哪个）。现在「推进关闭」有了独立字段，flag 文案里的数字与
+   `propulsion_states.propulsion_off.*` 逐位相同（`tests/test_views_a.py` 钉住），
+   `off` 的语义**不变**（仍是全模块离线）。构造只写一份：`views/shared.py` 的
+   `propulsion_off_attrs()`（诊断规则也调它）。
+   ⚠️ 本档**不是**求解：它不挑「保留 AB 还是保留 MWD」，双推进样本里两个都关；
+   「只开 AB / 只开 MWD」那种单推进分支属于玩家真实状态求解，不在本期。
 4. `mass` 也随推进状态变化（实测 offline 1050000 / active 1550000，差 500000
    正是 5MN MWD 的 massAddition）。本视角按字段规格只给**当前状态**的 `mass_kg`；
    其它状态下的质量需要时请用对齐时间反推（`align ∝ mass × agility`），本层不另设字段。
@@ -37,7 +50,7 @@ from __future__ import annotations
 from evefit.config import attributes as _a
 from evefit.engine import scenarios
 from evefit.project import units
-from evefit.project.views import register
+from evefit.project.views import register, shared
 from evefit.project.views.base import BASE, OFFLINE, OVERLOAD, ViewContext, ship_attributes
 
 VIEW_NAME = "mobility"
@@ -56,8 +69,8 @@ ACTIVE_SPEC: dict = {
 机制），这里**不**手写状态注入、也不另设默认假设（红线 N9）。
 """
 
-STATE_KEYS: tuple[str, ...] = ("base", "off", "active", "overload")
-"""`propulsion_states` 的四档（语义见模块 docstring §3）。"""
+STATE_KEYS: tuple[str, ...] = ("base", "off", "propulsion_off", "active", "overload")
+"""`propulsion_states` 的五档（语义见模块 docstring §3）。"""
 
 STATE_FIELDS: tuple[tuple[str, int], ...] = (
     ("speed_mps", _a.ATTR_MAX_VELOCITY),
@@ -79,6 +92,9 @@ FIELD_SOURCES: dict[str, int | None] = {
     "propulsion_states.off.speed_mps": _a.ATTR_MAX_VELOCITY,
     "propulsion_states.off.sig_m": _a.ATTR_SIGNATURE_RADIUS,
     "propulsion_states.off.align_time_s": _a.ATTR_ALIGN_TIME,
+    "propulsion_states.propulsion_off.speed_mps": _a.ATTR_MAX_VELOCITY,
+    "propulsion_states.propulsion_off.sig_m": _a.ATTR_SIGNATURE_RADIUS,
+    "propulsion_states.propulsion_off.align_time_s": _a.ATTR_ALIGN_TIME,
     "propulsion_states.active.speed_mps": _a.ATTR_MAX_VELOCITY,
     "propulsion_states.active.sig_m": _a.ATTR_SIGNATURE_RADIUS,
     "propulsion_states.active.align_time_s": _a.ATTR_ALIGN_TIME,
@@ -127,6 +143,9 @@ def build(ctx: ViewContext) -> dict:
         `flags` **恒为空**：可疑点由渲染层统一算一次（见模块 docstring）。
     """
     base_attrs = ctx.attrs(BASE)
+    # 推进模块整体关闭（其余模块保持当前状态）——flag `mwd_sig_increase` 的「关闭时」
+    # 就是这个状态，两边共用 `shared.propulsion_off_attrs()` 的同一次计算（T-35）。
+    propulsion_off = shared.propulsion_off_attrs(ctx)
 
     overview = {
         "speed_mps": _value(base_attrs.get(_a.ATTR_MAX_VELOCITY)),
@@ -138,6 +157,8 @@ def build(ctx: ViewContext) -> dict:
         "propulsion_states": {
             "base": _state_block(base_attrs),
             "off": _state_block(ctx.attrs(OFFLINE)),
+            # 没有索引（判定不了哪些是推进模块）→ 三字段 `None`，不用 base 冒充
+            "propulsion_off": _state_block(propulsion_off or {}),
             "active": _state_block(_active_attrs(ctx)),
             "overload": _state_block(ctx.attrs(OVERLOAD)),
         },

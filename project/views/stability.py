@@ -32,6 +32,27 @@
    `stable_pct > 0` 或引擎给负数 → `None`；否则照实给秒数（f1 = 38.4 s）。
 
 `cap_sensitivity` 只算耗电最高的 5 个模块（13.6 ms 冷启动预算内，最多 5 次变体）。
+
+**T-35 · `peak_load` 与 `cap_by_module` 的真实关系（66 个验收样本逐一实测，误差 0）**：
+
+    船体 `-4 capPeakLoad` == Σ(所有已装模块的装备级 `-4`)，**含负数**
+
+负数来自「向电网输入电容」的模块（吸血/传电 `Energy Nosferatu`、`Capacitor Booster` 等）：
+f67 的 `peak_load 2.21279` = 3.6(MWD) + 0.9(AB) + 0.8(扰频) + 0.51279(MJFG) **− 3.6(吸血)**。
+旧实现把 `cap_use_gj_s <= 0` 的条目丢掉、只留前 8 组，于是 f67 报出 5.813 与 2.213 两个
+互不相等的数（差额恰好是那条 −3.6）。**口径已统一**：`cap_by_module` 是 `peak_load` 的
+完整分解（同 `BASE` 变体、同一批模块状态、含负项、不截断），`tests/test_views_b.py`
+在 f67/f1/f3/f5 上钉住 `peak_load == Σ cap_by_module[].cap_use_gj_s`。
+
+**T-35 · MJFG 的 0.513 GJ/s 是引擎值，不是我们读错属性**（结论写明，别再"修"）：
+引擎的装备级 `-4 capPeakLoad` 恒等于 `capacitorNeed(6) / derivedCycleTime(-3)`（f67 逐件实测：
+AB 7.2/8.0 = 0.9、扰频 4.0/5.0 = 0.8、MWD 36/10 = 3.6，与本视角输出逐位相同）。
+`Micro Jump Field Generator`（37479）的 `-3 = 165760 ms` 而**显示用**的 `duration(73) = 5760 ms`
+——差的是 `moduleReactivationDelay(669) = 160000 ms`（SDE 索引库 `attributes` 表实测名字
+「Reactivation Delay」）：模块每次只能蓄力 5.76 s + 冷却 160 s 打一发，所以整周期是 165.76 s。
+于是 `-4 = 85 / 165.76 = 0.51279 GJ/s`；「`need / duration(73)` ≈ 14.8 GJ/s」是**瞬时**速率
+（只在那 5.76 s 内成立）。两者都对，但只有**周期平均**参与 `-4`、稳定百分比与船体 `-4` 的求和。
+本视角只转述引擎的 `-4`，不重算（红线：不自算 `6 ÷ 周期`，`6` 也不在常量表里）。
 """
 
 from __future__ import annotations
@@ -46,11 +67,12 @@ from evefit.project.views.base import BASE, SLOT_CARGO, ViewContext, ship_attrib
 # 上限与结构判定用 group 名（SDE 实测）
 # =============================================================================
 
-MAX_CAP_BY_MODULE: int = 8
-"""`cap_by_module` 最多列几组（按耗电降序）。"""
-
 MAX_CAP_SENSITIVITY: int = 5
-"""`cap_sensitivity` 最多摘几个模块（每次一个变体，实测 0.33 ms/次）。"""
+"""`cap_sensitivity` 最多摘几个模块（每次一个变体，实测 0.33 ms/次）。
+
+`cap_by_module` **没有**条数上限（T-35）：它是 `capacitor.peak_load` 的完整分解，
+截断会让两个字段不可对账；真正需要限流的是「逐个摘模块重算」这条 5 次的路径。
+"""
 
 REMOTE_REPAIR_GROUPS: frozenset[str] = frozenset(
     {
@@ -210,11 +232,29 @@ def _capacitor(attrs: dict[int, float]) -> dict:
 
 
 def _cap_by_module(fitted: list[tuple[int, dict]]) -> list[dict]:
-    """耗电排行：同型模块合并计数，按合计 GJ/s 降序取前 `MAX_CAP_BY_MODULE` 组。"""
+    """耗电**台账**：同型模块合并计数，按 `cap_use_gj_s` 降序，**全量输出（不截断）**。
+
+    T-35 硬结论（66 个验收样本逐一实测，误差 0）：船体 `-4 capPeakLoad` **就是**
+    所有已装模块装备级 `-4` 的**代数和**，含负数。所以本函数有三条纪律，缺一条就让
+    `Σ cap_by_module[].cap_use_gj_s` 与 `capacitor.peak_load` 对不上：
+
+    1. **负数条目必须入账**（f67：`Small Ghoul Compact Energy Nosferatu` = **−3.6 GJ/s**，
+       它向电网**输入**电容；旧实现用 `use <= 0` 丢掉它，于是四项正数合计 5.813 与
+       `peak_load 2.213` 差了 3.6 —— 差额一直是**这条负项**，不是任务书最初怀疑的 MWD）；
+    2. **不截断**：截掉任何一组，台账和就不再等于 `peak_load`（f40 有 10 组，
+       旧的 `MAX_CAP_BY_MODULE = 8` 会静默丢两组）。「前 8 名」是排行口径，
+       与「可对账的分解」是两件事，这里选后者；
+    3. **同一个 state 集合**：本函数读 `ctx.items(BASE)`，`capacitor.*` 读 `ctx.attrs(BASE)`
+       ——同一份变体、同一批模块状态，所以两者恒等（`tests/test_views_b.py` 用
+       f67/f1/f3/f5 对拍，容差只留给逐项 `units.fmt` 的舍入）。
+
+    `cap_use_gj_s == 0` 的模块不单独列（对和零贡献，列出来只是噪声）；缺失（`None`）
+    照样跳过，不补 0（红线 N4）。
+    """
     grouped: dict[object, dict] = {}
     for _position, item in fitted:
         use = _cap_use(item)
-        if use is None or use <= 0.0:
+        if use is None or use == 0.0:
             continue
         key = item.get("type_id") if isinstance(item.get("type_id"), int) else item.get("name")
         entry = grouped.setdefault(
@@ -232,7 +272,7 @@ def _cap_by_module(fitted: list[tuple[int, dict]]) -> list[dict]:
     ranked = sorted(
         grouped.values(),
         key=lambda entry: (-entry["cap_use_gj_s"], entry.get("module") or ""),
-    )[:MAX_CAP_BY_MODULE]
+    )
     for entry in ranked:
         entry["cap_use_gj_s"] = units.fmt(entry["cap_use_gj_s"])
     return ranked

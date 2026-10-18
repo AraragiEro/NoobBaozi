@@ -941,3 +941,271 @@ def test_diagnostics_evidence_has_no_negative_seconds(real_ctx, name: str) -> No
             if "depletes" not in key:
                 continue
             assert value is None or value > 0.0, f"{name}: {flag['id']}.{key} = {value!r}"
+
+
+# =============================================================================
+# 十、T-35：电容台账自洽（`peak_load` 与 `cap_by_module` 必须同进同出）
+# =============================================================================
+#
+# 随堂测试 f67（Bifrost / killmail 139255942）暴露的三件事之一：`cap_by_module` 四项合计
+# 5.813 GJ/s，而 `capacitor.peak_load` 只有 2.213 —— 同视角两个互不相等的「峰值负载」。
+#
+# 实测结论（66 个验收样本逐一跑过，误差 0）：船体 `-4 capPeakLoad` **就是**所有已装模块
+# 装备级 `-4` 的**代数和**，含负数（吸血 / 传电 / 注射器类向电网**输入**电容）。f67 的差额
+# 3.6 一直是那条 `Small Ghoul Compact Energy Nosferatu = −3.6 GJ/s`，**不是** MWD。
+# 两条口径现在同进同出：都读 `BASE` 变体、同一批模块状态、含负项、不截断。
+
+F67_SPOTCHECK = "f67-spotcheck-139255942.json"
+"""Bifrost 指挥驱逐舰（killmail 139255942）：第一条真实存在的双推进配置。"""
+
+CAP_LEDGER_SAMPLES = (
+    F67_SPOTCHECK,
+    "f1-hecate-killmail.eft",
+    "f3-hecate-modes.eft",
+    MISSILE_SAMPLE,
+)
+"""台账恒等式必须成立的四个样本：f67（含负项）+ f1/f3/f5（任务书点名的对拍样本）。"""
+
+ATTR_CAPACITOR_NEED = 6
+"""`capacitorNeed`（GJ）。**刻意不登记进 `config/attributes.py`**：本视角不自算
+`capacitorNeed ÷ 周期`（T-35 硬结论，见 `views/stability.py` 模块 docstring）。
+这里只为在测试里证明「引擎的 `-4` = `6 ÷ derivedCycleTime(-3)`」。
+"""
+
+ATTR_DERIVED_CYCLE_TIME = -3
+"""`derivedCycleTime`（秒，引擎派生；常量表里已登记为 `('derivedCycleTime', 's', None)`）。"""
+
+
+@pytest.mark.parametrize("name", CAP_LEDGER_SAMPLES)
+def test_peak_load_equals_sum_of_cap_by_module(real_ctx, name: str) -> None:
+    """`peak_load == Σ cap_by_module[].cap_use_gj_s`（同 state 口径：都是 `BASE` 变体）。
+
+    容差只留给**逐项 `units.fmt` 的舍入**（每项 ≤ 5e-4，n 项合计 ≤ 5e-4·n），
+    不是用来掩盖口径差异：f67 上旧的差额是 **3.6**，比这个容差大三个量级。
+    """
+    ctx = real_ctx(name)
+    overview = build_view("stability", ctx)["overview"]
+    capacitor = overview["capacitor"]
+    entries = overview["cap_by_module"]
+
+    assert entries, f"{name}: 有耗电模块就必须有台账"
+    assert math.isclose(
+        capacitor["peak_load"],
+        units.fmt(ctx.attrs(BASE)[A.ATTR_CAP_PEAK_LOAD]),
+        rel_tol=1e-12,
+    ), f"{name}: peak_load 必须是引擎船体 -4 原值（不许自算）"
+
+    total = sum(entry["cap_use_gj_s"] for entry in entries)
+    slack = 1e-3 * (len(entries) + 1)
+    assert math.isclose(total, capacitor["peak_load"], abs_tol=slack), (
+        f"{name}: Σ cap_by_module = {total!r} ≠ peak_load {capacitor['peak_load']!r}"
+        f"（逐项合计：{[entry['cap_use_gj_s'] for entry in entries]}）"
+    )
+
+
+def test_f67_cap_by_module_includes_negative_cap_sources(real_ctx) -> None:
+    """f67 的差额一直是那条**负项**：`Small Ghoul Compact Energy Nosferatu = −3.6 GJ/s`。
+
+    旧实现用 `cap_use_gj_s <= 0` 过滤，于是正项合计 5.813 与 `peak_load 2.213` 差 3.6；
+    负数不是"坏数据"，它是吸血模块**向电网输入**的电容，必须入账才对得上。
+    """
+    ctx = real_ctx(F67_SPOTCHECK)
+    overview = build_view("stability", ctx)["overview"]
+    uses = {entry["module"]: entry["cap_use_gj_s"] for entry in overview["cap_by_module"]}
+
+    assert uses["Small Ghoul Compact Energy Nosferatu"] == -3.6
+    positives = sum(value for value in uses.values() if value > 0.0)
+    negatives = sum(value for value in uses.values() if value < 0.0)
+    peak = overview["capacitor"]["peak_load"]
+
+    assert math.isclose(positives, 5.813, rel_tol=1e-9), "四项正项合计（任务书里的 5.813）"
+    assert math.isclose(negatives, -3.6, rel_tol=1e-9)
+    assert math.isclose(positives + negatives, peak, abs_tol=1e-3)
+    assert math.isclose(peak, 2.213, abs_tol=1e-3), "快照：f67 的 peak_load"
+    # 丢掉负项就正好多出 3.6 —— 这就是历史差额的来源，写成断言免得被"优化"掉
+    assert math.isclose(positives - peak, 3.6, abs_tol=1e-3)
+
+
+@pytest.mark.parametrize("name", (F67_SPOTCHECK, "f40-dreadnought.json"))
+def test_cap_by_module_is_the_complete_ledger(real_ctx, name: str) -> None:
+    """台账**不缺项也不截断**：每一个装备级 `-4` 非零的模块类型都在榜单里。
+
+    测试侧独立复算（自己读 `ctx.items()`，不复用生产的过滤/分组规则）：类型集合必须
+    逐一相等、数值必须是同一个浮点数。f40 有 **10 组**，旧的 `MAX_CAP_BY_MODULE = 8`
+    会静默截掉两组，那时 `Σ` 就不再等于 `peak_load`。
+    """
+    ctx = real_ctx(name)
+    entries = build_view("stability", ctx)["overview"]["cap_by_module"]
+
+    expected: dict[int, float] = {}
+    for item in ctx.items(BASE):
+        if item.get("slot_type") == "cargo":
+            continue
+        use = (item.get("attributes") or {}).get(A.ATTR_CAP_PEAK_LOAD)
+        if use is None or use == 0.0:
+            continue
+        type_id = item.get("type_id")
+        expected[type_id] = expected.get(type_id, 0.0) + use
+
+    got = {entry["type_id"]: entry["cap_use_gj_s"] for entry in entries}
+    assert set(got) == set(expected), f"{name}: 台账漏了类型 {sorted(set(expected) - set(got))}"
+    for type_id, use in expected.items():
+        assert math.isclose(got[type_id], units.fmt(use), rel_tol=1e-12), (name, type_id)
+
+    if name.startswith("f40"):
+        assert len(entries) > 8, "f40 有 10 组：截断到 8 组会让台账和对不上 peak_load"
+
+
+def test_mjfg_cap_load_is_period_average_not_instantaneous(real_ctx) -> None:
+    """MJFG 的 `0.513 GJ/s` 是引擎的**整周期平均**，不是 `need / duration(73)` 的 14.8。
+
+    引擎的装备级 `-4 = capacitorNeed(6) / derivedCycleTime(-3)`（f67 逐件实测：AB 7.2/8.0
+    = 0.9、扰频 4.0/5.0 = 0.8、MWD 36/10 = 3.6）。MJFG 的 `-3 = 165.76 s` 而
+    `duration(73) = 5.76 s`：差的是 `moduleReactivationDelay(669) = 160 s` 冷却 ——
+    一发热 5.76 s 蓄力 + 160 s 冷却，整周期 165.76 s，所以平均负载只有 0.513。
+    「`85 / 5.76 ≈ 14.8`」是那 5.76 秒内的**瞬时**速率，两者都对，但只有平均值参与
+    `-4`、稳定百分比与船体 `-4` 的求和。**这是硬结论，别再把 0.513 当 bug 改掉。**
+    """
+    ctx = real_ctx(F67_SPOTCHECK)
+    overview = build_view("stability", ctx)["overview"]
+    uses = {entry["module"]: entry["cap_use_gj_s"] for entry in overview["cap_by_module"]}
+
+    item = next(
+        item for item in ctx.items(BASE) if item.get("name") == "Micro Jump Field Generator"
+    )
+    attrs = item["attributes"]
+    need = attrs[ATTR_CAPACITOR_NEED]
+    duration = attrs[A.ATTR_MODULE_DURATION]
+    derived_cycle = attrs[ATTR_DERIVED_CYCLE_TIME]
+
+    assert math.isclose(need, 85.0, rel_tol=1e-12), "capacitorNeed(6) = 85 GJ"
+    assert math.isclose(duration, 5.76, rel_tol=1e-12), "显示时长 duration(73) = 5.76 s"
+    assert math.isclose(derived_cycle, 165.76, rel_tol=1e-12), "派生周期 = 蓄力 + 160 s 冷却"
+
+    value = uses["Micro Jump Field Generator"]
+    assert math.isclose(need / derived_cycle, value, rel_tol=1e-3), (
+        "引擎的 -4 就是 need ÷ 派生周期"
+    )
+    assert not math.isclose(need / duration, value, rel_tol=1e-2), (
+        "不能是 need ÷ duration(73)：那是瞬时速率，会大一个量级"
+    )
+    assert value == 0.513, "快照：f67 的 MJFG 装备级 -4（3 位小数）"
+
+
+# =============================================================================
+# 十、T-38：`propulsion_state_conflict`（原 `propulsion_illegal_stack`）
+# =============================================================================
+#
+# 口径（主人裁决，T-38）：**双推进一起带是很常见的事，只是确实不能同时开** ——
+# 所以这**不是**配装问题，而是**状态冲突**：
+#
+# 1. id 从 `propulsion_illegal_stack` 改成 **`propulsion_state_conflict`**（旧 id 不得再出现）；
+# 2. 文案改成「同组同时启用（{conflict}）… 同一时刻只能启用其一 … 基于『多个推进同时启用』
+#    的非真实状态」，**全文不得出现判词**（`FORBIDDEN_WORDS`）；
+# 3. 判据与数值一个字都不许动：引擎不降级、我们也不降级（那是求解，不在本期）。
+
+import evefit.project.views.mobility  # noqa: F401  （导入即注册）
+
+STATE_CONFLICT_FLAG = "propulsion_state_conflict"
+"""T-38 后的唯一 id。"""
+
+LEGACY_STACK_FLAG = "propulsion_illegal_stack"
+"""旧 id（T-35）：**只用来断言它已经不存在**，不要再拿它当 flag 名。"""
+
+STATE_CONFLICT_MESSAGE = (
+    "推进模块同组同时启用（AB 与 MWD），游戏内同一时刻只能启用其一；"
+    "速度/信号/对齐基于「多个推进同时启用」的非真实状态"
+)
+"""f67 逐字文案（`{conflict}` 渲染成 `AB 与 MWD`）。"""
+
+DUAL_PROPULSION_SAMPLES = (F67_SPOTCHECK, "f27-dual-prop.json", "f57-dual-prop.eft")
+"""两个推进模块**都是 active** 的样本（引擎报 `group_id=46 used=2 / allowed=1`）。
+
+⚠️ f27 名字叫 dual-prop，两个推进模块确实都 active —— 它属于这一组（T-35 已实测），
+不是「单推进」样本。
+"""
+
+SINGLE_PROPULSION_SAMPLES = ("f1-hecate-killmail.eft", "f5-no-mwd.json", "f45-t3c-subsys-3.json")
+"""单推进（或带两件但只有一件 active）：**不得**出现状态冲突 flag。"""
+
+
+def test_config_rule_and_implementation_are_renamed_together() -> None:
+    """config 与实现必须同口径：新 id 在两边都在、旧 id 在两边都不在。
+
+    `test_projection_core.py::test_config_rules_match_implementation` 校验「集合相等」，
+    这里补的是**名字本身**：改名的两个文件谁漏了都会红（T-38 靶心之一）。
+    """
+    rules = {rule.id: rule for rule in D.load_rules()}
+
+    assert STATE_CONFLICT_FLAG in rules, f"config 缺新 id，实际：{sorted(rules)}"
+    assert LEGACY_STACK_FLAG not in rules, "config 里旧 id 必须删掉（改 id 不是加别名）"
+    assert STATE_CONFLICT_FLAG in set(D.implemented_rules())
+    assert LEGACY_STACK_FLAG not in set(D.implemented_rules())
+
+    rule = rules[STATE_CONFLICT_FLAG]
+    assert rule.view == "mobility"
+    assert rule.enabled is True
+    # 模板必须只依赖 {conflict}（evidence 里另外三项 used/allowed/group_id 不进文案）
+    assert "{conflict}" in rule.message
+    assert rule.message.endswith("的非真实状态")
+    assert "同一时刻只能启用其一" in rule.message
+    for word in FORBIDDEN_WORDS:
+        assert word not in rule.message, f"文案里出现了判词 {word!r}"
+
+
+@pytest.mark.parametrize("name", DUAL_PROPULSION_SAMPLES)
+def test_dual_propulsion_emits_state_conflict_flag(real_ctx, name: str) -> None:
+    """双推进同时启用：必须有一条 `mobility` flag 说明「这组数基于状态冲突」。"""
+    ctx = real_ctx(name)
+    flags = {flag["id"]: flag for flag in D.evaluate(ctx)}
+
+    assert STATE_CONFLICT_FLAG in flags, f"{name}: 缺 flag，实际 {sorted(flags)}"
+    assert LEGACY_STACK_FLAG not in flags, "旧 id 不得再产出（改 id 不是加别名）"
+
+    flag = flags[STATE_CONFLICT_FLAG]
+    assert flag["view"] == "mobility"
+    assert flag["evidence"]["used"] == 2 and flag["evidence"]["allowed"] == 1
+    assert flag["evidence"]["group_id"] == 46
+    assert flag["message"].startswith("推进模块同组同时启用（")
+    assert "游戏内同一时刻只能启用其一" in flag["message"]
+    for word in FORBIDDEN_WORDS:
+        assert word not in flag["message"], f"{name}: 文案里出现了判词 {word!r}"
+
+    # 体积预算：叠加双方的模块名**不重复进本 flag 的 evidence**（`mwd_sig_increase` 已有）
+    assert len(flags["mwd_sig_increase"]["evidence"]["propulsion"]) == 2
+    assert "propulsion" not in flag["evidence"]
+
+    if name == F67_SPOTCHECK:
+        assert flag["evidence"]["conflict"] == "AB 与 MWD"
+        assert flag["message"] == STATE_CONFLICT_MESSAGE
+
+
+@pytest.mark.parametrize("name", SINGLE_PROPULSION_SAMPLES)
+def test_single_propulsion_stays_silent_about_state_conflict(real_ctx, name: str) -> None:
+    """单推进（或两件但只有一件 active）**不得**报状态冲突（否则就是把正常配装说成冲突）。"""
+    ids = {flag["id"] for flag in D.evaluate(real_ctx(name))}
+    assert STATE_CONFLICT_FLAG not in ids, f"{name}: 单推进不该报状态冲突"
+
+
+def test_rendered_overview_carries_the_renamed_flag_in_mobility(real_ctx) -> None:
+    """渲染层归位：新 id 出现在 `views.mobility.flags` 里，且整份输出**没有判词**。
+
+    `flags` 归位失败会掉进顶层 `flags` 兜底桶（不丢但不归位），所以两条都断言：
+    机动视角里有它，顶层兜底桶里没有它。
+    """
+    from evefit.project import render as R
+
+    overview_output = R.render_overview(real_ctx(F67_SPOTCHECK))
+    mobility_flags = {flag["id"]: flag for flag in overview_output["views"]["mobility"]["flags"]}
+
+    assert STATE_CONFLICT_FLAG in mobility_flags
+    assert LEGACY_STACK_FLAG not in mobility_flags
+    assert STATE_CONFLICT_FLAG not in {
+        flag["id"] for flag in overview_output["flags"]
+    }, "mobility 的 flag 不该掉进顶层兜底桶"
+    assert mobility_flags[STATE_CONFLICT_FLAG]["message"] == STATE_CONFLICT_MESSAGE
+
+    text = json.dumps(overview_output["views"], ensure_ascii=False)
+    for word in FORBIDDEN_WORDS:
+        assert word not in text, f"渲染输出里出现了判词 {word!r}"
+

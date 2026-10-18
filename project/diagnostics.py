@@ -22,6 +22,18 @@
 正确值（载机停在机库不参战，T-28 改造实验已证）。它存在的唯一目的，是让下游知道
 「`weapons[]` 里没有战斗机、`dps.fighter` 是 0」**并非**数据缺失。
 
+还有 `propulsion_state_conflict`（T-35 / T-38 改名）：推进模块触发了引擎 `max_group … limit=active`
+硬违规（f67 是历史上第一条真实存在的双推进配置）。它的形状是**第 1 类 + 第 2 类的组合**：
+「是否有」状态互斥（同组只能启用其一）+ 「相对」事实回显（被叠加出来的速度是多少）。
+**它不重算、不降级、不挑模块**：数值全部保持引擎原样，只把「这些数基于叠加」说出口——
+否则下游 agent 会把 f67 的 `59,928.363 m/s` 当成有效数据（驱逐舰不可能有这个速度）。
+
+**口径（T-38 主人裁决）**：双推进一起带是**很常见的事**，只是确实**不能同时启用**——
+所以这不是「配装有问题」，而是**状态冲突**：id 与文案都不许出现判词，只说「同一时刻只能启用其一」
+与「这组数基于多个推进同时启用的非真实状态」。
+同类历史缺陷：X1（Loki covert cloak 让 CPU 占用虚高）修在资源视角，这次暴露在机动视角
+——**根因都是「状态语义缺失」，不是数值读错**。
+
 倍数常量集中在本文件顶部，全部注明「相对量，非绝对门槛」，并且**只用于判断"明显"**，
 不用于给出「够快 / 够硬 / 够用」这类判词。规则开关与文案在
 `evefit/config/diagnostics.json`（只存 id / view / enabled / message，判定逻辑全在这里）。
@@ -284,8 +296,12 @@ class _Facts:
         return {**self.ctx.fit, "items": items}
 
 
-PROPULSION_GROUP = "Propulsion Module"
-"""推进模块的 SDE group 名（实测：5MN MWD / 1MN AB 的 group 都是这个名字）。"""
+PROPULSION_GROUP = _shared.PROPULSION_GROUP
+"""推进模块的 SDE group 名（实测：5MN MWD / 1MN AB 的 group 都是这个名字）。
+
+**同一个常量只在 `views/shared.py` 定义一次**（T-35）：机动视角要把「推进模块关闭」
+单独列一档，两边必须用同一套 group 判据，否则「哪些模块算推进」会分叉。
+"""
 
 
 def _usage_summary(usage: dict[str, dict[str, int]]) -> tuple[int, str]:
@@ -516,9 +532,16 @@ def _rule_no_propulsion(facts: _Facts) -> dict | None:
 def _rule_mwd_sig_increase(facts: _Facts) -> dict | None:
     """推进模块启用时信号半径显著大于关闭时（相对倍数，不给绝对值门槛）。
 
-    关闭态用「把推进模块整个摘掉」构造：推进模块对信号半径的作用只在启用时生效，
-    摘掉等价于关闭，而不会连带关掉别的东西（`scenarios` 只支持 `{"all": state}`，
-    做不到「只关推进」）。
+    关闭态 = **只把推进模块置 offline、其余模块保持当前状态**（T-35 起口径只有一份：
+    `views/shared.py::propulsion_off_attrs()`，与机动视角的
+    `propulsion_states.propulsion_off` 是**同一次变体计算**）。
+
+    历史缺陷（T-35 / f67）：这里以前用「把推进模块从 fit 里摘掉」自己造变体，而机动视角的
+    `propulsion_states.off` 是**全模块离线** —— 于是同一视角里出现两个「关闭时信号半径」：
+    文案写 `65.72 m`（摘推进后，仍含 `Small Shield Extender II` 的 5.72 m 罚值），
+    `off.sig_m` 写 `60.0 m`（全离线，船体裸值）。两个数各自都对，但读者无从判断该信哪个。
+    现在「推进关闭」有独立字段，本规则的数字与 `propulsion_off.*` 逐位相同
+    （`tests/test_views_a.py` 钉住「文案里的数字 == propulsion_states 对应字段」）。
     """
     if not facts.index_available:
         return None
@@ -534,8 +557,9 @@ def _rule_mwd_sig_increase(facts: _Facts) -> dict | None:
     if sig_on is None or sig_on <= 0.0:
         return None
 
-    without = facts.fit_without({position for position, _item in propulsions})
-    attrs_off = ship_attributes(facts.ctx.calculate_variant(_key("propulsion_off"), without))
+    attrs_off = _shared.propulsion_off_attrs(facts.ctx)
+    if attrs_off is None:
+        return None
     sig_off = _num(attrs_off, _a.ATTR_SIGNATURE_RADIUS)
     if sig_off is None or sig_off <= 0.0:
         return None
@@ -551,6 +575,105 @@ def _rule_mwd_sig_increase(facts: _Facts) -> dict | None:
         "ratio_floor": SIG_INCREASE_RATIO,
         "propulsion_state": ",".join(sorted(states)),
         "propulsion": [item.get("name") or item.get("type_id") for _pos, item in propulsions],
+    }
+
+
+def _propulsion_label(name: str) -> str:
+    """推进模块名 → 短标签（`AB` / `MWD`）；认不出的**原样返回名字**（不猜）。"""
+    if "Afterburner" in name:
+        return "AB"
+    if "Microwarpdrive" in name:
+        return "MWD"
+    return name
+
+
+def _conflict_text(names: list[str]) -> str:
+    """多个推进模块 → 「AB 与 MWD」这种并列说法（>2 个用顿号，顺序同装配顺序）。"""
+    labels = [_propulsion_label(name) for name in names]
+    return " 与 ".join(labels) if len(labels) == 2 else "、".join(labels)
+
+
+def _propulsion_active_limit_violation(facts: _Facts) -> dict | None:
+    """在引擎 `validate()` 里找「推进模块同组超过 active 上限」那条硬违规。
+
+    判据**用引擎的结论，不自己数**：`rule.type == "max_group"` 且 `limit == "active"` 且
+    `used > allowed`，并且违规**目标模块**的 group 名是 `Propulsion Module`
+    （同一套 group 判据在 `views/shared.py`，两边不会分叉）。
+    其它 `max_group`（例如 f22 的 group 1770 `limit=active` 违规、挂点/装备组）不命中。
+    """
+    violations = facts.ctx.engine.validate(facts.ctx.fit)
+    for violation in violations:
+        if not isinstance(violation, dict):
+            continue
+        rule = violation.get("rule")
+        if not isinstance(rule, dict) or rule.get("type") != "max_group":
+            continue
+        if rule.get("limit") != "active":
+            continue
+        used = rule.get("used")
+        allowed = rule.get("allowed")
+        if isinstance(used, bool) or isinstance(allowed, bool):
+            continue
+        if not isinstance(used, (int, float)) or not isinstance(allowed, (int, float)):
+            continue
+        if used <= allowed:
+            continue
+        target = violation.get("target")
+        index = target.get("index") if isinstance(target, dict) else None
+        if not isinstance(index, int) or isinstance(index, bool):
+            continue
+        if not 0 <= index < len(facts.items):
+            continue
+        if facts.group_name(facts.items[index].get("type_id")) != _shared.PROPULSION_GROUP:
+            continue
+        return {
+            "group_id": rule.get("group_id"),
+            "used": int(round(float(used))),
+            "allowed": int(round(float(allowed))),
+        }
+    return None
+
+
+def _rule_propulsion_state_conflict(facts: _Facts) -> dict | None:
+    """推进模块触发了 `max_group … limit=active` 硬违规 → 速度/信号/对齐基于**状态冲突**。
+
+    T-35 / f67（历史上第一条真实存在的双推进配置：`1MN AB` + `5MN MWD` 同时 active）：
+
+    - 引擎**不会**因为 `max_group` 违规自动把模块降级，于是 `-37 maxVelocity` 把
+      AB 的 `speedFactor 156.25` 与 MWD 的 `631.25` **一起叠上**：f67 算出
+      `59,928.363 m/s`（overload `134,777.472`）——驱逐舰不可能的速度；
+    - 数值**保持引擎原样**（本规则一个数都不改、也不挑一个模块停用——降级是求解，不在本期），
+      它只负责把「这组数基于多个推进同时启用」这件事**说出口**，否则下游 agent 会把
+      59,928 m/s 当成有效数据；
+    - 判据是引擎的硬违规 + 装配事实（有几件推进模块处于开启态），**不设数值阈值**。
+    - **口径（T-38 主人裁决）**：双推进一起带很常见，只是**不能同时启用**——所以这不是
+      「配装有问题」，而是**状态冲突**；id、文案、注释一律不写判词。
+
+    与 `no_propulsion` 同属机动视角；`mwd_sig_increase` 也会在双推进时命中，
+    两条 flag 不冲突：一条说「信号半径被撑大」，一条说「撑大的那个数是叠加出来的」。
+    """
+    if not facts.index_available:
+        return None
+    over = _propulsion_active_limit_violation(facts)
+    if over is None:
+        return None
+
+    open_modules = [
+        item for _position, item in facts.propulsions() if item.get("state") in _OPEN_STATES
+    ]
+    if len(open_modules) < 2:  # 违规存在但开启态不足两件 → 事实对不上，宁可不报（不猜）
+        return None
+
+    names = [item.get("name") or f"type_id {item.get('type_id')}" for item in open_modules]
+    # evidence **只放别处拿不到的事实**（体积预算 + 不重复）：
+    # - 模块名在 `mwd_sig_increase.evidence.propulsion` 里已有，不再抄一遍；
+    # - 被叠加出来的速度/信号就是同一视角的 `overview.speed_mps` / `signature_radius_m`，
+    #   再放进 evidence 只是让同一份输出多一份拷贝（f47 会因此挤破 17000 chars 预算）。
+    return {
+        "conflict": _conflict_text(names),
+        "group_id": over["group_id"],
+        "used": over["used"],
+        "allowed": over["allowed"],
     }
 
 
@@ -741,6 +864,7 @@ _HANDLERS: dict[str, Callable[[_Facts], dict | None]] = {
     "drone_bandwidth_idle": _rule_drone_bandwidth_idle,
     "no_propulsion": _rule_no_propulsion,
     "mwd_sig_increase": _rule_mwd_sig_increase,
+    "propulsion_state_conflict": _rule_propulsion_state_conflict,
     "resist_hole": _rule_resist_hole,
     "repaired_but_unstable": _rule_repaired_but_unstable,
     "alpha_dph_ratio": _rule_alpha_dph_ratio,

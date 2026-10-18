@@ -21,6 +21,28 @@
    **T-22 起**：Σ 与回落值**同时**为 0、但存在带弹药的武器时，`dph` 输出 `None`
    （输入不完整 → 未知），并由 `weapon_damage_zero` flag 说明原因（字段规格 §0.6）。
    零伤害本身不触发 null：没有武器的配装照实给 `0.0`。
+   **T-36 起**：**一个武器系统都没有**的配装一律 `0.0`，**包括引擎连 `-11` 键都不输出
+   的配装**。引擎只在「至少有一个高槽模块」时才派生 `-11` / `-12`（实测：f67 有高槽
+   模块 → `-11 = 0.0`；f58 空配装、f61 只有低 / 中槽模块 → 两个键都不存在）。那是
+   **引擎的输出习惯**，不是「不知道」——同一类事实不能因为少一个键就变成 `null`。
+   注意「一个武器系统都没有」**不等于**「没装炮」：无人机与舰载机的伤害不进 `-11`
+   （f4 实测 drone `-21 = 83.866` 而 `-11 = 0.0`），所以它们**算**武器系统（f26 航母
+   机库 8 架载机 → `dph` 仍 `None` + `not_applicable`，由 `dps.fighter` 表达）。
+   三种情形 + 一条边界的口径（T-36 定稿，测试在 `tests/test_views_a.py` 同时钉住）：
+
+   | 情形 | `dph` | 依据 |
+   | --- | --- | --- |
+   | 完全没有武器系统（没炮 / 没无人机 / 机库空，含引擎不给 `-11` 键） | `0.0` | 确定的事实：这套配装没有伤害 |
+   | 有武器但没装弹药 | `0.0` | 同上（引擎给 `-11 = 0.0`，齐射是真 0） |
+   | 有带弹药的武器却齐射为 0 | `None` | 自相矛盾 → 输入不完整（`weapon_damage_zero`）|
+   | 只有无人机 / 机库载机**且引擎不给 `-11`**（f26） | `None` | `dph` 不适用（`dps.drone` / `dps.fighter` 表达）|
+
+   **T-37**：`dps.base` / `dps.with_reload` / `overload.{off,on,delta}.dps` 用**同一个判据**
+   （`_has_any_weapon_system()`）补齐：**一个武器系统都没有**时，引擎缺 `-12` / `-13` 也
+   给 `0.0`，不再是 `None`。改前同一情形有两种输出——f67（有高槽模块，`-12` 键在且为 0.0）
+   与 f26（有载机）是 `0.0`，f58（空配装）与 f61（全中 / 低槽）因缺键是 `None`。T-36 已经
+   在 `dph` 上裁决过「引擎少给一个键不是「不知道」」，`dps` 不能还是两套口径。有武器系统
+   却缺 `-12` 的情形（如只有载机）**保持** `None` —— 与 `dph` 的边界完全一致，不新造判据。
 3. **伤害构成按伤害量加权**（不是按弹种数量）：形状取弹药四系（114/116/117/118），
    量级取装备级 `volley`（`-21`；缺失时才退回「弹药 × 武器 `damageMultiplier`（64）」）。
    实测 Void S = 8.9 动能 + 8.9 热能（50/50），**不是**单系；弹药自身也带 64
@@ -146,6 +168,18 @@ FIELD_SOURCES: dict[str, int | None] = {
 `dph` 保持映射 `-11`（T-22 未改机制）：`null` 的语义由 `weapon_damage_zero` flag 表达，
 **不**靠 provenance 三态表达——`FIELD_SOURCES` 是静态表，同一路径没法按值变形，
 硬把它登记成 `None` 会让正常样本的 `dph` 从 `measured` 掉成 `assumed`。
+
+> T-36 实测更正：`-11` 是**负 ID**（引擎 pass 4 派生值），`provenance.tag(-11)` 就是
+> `assumed`，所以 `dph` 有值时**一直**是 `assumed`（f1 / f5 / f67 实测均为 `assumed`），
+> 上面那句「正常样本是 measured」是旧表时代的说法。T-36 的「完全没有武器 → `0.0`」
+> 因此落在 `assumed`（值是真的，三态由静态表决定）。要让它变成 `measured` 必须动
+> `project/provenance.py`（把 `-11` 从 `ASSUMED_ATTRS` 挪到 `MEASURED_ATTRS`，或加
+> 实例级规则），**不在本视角的机制里**，已作为偏离项上报、未改。
+>
+> T-37 同理：`dps.base` / `dps.with_reload` / `overload.*.dps` 映射的 `-12` / `-13`
+> 也是负 ID，缺键补 `0.0` 之后三态仍是 `assumed`（**不是** `unknown`，也不需要
+> `unknown_reasons` 条目）—— 与 `dph` 完全一致，同样**不许**为了「看起来更稳」改成
+> `measured`（实例级只升格、不降格）。
 """
 
 
@@ -182,7 +216,28 @@ def _has_armed_weapon(records: list[dict]) -> bool:
     return False
 
 
-def _dph(attrs: dict[int, float], records: list[dict]) -> float | None:
+def _has_any_weapon_system(records: list[dict], bay_fighter_count: int) -> bool:
+    """配装里有没有**任何**武器系统：武器挂架 / 无人机 / 发射管里的战斗机 / 机库载机。
+
+    为什么要这么宽：`dph`（齐射伤）只覆盖 `-11`，而无人机（`dps.drone`）与舰载机
+    （`dps.fighter`）的伤害**不进** `-11`（f4 实测：`-11 = 0.0` 而 drone `-21 = 83.866`）。
+    于是「装了无人机 / 载机的配装」在本视角里 `dph` 是**不适用**（这套配装的伤害由别的
+    字段表达，渲染层据此报 `not_applicable`），不是「确定没有伤害」；把这种配装报成
+    `0.0` 才是伪事实（航母的 α 伤害是真的，只是不在 `dph` 里）。反之，**一个武器系统
+    都没有**（f58 / f61 / f67）时 `0.0` 是确定的事实（T-36）。
+
+    `records` 来自 `views/shared.weapon_records()`，只含**武器与无人机 / 战斗机**；
+    机库里的载机**不在**里面（T-29 的裁决）——所以机库侧要单独看 `fighter_bay.count`。
+    """
+    return bool(records) or bay_fighter_count > 0
+
+
+def _dph(
+    attrs: dict[int, float],
+    records: list[dict],
+    *,
+    bay_fighter_count: int,
+) -> float | None:
     """首轮齐射伤（齐射 α）= **Σ 武器槽装备级 `-21`**，Σ 为 0 时回退舰船级 `-11`。
 
     为什么不再直接读 `-11`（T-20 / D7 的**实测结论**，与任务书的初始假设不同，务必先看
@@ -212,6 +267,22 @@ def _dph(attrs: dict[int, float], records: list[dict]) -> float | None:
 
     「有弹药却零伤害」只在两端**同时**为 0 时才成立：没有武器的配装（或武器没装填弹药）
     齐射就是真 0，照实给 `0.0`——零伤害本身不是矛盾，**有弹药**才是。
+
+    **T-36：引擎不给键 ≠ 不知道**。引擎只在「至少有一个高槽模块」时才派生 `-11` / `-12`：
+    空配装（f58）与只有低 / 中槽模块的配装（f61）**两个键都不存在**，而有任意高槽模块
+    的配装（f67 的扫描发射器 / 吸电 / 隐形；以及「有炮没弹药」的配装）一定是 `-11 = 0.0`。
+    所以同一个事实（「一个武器系统都没有」）之前会因为引擎少给一个键而分成 `0.0` 与
+    `None` 两种输出——这是**实现的不一致，不是引擎的语义**（T-36 / f67 随堂测试暴露）。
+
+    现在按「**配装里有没有任何武器系统**」三分（判据在 `_has_any_weapon_system()`）：
+
+    - **一个都没有**（f58 / f61 / f67：没炮、没无人机、机库也空）→ 缺键的回落落在 `0.0`，
+      「这套配装没有伤害」是**确定的事实**；
+    - **有武器却不算进 `-11`**（无人机 / 舰载机：f26 航母机库 8 架）→ 保持缺键时的 `None`
+      （这套配装的 α 伤害由 `dps.drone` / `dps.fighter` 表达，`dph` 对它**不适用**，
+      渲染层报 `not_applicable`；报 `0.0` 才是伪事实）；
+    - **有武器挂架模块**（装了炮 / 发射器）→ 走上面的既有判据：带弹药且两端为 0 → `None`
+      + `weapon_damage_zero`；没装弹药 → 引擎的 `0.0`（齐射是真 0）。
     """
     total = 0.0
     for record in records:
@@ -228,7 +299,39 @@ def _dph(attrs: dict[int, float], records: list[dict]) -> float | None:
     if fallback is not None and fallback <= 0.0 and _has_armed_weapon(records):
         # 自相矛盾：有弹药却零伤害 → 输入不完整（突变数据缺失），不许输出 0.0
         return None
+    if fallback is None and not _has_any_weapon_system(records, bay_fighter_count):
+        # T-36：引擎没有 `-11`（= 一个高槽模块都没有），且配装里一个武器系统都没装 →
+        # 「这套配装没有伤害」是确定的事实，给 0.0（不是 None）。
+        return _value(0.0)
     return _value(fallback)
+
+
+def _dps_raw(
+    attrs: dict[int, float],
+    attribute_id: int,
+    *,
+    has_weapon_system: bool,
+) -> float | None:
+    """引擎的 DPS 属性（`-12` / `-13`）→ 原始值；**缺键口径与 `_dph()` 一致**（T-37）。
+
+    引擎只在「至少有一个高槽模块」时才派生 `-11` / `-12` / `-13`（T-36 实测）：
+
+    | 样本 | 武器系统 | `-12` 键 | `dps.base` 改前 → 改后 |
+    | --- | --- | --- | --- |
+    | f67（Bifrost，无武器） | 无 | 有（`0.0`） | `0.0` → `0.0` |
+    | f26（Thanatos，载机在机库） | **有**（载机） | 有（`0.0`） | `0.0` → `0.0` |
+    | f58（空 EFT）/ f61（全中 / 低槽） | 无 | **缺** | `None` → `0.0` |
+
+    所以「缺键」本身不带语义：**缺键 + 一个武器系统都没有** = 「这套配装没有伤害」这个
+    确定事实 → `0.0`；**缺键 + 有武器系统**（例如只有机库载机）= 该值不适用于这个配装
+    → 保持 `None`（与 `_dph()` 对 f26 的判据逐字对齐，不新造口径）。
+
+    只补这一种缺键：值存在时原样返回（`0.0` 也是值，不是缺值），所以既有样本逐位不变。
+    """
+    value = attrs.get(attribute_id)
+    if value is None and not has_weapon_system:
+        return 0.0
+    return value
 
 
 def _weapon_list(records: list[dict]) -> list[dict]:
@@ -354,19 +457,26 @@ def _ammo_endurance_s(records: list[dict]) -> float | None:
 
 
 def _overload_block(
-    ctx: ViewContext, base_range: dict[str, float | None]
+    ctx: ViewContext,
+    base_range: dict[str, float | None],
+    *,
+    has_weapon_system: bool,
 ) -> dict[str, dict[str, float | None]]:
     """过载前后的 `dps` 与 `optimal_m` 变化（`overload` 变体 = 全部模块 overload）。
 
     实测：中子炮 `-12` 365.594 → 420.433（+54.839），射程不变（`54` 不变，超载只加
     伤害乘子）。`base_range` 由调用方传入，避免把 base 变体算第二遍。
+
+    T-37：两档 `dps` 都走 `_dps_raw()`，所以「一个武器系统都没有」时缺 `-12` 也给 `0.0`，
+    而 `delta.dps` 由两个**原始值**相减（`_diff`）——先各自取 3 位小数再相减会让末位与
+    「两次重算之差」错开 1e-3，既有断言正是按原始值算的。
     """
     base_attrs = ctx.attrs(BASE)
     overload_attrs = ctx.attrs(OVERLOAD)
     overload_range = _range_block(shared.weapon_records(ctx, OVERLOAD))
 
-    off_dps = base_attrs.get(_a.ATTR_DAMAGE_DPS)
-    on_dps = overload_attrs.get(_a.ATTR_DAMAGE_DPS)
+    off_dps = _dps_raw(base_attrs, _a.ATTR_DAMAGE_DPS, has_weapon_system=has_weapon_system)
+    on_dps = _dps_raw(overload_attrs, _a.ATTR_DAMAGE_DPS, has_weapon_system=has_weapon_system)
     off_range = base_range["optimal_m"]
     on_range = overload_range["optimal_m"]
 
@@ -404,22 +514,37 @@ def build(ctx: ViewContext) -> dict:
     attrs = ctx.attrs(BASE)
     records = shared.weapon_records(ctx, BASE)
     range_block = _range_block(records)
+    fighter_bay = shared.fighter_bay_summary(ctx, BASE)
+    # 「有没有任何武器系统」只判一次：`dph`（T-36）与 `dps` 系列（T-37）共用同一个事实，
+    # 两处各写一套判据就是下一轮「同一情形两种输出」的来源。
+    has_weapon_system = _has_any_weapon_system(records, fighter_bay["count"])
 
     overview = {
         "weapons": _weapon_list(records),
-        "fighter_bay": shared.fighter_bay_summary(ctx, BASE),
+        "fighter_bay": fighter_bay,
         "dps": {
-            "base": _value(attrs.get(_a.ATTR_DAMAGE_DPS)),
-            "with_reload": _value(attrs.get(_a.ATTR_DAMAGE_DPS_WITH_RELOAD)),
+            # T-37：缺 `-12` / `-13` 且一个武器系统都没有 → `0.0`（见 `_dps_raw()`）。
+            "base": _value(
+                _dps_raw(attrs, _a.ATTR_DAMAGE_DPS, has_weapon_system=has_weapon_system)
+            ),
+            "with_reload": _value(
+                _dps_raw(
+                    attrs,
+                    _a.ATTR_DAMAGE_DPS_WITH_RELOAD,
+                    has_weapon_system=has_weapon_system,
+                )
+            ),
             "drone": _value(attrs.get(_a.ATTR_DRONE_DPS)),
             "fighter": _value(attrs.get(_a.ATTR_FIGHTER_DPS)),
         },
-        "dph": _dph(attrs, records),
+        # 机库载机数一并传下去：T-36 的「一个武器系统都没有」判据要看它（载机是武器系统，
+        # 只是伤害不走 `-11`；见 `_has_any_weapon_system()` 的 docstring）。
+        "dph": _dph(attrs, records, bay_fighter_count=fighter_bay["count"]),
         "damage_split": _damage_split(records),
         "range": range_block,
         "application": _application_block(records),
         "ammo_endurance_s": _ammo_endurance_s(records),
-        "overload": _overload_block(ctx, range_block),
+        "overload": _overload_block(ctx, range_block, has_weapon_system=has_weapon_system),
         "hardpoints_free": _hardpoints_free(attrs),
     }
     return {"view": VIEW_NAME, "overview": overview, "flags": []}

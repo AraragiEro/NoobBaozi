@@ -29,6 +29,12 @@
 「电容永不耗尽」（与 `-72 capStablePercentage > 0` 同义）。它不是物理时长，
 当成秒数输出就是伪事实，所以这里统一归一到 `None`。
 
+**推进模块的「关闭」态（T-35）**：`mobility.propulsion_states.propulsion_off` 与诊断规则
+`mwd_sig_increase` 的「关闭时」说的是**同一件事**（只把推进模块关掉、其余模块保持当前
+状态），历史上两边各算一次，于是同一视角里出现了 `65.72 m` 与 `off(全模块离线) 60.0 m` 两个
+互不相等的「关闭时信号半径」。现在变体的构造（`with_propulsion_off()`）与判定（group 名
+`Propulsion Module`）都只写在这里，两个调用方拿到的是同一个浮点数。
+
 数值纪律（与其他视角一致）：入参已是**物理单位**（秒 / m³），本模块不再缩放；
 缺值给 `None` 不补 0；浮点一律过 `units.fmt`。
 """
@@ -40,7 +46,13 @@ import math
 from evefit.config import attributes as A
 from evefit.config.attributes import ATTR_CHARGE_RATE, ATTR_EXPLOSION_DELAY
 from evefit.project import units
-from evefit.project.views.base import BASE, SLOT_CARGO, ViewContext, item_attributes
+from evefit.project.views.base import (
+    BASE,
+    SLOT_CARGO,
+    ViewContext,
+    item_attributes,
+    ship_attributes,
+)
 
 # =============================================================================
 # 武器判定用常量（SDE 实测值）
@@ -406,3 +418,76 @@ def depletes_in_s(stable_pct: float | None, seconds: float | None) -> float | No
     if seconds is None or seconds < 0.0:
         return None
     return units.fmt(seconds)
+
+
+# =============================================================================
+# 「推进模块关闭」态（T-35：flag 文案与 `propulsion_states.*` 必须是同一个数）
+# =============================================================================
+
+PROPULSION_GROUP: str = "Propulsion Module"
+"""推进模块的 SDE group 名（实测 AB / MWD 同组，与 `diagnostics.PROPULSION_GROUP` 同一个值）。
+
+放在 `shared.py` 是因为**判定只此一份**：机动视角的 `propulsion_states.propulsion_off`
+与诊断规则 `mwd_sig_increase` 都要回答「哪些模块是推进模块」，两边各写一套 group 判据
+就会重演 T-20 的「同一事实两套口径」。
+"""
+
+PROPULSION_OFF_VARIANT: str = "shared:propulsion_off"
+"""「推进模块整体关闭」变体的缓存 key —— 机动视角与诊断规则共用同一次计算。"""
+
+OPEN_STATES: frozenset[str] = frozenset({"active", "overload"})
+"""算「启用」的 state 集合（overload 也是启用，只是带过载）。"""
+
+
+def group_name(ctx: ViewContext, type_id: object) -> str | None:
+    """type_id → SDE group 名；没有索引或查不到时 `None`（不猜）。"""
+    if ctx.index is None or not isinstance(type_id, int):
+        return None
+    row = ctx.index.get_type(type_id)
+    return (row or {}).get("group_name")
+
+
+def propulsion_positions(ctx: ViewContext, variant: str = BASE) -> list[int] | None:
+    """已装推进模块在 `fit["items"]` 里的**原下标**；没有索引时 `None`（判定不了）。
+
+    下标与 `ctx.fit["items"]` 一一对应（硬结论 44），`_merge_items()` 保序合并，
+    所以直接对合并视图 `enumerate` 得到的就是原下标（摘除/改状态时**不能**用别的列表）。
+    """
+    if ctx.index is None:
+        return None
+    return [
+        position
+        for position, item in enumerate(ctx.items(variant))
+        if item.get("slot_type") != SLOT_CARGO and item.get("group_name") == PROPULSION_GROUP
+    ]
+
+
+def with_propulsion_off(fit: dict, positions: list[int]) -> dict:
+    """把指定下标的推进模块置 `offline`（其余模块**保持原状**，不改入参）。
+
+    为什么是「离线」而不是「从 fit 里摘掉」：两者在实测里给出**逐位相同**的速度 / 信号 /
+    对齐 / 质量（f67: 49.076 / 65.72 / 2.958 / 1235000，摘除与离线完全一致——离线态既不
+    吃 `massAddition` 也不加成），但「关闭」这个词的语义是模块还在船上，所以不改装配清单。
+    """
+    targets = set(positions)
+    items = [
+        ({**item, "state": "offline"} if position in targets else item)
+        for position, item in enumerate(fit.get("items") or [])
+    ]
+    return {**fit, "items": items}
+
+
+def propulsion_off_attrs(ctx: ViewContext) -> dict[int, float] | None:
+    """推进模块**全部关闭**后的船体属性（其余模块保持当前状态）。
+
+    - 没有索引 → `None`：查不到 group 名就判定不了「哪些是推进模块」，不猜（红线 N4）；
+    - 没有推进模块 → 当前状态属性：没东西可关，「关闭前后同一状态」是**真值**不是未知；
+    - 否则把推进模块置 offline 后重算一次（缓存 key 全项目唯一）。
+    """
+    positions = propulsion_positions(ctx)
+    if positions is None:
+        return None
+    if not positions:
+        return ctx.attrs(BASE)
+    fit = with_propulsion_off(ctx.fit, positions)
+    return ship_attributes(ctx.calculate_variant(PROPULSION_OFF_VARIANT, fit))

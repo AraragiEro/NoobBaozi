@@ -1,0 +1,202 @@
+{
+ "attackers": [
+  {
+   "alliance_id": 99011978,
+   "character_id": 1698872847,
+   "corporation_id": 98726134,
+   "damage_done": 1048,
+   "faction_id": 500002,
+   "final_blow": true,
+   "security_status": -4,
+   "ship_type_id": 12044,
+   "weapon_type_id": 3178
+  },
+  {
+   "alliance_id": 99011978,
+   "character_id": 2115133763,
+   "corporation_id": 98741376,
+   "damage_done": 1016,
+   "faction_id": 500002,
+   "final_blow": false,
+   "security_status": -4.2,
+   "ship_type_id": 11371,
+   "weapon_type_id": 11371
+  },
+  {
+   "alliance_id": 99011978,
+   "character_id": 2123699290,
+   "corporation_id": 98741376,
+   "damage_done": 611,
+   "faction_id": 500002,
+   "final_blow": false,
+   "security_status": -0.7,
+   "ship_type_id": 72903,
+   "weapon_type_id": 24497
+  },
+  {
+   "alliance_id": 99011978,
+   "character_id": 92361974,
+   "corporation_id": 98726134,
+   "damage_done": 515,
+   "faction_id": 500002,
+   "final_blow": false,
+   "security_status": -9.2,
+   "ship_type_id": 11186,
+   "weapon_type_id": 27361
+  },
+  {
+   "character_id": 92599895,
+   "corporation_id": 1000182,
+   "damage_done": 209,
+   "faction_id": 500002,
+   "final_blow": false,
+   "security_status": 3.9,
+   "ship_type_id": 11377,
+   "weapon_type_id": 27339
+  },
+  {
+   "character_id": 1173806786,
+   "corporation_id": 1026712316,
+   "damage_done": 196,
+   "faction_id": 500002,
+   "final_blow": false,
+   "security_status": -1.9,
+   "ship_type_id": 11176,
+   "weapon_type_id": 27361
+  },
+  {
+   "alliance_id": 99009163,
+   "character_id": 601222386,
+   "corporation_id": 98817519,
+   "damage_done": 0,
+   "faction_id": 500002,
+   "final_blow": false,
+   "security_status": -0.9,
+   "ship_type_id": 585,
+   "weapon_type_id": 5443
+  }
+ ],
+ "killmail_id": 139255942,
+ "killmail_time": "2026-10-18T13:27:01Z",
+ "solar_system_id": 30002541,
+ "victim": {
+  "alliance_id": 99003581,
+  "character_id": 2123914768,
+  "corporation_id": 98598862,
+  "damage_taken": 3595,
+  "faction_id": 500011,
+  "items": [
+   {
+    "flag": 11,
+    "item_type_id": 3888,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 12,
+    "item_type_id": 2605,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 20,
+    "item_type_id": 6001,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 92,
+    "item_type_id": 26931,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 22,
+    "item_type_id": 37479,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 21,
+    "item_type_id": 5445,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 28,
+    "item_type_id": 18639,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 23,
+    "item_type_id": 5973,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 29,
+    "item_type_id": 5141,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 19,
+    "item_type_id": 380,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 28,
+    "item_type_id": 30486,
+    "quantity_dropped": 8,
+    "singleton": 0
+   },
+   {
+    "flag": 27,
+    "item_type_id": 11370,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 13,
+    "item_type_id": 2605,
+    "quantity_dropped": 1,
+    "singleton": 0
+   },
+   {
+    "flag": 93,
+    "item_type_id": 31165,
+    "quantity_destroyed": 1,
+    "singleton": 0
+   }
+  ],
+  "position": {
+   "x": 64640538740.54022,
+   "y": 10566797571.968307,
+   "z": -101445910727.41446
+  },
+  "ship_type_id": 37480
+ },
+ "zkb": {
+  "locationID": 60004828,
+  "hash": "7b7defa15acb3a84eee481da615f2c8c2d0dcb6b",
+  "fittedValue": 56071480.94,
+  "droppedValue": 7307174.08,
+  "destroyedValue": 48764306.86,
+  "totalValue": 56071480.94,
+  "totalDroppableValue": 8358840.74,
+  "points": 1,
+  "npc": false,
+  "solo": false,
+  "awox": false,
+  "labels": [
+   "tz:au",
+   "cat:6",
+   "#:5+",
+   "pvp",
+   "loc:lowsec",
+   "isk:under1b"
+  ]
+ }
+}

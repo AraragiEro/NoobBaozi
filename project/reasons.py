@@ -143,13 +143,20 @@ CONDITIONAL_LEAVES: dict[str, frozenset[str]] = {
             "weapons",
             "ammo_endurance_s",
             "dph",
-            "dps.base",
-            "dps.with_reload",
             # 没有无人机 / 战斗机 → 这两条 DPS 不适用（f1 Hecate 两者都没有）
             "dps.drone",
             "dps.fighter",
             # 武器没装填弹药（无人机/战斗机/空发射器）→ 没有「弹药名」可言
             "weapons[].ammo_name",
+            # 没有射程（无炮 / 无导弹：f26）→ 过载前后的射程变化也不存在。
+            # **T-37 收窄**：原先整个 `overload` 前缀挂在本表对面的 `CONDITIONAL_SUBTREES`
+            # 里，把 `overload.*.dps` 也顺带说成「不适用」；现在三档 `dps` 在「一个武器系统
+            # 都没有」时统一给 `0.0`（有值），再留着前缀就是「有值却说不适用」的污染
+            # （T-34 消灭过的那类错误）。所以只把**确实只有条件成立才产出**的三条射程叶子
+            # 登记在这里，`dps` 三条不再被任何条件规则覆盖。
+            "overload.off.range_m",
+            "overload.on.range_m",
+            "overload.delta.range_m",
         }
     ),
     "resources": frozenset(
@@ -187,8 +194,10 @@ CONDITIONAL_SUBTREES: dict[str, tuple[str, ...]] = {
         "damage_split",
         # 炮才有 54/158 三档射程；导弹才有 max_range_m（无武器时全为 None）
         "range",
-        # 射程差值依赖上面的 range，没有射程就没有「过载前后射程变化」
-        "overload",
+        # **T-37 起这里没有 `overload` 前缀**：`overload.{off,on,delta}.dps` 在「一个武器系统
+        # 都没有」时已是 `0.0`（有值），前缀会把有值字段说成「不适用」；三条射程叶子改在
+        # `CONDITIONAL_LEAVES` 里逐条登记（它们才是真的条件产出）。要恢复前缀必须同时把
+        # `dps` 三条从 `FIELD_SOURCES` 的有值集合里排除 —— 那等于把 T-37 的裁决推翻。
     ),
     "stability": (
         # 没有耗电模块 → 逐模块排行 / 逐模块敏感性列表为空（f6）

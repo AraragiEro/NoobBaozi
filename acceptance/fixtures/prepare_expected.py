@@ -151,7 +151,9 @@ def main() -> int:
                 modes[str(mode_row["type_id"])] = {
                     "name": mode_row["name"],
                     "ehp": round(float(m_ship[-43]), 6),
-                    "dps": round(float(m_ship[-12]), 6),
+                    # 有些样本（如 f67 Bifrost：只有探针发射器 + 吸电）引擎不给 -12，
+            # 之前直接下标会 KeyError 崩掉整个生成流程。
+            "dps": (round(float(m_ship[-12]), 6) if -12 in m_ship else None),
                     "align_time_s": round(float(m_ship[-1]), 6),
                     "speed_mps": round(float(m_ship[37]), 6),
                 }
