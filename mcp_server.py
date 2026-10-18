@@ -66,6 +66,7 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import sys
@@ -145,14 +146,34 @@ _DEBUG: bool = os.environ.get("EVEFIT_MCP_DEBUG", "").strip().lower() not in (
 
 _LOG_PREFIX: str = "[evefit-mcp] "
 
+TRANSPORTS: tuple[str, ...] = ("stdio", "http")
+"""支持的传输形态（`--transport`）：`stdio` 是默认，`http` 是 Streamable HTTP。"""
+
+DEFAULT_TRANSPORT: str = "stdio"
+"""默认传输 = stdio：T-46 的行为**一个字节都没变**（786 条测试的基线）。"""
+
+DEFAULT_HTTP_HOST: str = "127.0.0.1"
+"""http 的默认监听地址。**容器里会显式传 `0.0.0.0`**（默认只绑回环 = 不误暴露到局域网）。"""
+
+DEFAULT_HTTP_PORT: int = 8080
+"""http 的默认端口（容器约定，别改）。"""
+
+LOG_LEVELS: dict[str, int] = {"debug": 10, "info": 20, "warning": 30, "error": 40}
+"""`--log-level` 的可用值（数值越小越啰嗦）。"""
+
+DEFAULT_LOG_LEVEL: str = "info"
+
+_LOG_LEVEL: int = LOG_LEVELS[DEFAULT_LOG_LEVEL]
+_LOG_LEVEL_NAME: str = DEFAULT_LOG_LEVEL
+
 
 # =============================================================================
 # 二、日志（**只走 stderr**）
 # =============================================================================
 
 
-def _log(message: str) -> None:
-    """往 **stderr** 打一行日志（stdout 只有一个用途：JSON-RPC）。"""
+def _write_log(message: str) -> None:
+    """真正写出去（不做级别过滤）：stdout 只有一个用途（stdio 的 JSON-RPC），日志全在 stderr。"""
     try:
         sys.stderr.write(f"{_LOG_PREFIX}{message}\n")
         sys.stderr.flush()
@@ -160,10 +181,39 @@ def _log(message: str) -> None:
         pass
 
 
+def set_log_level(name: str) -> str:
+    """设置日志级别（`--log-level`），返回规范化后的名字。
+
+    Raises:
+        ValueError: 级别不认识（调用方把它转成「参数错误」的退出码）。
+    """
+    global _LOG_LEVEL, _LOG_LEVEL_NAME
+    key = str(name or "").strip().lower()
+    if key not in LOG_LEVELS:
+        raise ValueError(f"未知日志级别 {name!r}；可用：{list(LOG_LEVELS)}")
+    _LOG_LEVEL = LOG_LEVELS[key]
+    _LOG_LEVEL_NAME = key
+    return key
+
+
+def get_log_level() -> str:
+    """当前日志级别名（`info` / `debug` / …）。"""
+    return _LOG_LEVEL_NAME
+
+
+def _log(message: str, *, level: str = "info") -> None:
+    """按级别往 **stderr** 打一行日志（低于当前级别的直接丢弃）。"""
+    if LOG_LEVELS.get(level, LOG_LEVELS["info"]) < _LOG_LEVEL:
+        return
+    _write_log(message)
+
+
 def _debug(message: str) -> None:
-    """`EVEFIT_MCP_DEBUG=1` 才打的日志（默认关：stdio 服务的 stderr 常被客户端收走）。"""
+    """请求级调试日志：`EVEFIT_MCP_DEBUG=1` **或** `--log-level debug` 时打开。"""
     if _DEBUG:
-        _log(message)
+        _write_log(message)  # 环境变量是硬开关：即使 --log-level error 也要看得到
+        return
+    _log(message, level="debug")
 
 
 # =============================================================================
@@ -1030,33 +1080,211 @@ def serve(reader: Any = None, writer: Any = None) -> int:
 
 
 # =============================================================================
-# 十二、入口
+# 十二、命令行（`--transport` / `--host` / `--port` / `--log-level`）
+# =============================================================================
+
+_USAGE: str = (
+    "用法：\n"
+    "  python -m evefit.mcp_server                      # 默认：stdio（换行分隔 JSON-RPC 2.0）\n"
+    "  python -m evefit.mcp_server --transport http --host 0.0.0.0 --port 8080\n"
+    "\n"
+    "选项：\n"
+    f"  --transport stdio|http  传输形态，默认 {DEFAULT_TRANSPORT}\n"
+    f"  --host HOST             http 监听地址，默认 {DEFAULT_HTTP_HOST}"
+    "（容器里传 0.0.0.0）\n"
+    f"  --port PORT             http 监听端口，默认 {DEFAULT_HTTP_PORT}（0 = 系统分配）\n"
+    f"  --log-level LEVEL       日志级别，{'|'.join(LOG_LEVELS)}，"
+    f"默认 {DEFAULT_LOG_LEVEL}（日志一律 stderr）\n"
+    "  --version               版本，写 stderr\n"
+    "  -h, --help              这份说明，写 stderr\n"
+    "\n"
+    "stdio 模式下 stdout 只写协议消息；日志一律 stderr（http 模式下 stdout 一个字节都没有）。\n"
+    "环境变量：EVEFIT_MCP_DEBUG=1 打开请求级调试日志。"
+)
+
+
+class _UsageError(Exception):
+    """命令行参数不合法 → 退出码 `2`（说明写 stderr，stdout 保持干净）。"""
+
+
+@dataclasses.dataclass(frozen=True)
+class CliOptions:
+    """解析后的命令行选项（`host` / `port` 为 `None` 表示用 http 的默认值）。"""
+
+    transport: str = DEFAULT_TRANSPORT
+    host: str | None = None
+    port: int | None = None
+    log_level: str = DEFAULT_LOG_LEVEL
+    show_help: bool = False
+    show_version: bool = False
+    unknown: tuple[str, ...] = ()
+
+
+def _parse_cli(args: list[str]) -> CliOptions:
+    """手写命令行解析（**不用 argparse**：argparse 的帮助 / 错误默认写 stdout）。
+
+    支持 `--key value` 与 `--key=value` 两种写法；不认识的参数**不报错**（沿用 T-46
+    的宽容行为：客户端偶尔塞一个自定义 flag，不该让服务起不来），收集到 `unknown` 里
+    打一行警告。
+
+    Raises:
+        _UsageError: 值不合法（未知传输 / 未知级别 / 端口不是整数或越界）。
+    """
+    transport = DEFAULT_TRANSPORT
+    host: str | None = None
+    port: int | None = None
+    log_level = DEFAULT_LOG_LEVEL
+    show_help = False
+    show_version = False
+    unknown: list[str] = []
+
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        index += 1
+        name, has_inline, inline = arg.partition("=")
+
+        if name in ("--help", "-h"):
+            show_help = True
+            continue
+        if name == "--version":
+            show_version = True
+            continue
+        if name not in ("--transport", "--host", "--port", "--log-level"):
+            unknown.append(arg)
+            continue
+
+        if has_inline:
+            value = inline
+        else:
+            if index >= len(args):
+                raise _UsageError(f"{name} 需要一个值")
+            value = args[index]
+            index += 1
+        value = value.strip()
+
+        if name == "--transport":
+            key = value.lower()
+            if key not in TRANSPORTS:
+                raise _UsageError(
+                    f"--transport 只能是 {' / '.join(TRANSPORTS)}，收到 {value!r}"
+                )
+            transport = key
+        elif name == "--host":
+            if not value:
+                raise _UsageError("--host 不能为空")
+            host = value
+        elif name == "--port":
+            try:
+                port = int(value, 10)
+            except ValueError:
+                raise _UsageError(f"--port 必须是整数，收到 {value!r}") from None
+            if not 0 <= port <= 65535:
+                raise _UsageError(f"--port 必须在 0..65535 之间，收到 {port}")
+        else:
+            key = value.lower()
+            if key not in LOG_LEVELS:
+                raise _UsageError(
+                    f"--log-level 只能是 {' / '.join(LOG_LEVELS)}，收到 {value!r}"
+                )
+            log_level = key
+
+    return CliOptions(
+        transport=transport,
+        host=host,
+        port=port,
+        log_level=log_level,
+        show_help=show_help,
+        show_version=show_version,
+        unknown=tuple(unknown),
+    )
+
+
+def _redirect_stdout_to_stderr() -> None:
+    """把进程的 fd 1 接到 stderr（http 模式没有协议流，但**也不许有东西写到 stdout**）。
+
+    比 `_claim_stdout()` 轻：不需要留协议通道的私有副本，只做 fd 改道 —— 但效果一样：
+    引擎 / 第三方库里任何裸 `print()` 都落到 stderr，容器日志里能看到，而 stdout 干净。
+    """
+    stream = sys.stdout
+    try:
+        fd = stream.fileno()
+    except (AttributeError, OSError, ValueError):  # pragma: no cover - 测试替身
+        return
+    try:
+        os.dup2(2, fd)
+    except OSError as exc:  # pragma: no cover - 极端环境（fd 2 也关了）
+        _log(f"把 fd 1 接到 stderr 失败（{exc}），stdout 保护降级", level="warning")
+
+
+def _run_http_transport(options: CliOptions) -> int:
+    """HTTP 传输入口（**延迟导入** `evefit.mcp_http`）。
+
+    延迟导入有两个理由：① stdio 路径不该为 HTTP 付导入成本；② `mcp_http` 反过来
+    import 本模块（拿 `dispatch` / `_Session` / 日志），模块级互相 import 会成环。
+    """
+    _configure_streams()
+    _redirect_stdout_to_stderr()
+    try:
+        from evefit.mcp_http import run_http
+    except BaseException as exc:  # noqa: BLE001 - 导入失败要说清楚，不静默退化
+        _log(f"HTTP 传输不可用：{type(exc).__name__}: {exc}", level="error")
+        return 1
+    return run_http(
+        host=options.host or DEFAULT_HTTP_HOST,
+        port=DEFAULT_HTTP_PORT if options.port is None else options.port,
+        log_level=options.log_level,
+    )
+
+
+# =============================================================================
+# 十三、入口
 # =============================================================================
 
 
 def main(argv: list[str] | None = None) -> int:
-    """`python -m evefit.mcp_server` 的入口（stdio 服务，阻塞到 stdin EOF）。
+    """`python -m evefit.mcp_server` 的入口：**默认 stdio**，`--transport http` 走 HTTP。
 
-    注意：`--help` / `--version` 也写 **stderr** —— 这个进程的 stdout 只有一个用途，
-    即使被误用也不能破例（否则「`--help` 之后客户端解析崩」又是一次事故）。
+    注意：`--help` / `--version` 也写 **stderr** —— stdio 模式下这个进程的 stdout 只有
+    一个用途，即使被误用也不能破例（否则「`--help` 之后客户端解析崩」又是一次事故）。
+
+    Returns:
+        进程退出码（`0` 正常；`1` http 起不来；`2` 命令行参数不合法）。
     """
     args = list(sys.argv[1:] if argv is None else argv)
-    writer = _claim_stdout()
-    _configure_streams()
 
-    if "--version" in args:
-        _log(f"{SERVER_NAME} {SERVER_VERSION} (protocols {list(PROTOCOL_VERSIONS)})")
-        return 0
-    if "--help" in args or "-h" in args:
+    try:
+        options = _parse_cli(args)
+    except _UsageError as exc:
+        _configure_streams()
+        _log(f"参数错误：{exc}", level="error")
+        _log(_USAGE)
+        return 2
+
+    if options.show_version:
+        _configure_streams()
         _log(
-            "用法：python -m evefit.mcp_server\n"
-            "  stdio 上的 MCP 服务（换行分隔 JSON-RPC 2.0）；"
-            "stdout 只写协议消息，日志一律 stderr。\n"
-            "  环境变量：EVEFIT_MCP_DEBUG=1 打开请求级调试日志。"
+            f"{SERVER_NAME} {SERVER_VERSION} "
+            f"(protocols {list(PROTOCOL_VERSIONS)}, transports {list(TRANSPORTS)})"
         )
         return 0
-    if args:
-        _log(f"忽略未知参数：{args}（本服务不需要参数）")
+    if options.show_help:
+        _configure_streams()
+        _log(_USAGE)
+        return 0
+
+    set_log_level(options.log_level)
+    if options.unknown:
+        _log(f"忽略未知参数：{list(options.unknown)}（用 --help 看可用选项）")
+
+    if options.transport == "http":
+        return _run_http_transport(options)
+
+    # ---- 默认：stdio（T-46 行为，**一字不改**）------------------------------
+    writer = _claim_stdout()
+    _configure_streams()
+    if options.host or options.port is not None:
+        _log("stdio 传输忽略 --host / --port（要监听端口请加 --transport http）", level="warning")
 
     started = time.perf_counter()
     _log(f"{SERVER_NAME} {SERVER_VERSION} 启动（stdio）")
@@ -1085,7 +1313,13 @@ if __name__ == "__main__":  # pragma: no cover - 进程入口
 
 
 __all__ = [
+    "CliOptions",
+    "DEFAULT_HTTP_HOST",
+    "DEFAULT_HTTP_PORT",
+    "DEFAULT_LOG_LEVEL",
+    "DEFAULT_TRANSPORT",
     "INSTRUCTIONS",
+    "LOG_LEVELS",
     "MAX_FIT_CHARS",
     "MAX_PATH_CHARS",
     "PROTOCOL_VERSIONS",
@@ -1093,8 +1327,11 @@ __all__ = [
     "SERVER_NAME",
     "SERVER_VERSION",
     "STRUCTURED_CONTENT_SINCE",
+    "TRANSPORTS",
     "dispatch",
     "emit",
+    "get_log_level",
     "main",
     "serve",
+    "set_log_level",
 ]

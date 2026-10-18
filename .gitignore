@@ -12,3 +12,6 @@ acceptance/out/
 
 # pyfa 侦察的临时环境 / 被 Windows ACL 锁死的解包目录（不可读不可删，不影响功能）
 spike/pyfa_scratch/
+
+# 会话临时区（部署暂存、上传包），不入库
+.tmp/
