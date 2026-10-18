@@ -110,20 +110,37 @@ L1 数据之上的合成值**，不是「无法推断」）；它们的输入全
 L0 只用 `meta.mode` 交代「当前在哪个模式」；要看三模式对比走
 `render_overview(ctx)["modes"]`（`get_path` 也够不到它——那是横切块，不属于任何视角）。
 
-`budget` 的口径（`{chars, degraded}`）
+`budget` 的口径（`{chars, degraded}`）—— **T-41 定稿**
 
-- `chars` = **L0 正文**（`ship` / `meta` / 六视角 / `flags` / `provenance_counts`）的
-  `len(json.dumps(..., ensure_ascii=False))`，**不含 `budget` 自身**——与渲染层
-  「`budget.chars` 只量 `views` + `modes`、不量自己」的口径同源；
-- `degraded` = `chars > INDEX_BUDGET_CHARS`。**L0 的降级是上报式、不是裁剪式**：
+- `chars` = **L0 正文长度**，**不含 `budget` 块自身**。一句话定义：
+  *把 `budget` 块摘掉之后，这份 L0 序列化有多长*。**没有自指问题**：它量的不是自己
+  所在的那棵树，所以不需要解方程、更不需要固定点迭代。
+  `render_index()` 里的三步顺序（读代码时就按这个顺序理解，**不是循环依赖**）：
+
+  1. `body = _index_body(ctx)` —— 此刻 `body` 里**还没有** `budget` 这个键；
+  2. `chars = len(json.dumps(body, ensure_ascii=False))` —— 量这个**没有** `budget` 的 body；
+  3. `body["budget"] = {"chars": chars, "degraded": chars > INDEX_BUDGET_CHARS}` ——
+     **最后**才把 `budget` 块塞回去；它自然不在 `chars` 里。
+
+  逐样本恒等式（`tests/test_summary.py` 用 f1 / f12 / f47 / f67 四个样本逐位钉住，
+  并带一条「改回旧算法就变红」的反证）：
+
+  ```python
+  doc["budget"]["chars"] == len(json.dumps(
+      {k: v for k, v in doc.items() if k != "budget"}, ensure_ascii=False))
+  ```
+
+- **与旧 `render_overview` 的口径不同，这是一次有意的拆分（T-41）**：渲染层那条是
+  「只量 `views` + `modes`」，不含顶层键与 `meta`。**直接搬到 L0 会少算近一半** ——
+  实测四个样本：L0 正文 1,996–2,118 字符，而只量六个视角块只有 1,040–1,066 字符
+  （差 956–1,052：`ship` / `meta` / `flags` / `provenance_counts` 与顶层键名全被漏掉）。
+  所以 L0 不沿用那条公式，改为量「去掉 `budget` 块后的整棵 L0 正文」。
+- `degraded` = `chars > INDEX_BUDGET_CHARS`（**严格大于**；正好等于预算**不**降级）。
+  **L0 的降级是上报式、不是裁剪式**：
   红线明确禁止「为省字符丢字段值」（只能丢元信息明细），而 L0 本来就已经只含元信息，
   所以超预算时**不删任何数值**，只把 `degraded` 置位，让读者/上层自己决定是否改用
   L1/L2。这也正是文档 §7 那条红线要的效果：`degraded` 若为 true 必须在 L0 显式出现，
   不能让读者以为看到了全部。
-- **已知欠账（T-41，不在 T-40 范围）**：因为 `chars` 不量自己，它与
-  `len(json.dumps(整个 L0))` 相差约 46 字符（`budget` 块的键名 + 两个数字）。验收脚本
-  `check_layers.py` 把它记成 **1 条 medium** 并注明「已派 T-41」；改成「量自己」需要解
-  自指方程（长度依赖长度），属于独立口径变更，本层**不在这里顺手改**。
 """
 
 from __future__ import annotations
@@ -149,10 +166,16 @@ INDEX_BUDGET_CHARS: int = 2500
 
 **T-40 上调：2,000 → 2,500**（验收方实测后裁决，不是拍的）：
 
-| 时点 | 实测 L0 字符数（65 样本，含 `budget` 块） | 预算 |
+| 时点 | 实测 L0 字符数（65 样本，**含** `budget` 块） | 预算 |
 |---|---|---|
 | T-39 | min **1,722** / median **1,859** / max **1,987** | 2,000 |
 | **T-40** | min **1,801** / median **2,000** / max **2,183** | **2,500** |
+
+T-41 定稿后，判据量的是**正文**（不含 `budget` 块），上表数字减去 `budget` 块的固定开销
+就是预算真正比较的那个数 —— 65 样本实测这笔开销**恒为 46 字符**
+（`, "budget": {"chars": N, "degraded": false}`，正文四位数、`degraded` 为 false 时），
+即正文区间：T-39 **1,676–1,941**、T-40 **1,755–2,137**。口径定义见模块 docstring
+末尾「`budget` 的口径」。
 
 原 2,000 是按 T-39 的四个样本重定的，而验收方跑 65 样本的实测区间是 **1,722–1,987**；
 再叠加 T-40 的两项**净增**（`flags` 的 `hint`、`provenance_counts` 改带标签对象）必然
@@ -840,10 +863,21 @@ def render_index(ctx: ViewContext) -> dict:
         - **不含** `evidence`、逐叶子 `provenance` / `unknown_reasons` / `confidence`、
           逐模块列表、512 条技能明细（红线：L0 不得包含它们）；
         - `meta.skill_tier` 是 `{name, count, hash}`（hash = 技能档的稳定摘要）；
-        - `budget` = `{chars, degraded}`，`degraded` 超预算时置位（**只上报不裁剪**）。
+        - `budget` = `{chars, degraded}`：`chars` 是 **L0 正文长度、不含 `budget` 块自身**
+          （T-41 定稿口径，见模块 docstring 末尾）；`degraded` 超预算时置位
+          （**只上报不裁剪**）。
+
+    `chars` 的算法是**三步、不是循环依赖**（顺序在代码里一行一步，别读成自指）：
+
+    1. `_index_body()` 先给出**没有 `budget` 键**的正文；
+    2. 用这份正文量长度 —— 定义就是「摘掉 `budget` 块之后序列化有多长」；
+    3. 最后才把 `budget` 块塞回正文（它不在第 2 步的长度里）。
     """
+    # ① 构造正文：此刻 body 里还没有 budget 键。
     body, _entries_used = _index_body(ctx)
+    # ② 量正文：定义 = 去掉 budget 块之后的 L0 序列化长度（与既有序列化约定一致）。
     chars = len(json.dumps(body, ensure_ascii=False))
+    # ③ 最后把 budget 块塞回去：它不参与第②步的长度，所以不存在自指。
     body["budget"] = {"chars": chars, "degraded": chars > INDEX_BUDGET_CHARS}
     return body
 

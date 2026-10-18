@@ -174,8 +174,14 @@ def main() -> int:
                    "可渲染", f"{type(exc).__name__}: {exc}")
             continue
         try:
-            chars = len(json.dumps(idx, ensure_ascii=False))
-            sizes.append((name, chars))
+            # **判据与文案必须同源**：`budget.chars` 的定义是「L0 自身正文长度
+            # （不含 budget 块）」，所以这里必须量 body，而不是完整序列化长度。
+            # 之前用 full 去比 body 是自相矛盾（完整 = 正文 + 46），永远消不掉。
+            full_chars = len(json.dumps(idx, ensure_ascii=False))
+            body = {k: v for k, v in idx.items() if k != "budget"}
+            body_chars = len(json.dumps(body, ensure_ascii=False))
+            chars = full_chars          # 预算护栏用完整长度（更严格）
+            sizes.append((name, full_chars))
             if chars > INDEX_BUDGET_CONTRACT:
                 stats["over_impl"] += 1
                 defect("字段缺失", "high", name, "L0 体量", f"≤ {INDEX_BUDGET_CONTRACT}", str(chars))
@@ -189,8 +195,18 @@ def main() -> int:
             if budget.get("degraded"):
                 stats["degraded"].append(name)
             reported = budget.get("chars")
-            if is_number(reported) and int(reported) != chars:
-                stats["budget_mismatch"].append((name, int(reported), chars))
+            if is_number(reported):
+                if int(reported) != body_chars:
+                    stats["budget_mismatch"].append((name, int(reported), body_chars))
+                # 交叉断言：完整长度 − budget.chars 应恒等于「budget 块的序列化开销」。
+                # 将来 budget 块加字段（如 contract），差额会变 —— 这里会立刻发现，
+                # 而不是静默漂移。
+                expected_delta = len(', "budget": ') + len(
+                    json.dumps(budget, ensure_ascii=False))
+                if full_chars - int(reported) != expected_delta:
+                    defect("口径错误", "medium", name, "L0.budget.chars",
+                           f"完整−正文 = {expected_delta}（budget 块开销）",
+                           f"{full_chars - int(reported)}")
 
             # 字段清单（按文档 §3 逐项对拍）
             for view, fields in L0_CHECKLIST.items():
@@ -323,7 +339,7 @@ def main() -> int:
         defect("口径错误", "medium", name0, "L0.budget.chars",
                "自身正文长度（不含 budget 块）",
                f"{len(stats['budget_mismatch'])}/{len(cases)} 个样本不符；"
-               f"例：{name0} 报 {reported0}、实际 {chars0}（差 {chars0 - reported0}）")
+               f"例：{name0} 报 {reported0}、正文实际 {chars0}（差 {chars0 - reported0}）")
 
     # ── degraded=True 分支：把预算临时压到 1，字段数值必须一字不变 ──
     degraded_ok = "未执行"
@@ -356,6 +372,7 @@ def main() -> int:
         print(f"  体量：min={min(s for _, s in sizes)} "
               f"median={int(statistics.median([s for _, s in sizes]))} "
               f"max={max(s for _, s in sizes)}")
+    print(f"  （体量按完整序列化统计，最严格）")
     print(f"  超契约额度({INDEX_BUDGET_CONTRACT})={stats['over_impl']}；"
           f"超文档额度({DOC_INDEX_BUDGET})={stats['over_doc']}；"
           f"实现常量={IMPL_BUDGET}" + ("" if IMPL_BUDGET == INDEX_BUDGET_CONTRACT

@@ -15,8 +15,10 @@ render.get_path(ctx, "mobility.speed_mps")
 本文件钉住的十条（每条都对应任务书/文档的一条红线）
 
 1. **L0 体量**：四个样本 `len(json.dumps(index))` 都 < 2,500（T-40 上调，见
-   `summary.INDEX_BUDGET_CHARS`），且 `budget.chars` 公式成立（`chars` 量的是 L0 **正文**，
-   不含 `budget` 自身）；
+   `summary.INDEX_BUDGET_CHARS`），且 `budget.chars` 公式成立（T-41 定稿：`chars` 量的是
+   L0 **正文**，**逐位等于** `len(json.dumps(去掉 budget 块的 index))`；把预算压到 1 时
+   `degraded=True` 且除 `budget` 块外**逐字节不变**；改回旧的「只量 views(+modes)」算法
+   该恒等式立刻变红）；
 2. **L0 不含 `evidence`**：递归遍历断言没有 `evidence` 键，也没有逐叶子
    `provenance` / `unknown_reasons` / `confidence` 三张表（只有计数）；
 3. **L0 的每个数值都取得回来且逐位相同**：遍历 L0 全部叶子逐个 `get_path` 比对；
@@ -318,6 +320,50 @@ def _assert_l0_fields_complete(doc: dict) -> None:
 # =============================================================================
 
 
+# ---- T-41：`budget` 口径的**唯一判据**（正文恒等式 + degraded 判据）----
+#
+# 口径（`summary` 模块 docstring「`budget` 的口径」）：
+#   `budget.chars` = **去掉 `budget` 块之后**的 L0 序列化长度；`budget` 不量自己。
+# 三步没有自指：先有正文 → 再量正文 → 最后才把 `budget` 块塞回去。
+
+
+def _l0_body(doc: dict) -> dict:
+    """L0 正文 = 去掉 `budget` 块的 index（这就是 `chars` 要量的那棵树）。"""
+    return {key: value for key, value in doc.items() if key != "budget"}
+
+
+def _body_chars(doc: dict) -> int:
+    """正文长度（与实现同一个序列化约定：`json.dumps(..., ensure_ascii=False)`）。"""
+    return len(json.dumps(_l0_body(doc), ensure_ascii=False))
+
+
+def _assert_budget_identity(doc: dict) -> int:
+    """`budget.chars` **逐位等于**正文长度，且 `degraded` 由它唯一决定（返回正文长度）。
+
+    两条断言合起来就是判据本体：换口径（如旧 `views+modes`）在第一条变红；
+    「自己量自己」的固定点写法会让长度漂移，同样过不去。
+    """
+    expected = _body_chars(doc)
+    assert doc["budget"]["chars"] == expected, (
+        f"budget.chars={doc['budget']['chars']} 与正文长度 {expected} 不符"
+        f"（差 {doc['budget']['chars'] - expected}）"
+    )
+    assert doc["budget"]["degraded"] is (expected > summary.INDEX_BUDGET_CHARS), (
+        f"degraded={doc['budget']['degraded']}，但 chars={expected}、预算={summary.INDEX_BUDGET_CHARS}"
+    )
+    return expected
+
+
+def _legacy_views_only_chars(doc: dict) -> int:
+    """**旧 `render_overview` 口径**的复刻：只量 `views`（L0 没有 `modes`，退化成六视角块）。
+
+    用来证明「把 `chars` 改回旧算法，恒等式会变红」这条反证不是空转。
+    """
+    return len(
+        json.dumps({"views": {name: doc[name] for name in available_views()}}, ensure_ascii=False)
+    )
+
+
 @pytest.mark.parametrize("stem", SAMPLES)
 def test_l0_fits_the_hard_limit(docs: dict[str, dict], stem: str) -> None:
     """四个样本的 L0 都 < 2,500 字符，且**默认预算下不降级**（T-40 上调后仍有余量）。"""
@@ -331,13 +377,48 @@ def test_l0_fits_the_hard_limit(docs: dict[str, dict], stem: str) -> None:
 
 @pytest.mark.parametrize("stem", SAMPLES)
 def test_l0_budget_chars_measures_the_body_only(docs: dict[str, dict], stem: str) -> None:
-    """`budget.chars` 量的是 L0 **正文**（不含 `budget` 自身），与渲染层同一口径。"""
-    doc = docs[stem]
-    body = {key: value for key, value in doc.items() if key != "budget"}
+    """**T-41 定稿口径**：`budget.chars` = L0 正文长度，不含 `budget` 块自身。
 
-    assert doc["budget"]["chars"] == len(json.dumps(body, ensure_ascii=False))
-    # 正文 + budget 块才是完整输出（差几十字符：键名与两个数字）
-    assert 0 < len(json.dumps(doc, ensure_ascii=False)) - doc["budget"]["chars"] < 100
+    定义就是「把 `budget` 块摘掉之后，index 序列化有多长」——没有自指问题，
+    所以这里**逐位**比 `len(json.dumps(去掉 budget 的 index))`，不是比个近似。
+    """
+    doc = docs[stem]
+    chars = _assert_budget_identity(doc)
+
+    # 正文 + `budget` 块才是完整输出（差 = 键名与两个数字，几十字符级）
+    assert 0 < len(json.dumps(doc, ensure_ascii=False)) - chars < 100
+
+
+@pytest.mark.parametrize("stem", SAMPLES)
+def test_budget_identity_goes_red_with_the_legacy_views_only_formula(
+    docs: dict[str, dict], stem: str
+) -> None:
+    """**非永真**：把 `chars` 改回旧的「只量 views(+modes)」算法，恒等式立刻变红。
+
+    旧口径（继承自 `render_overview`）不含顶层键与 `meta`；L0 没有 `modes`，所以退化成
+    「只量六个视角块」。这条反证同时钉住两件事：① 判据真的在比正文；② 新口径比旧口径
+    至少多算几百字符（否则换口径也没意义）。
+    """
+    doc = docs[stem]
+    expected = _assert_budget_identity(doc)  # 前提：现行实现在这条判据下是绿的
+    legacy = _legacy_views_only_chars(doc)
+
+    assert legacy != expected, "旧口径与新口径恰好相等 —— 这条反证会空转"
+    # 旧口径漏掉 ship / meta / flags / provenance_counts 与顶层键名（实测差 956–1,052）
+    assert expected - legacy > 500, f"旧口径只差 {expected - legacy} 字符，反证力度不足"
+
+    # ① 换成旧算法的数 → 恒等式变红
+    tampered = json.loads(json.dumps(doc))
+    tampered["budget"]["chars"] = legacy
+    with pytest.raises(AssertionError) as caught:
+        _assert_budget_identity(tampered)
+    assert "不符" in str(caught.value)
+
+    # ② 差 1 个字符也要红（判据不是「差得远才报」）
+    off_by_one = json.loads(json.dumps(doc))
+    off_by_one["budget"]["chars"] = expected + 1
+    with pytest.raises(AssertionError):
+        _assert_budget_identity(off_by_one)
 
 
 def test_l0_is_far_smaller_than_render_overview(kill_ctx: ViewContext) -> None:
@@ -1116,13 +1197,13 @@ def test_degraded_is_reported_and_values_are_never_trimmed(
     """预算调小 → `degraded=True` 显式出现，但**字段与数值一个都没少**（只上报不裁剪）。
 
     T-40 增强 5：`degraded` 分支此前**从未被任何真实样本执行过**（65 样本全部 < 2,500），
-    这条用例就是它的执行证据。两档预算各跑一次：
+    这条用例就是它的执行证据。三档预算各跑一次：
 
     1. **「刚好不够」**（`body_chars - 1`）：最接近真实触发的形态 —— 证明判据是
        `chars > INDEX_BUDGET_CHARS` 而不是「远远超出才置位」；
-    2. **10**：极端值 —— 证明确实**一个字符都没为省预算而丢**。
+    2. **1** 与 **10**：极端值（T-41 明确要求 1）—— 证明确实**一个字符都没为省预算而丢**。
 
-    两次都断言「除 `budget` 外**逐键、逐字段、逐字节**相同」（不是只比长度）。
+    每一档都断言「除 `budget` 块外**逐键、逐字段、逐字节**相同」（不是只比长度）。
     """
     baseline = render.render_index(kill_ctx)
     body_chars = baseline["budget"]["chars"]
@@ -1131,6 +1212,7 @@ def test_degraded_is_reported_and_values_are_never_trimmed(
 
     assert baseline["budget"]["degraded"] is False
     assert dumped and len(dumped) == body_chars, "前提：budget.chars 量的是正文"
+    assert baseline["budget"]["degraded"] is (body_chars > summary.INDEX_BUDGET_CHARS)
 
     # ① 刚好不够：body_chars - 1
     monkeypatch.setattr(summary, "INDEX_BUDGET_CHARS", body_chars - 1)
@@ -1139,14 +1221,17 @@ def test_degraded_is_reported_and_values_are_never_trimmed(
     assert edge["budget"]["chars"] == body_chars, "降级不改正文体量（预算不是裁剪器）"
     _assert_same_body(edge, body)
 
-    # ② 极端：10 字符
-    monkeypatch.setattr(summary, "INDEX_BUDGET_CHARS", 10)
-    tiny = render.render_index(kill_ctx)
-    assert tiny["budget"]["degraded"] is True
-    assert json.dumps(
-        {key: value for key, value in tiny.items() if key != "budget"}, ensure_ascii=False
-    ) == dumped, "降级时丢字段/改数值了 —— 红线：不许为省字符丢数值"
-    _assert_same_body(tiny, body)
+    # ② 极端值：1 与 10（T-41：预算压到 1 时 degraded=True，其它内容逐字节不变）
+    for tiny_budget in (1, 10):
+        monkeypatch.setattr(summary, "INDEX_BUDGET_CHARS", tiny_budget)
+        tiny = render.render_index(kill_ctx)
+        assert tiny["budget"]["degraded"] is True, tiny_budget
+        assert tiny["budget"]["chars"] == body_chars, "预算不是裁剪器：正文体量不变"
+        assert tiny["budget"]["degraded"] is (body_chars > tiny_budget), tiny_budget
+        assert json.dumps(
+            {key: value for key, value in tiny.items() if key != "budget"}, ensure_ascii=False
+        ) == dumped, "降级时丢字段/改数值了 —— 红线：不许为省字符丢数值"
+        _assert_same_body(tiny, body)
 
     # ③ 四个真实样本同样成立（不是只有 Hecate 这个样本的形状如此）
     for stem in SAMPLES:
