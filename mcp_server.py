@@ -534,58 +534,73 @@ _FIT_DESCRIPTION: str = (
 
 _TOOL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
     # 名字 → (title, description)
+    #
+    # **每条 description 都必须自解释三段**（T-51 裁决：MCP 是唯一真源，Skill 只做发现性）：
+    #   ① 何时用 / 它回答什么问题  ② 返回里最该看什么  ③ 已知限制
+    # 为什么三段都写在**工具描述**里而不是 SKILL.md 里：客户端一定会把 `tools/list` 的
+    # description 注入上下文，而 SKILL.md 只在「客户端装了 Skill 且没连 MCP」时有价值。
+    # `tests/test_mcp_server.py::test_every_tool_description_is_self_explaining` 钉住三段，
+    # 删掉任一段就变红（配对断言见同文件的 `test_description_guard_is_not_vacuous`）。
     "fit_parse": (
         "解析配装（确认读懂了没有）",
-        "把 EFT / DNA / killmail 归一化成结构，回显 source_format、船（type_id/name/group）、"
-        "模块件数（已装 / 货舱 / 逐槽位）、技能档与 warnings。"
-        "**推荐的第一步**：先确认这套配装被正确读懂了，再往下算。"
-        "返回里 result.fit 是引擎结构原样（不加工）。",
-    ),
-    "fit_index": (
-        "六维度摘要（L0，默认入口）",
-        "六维度摘要：firepower / survivability / mobility / resources / constraints / "
-        "stability 各 3–5 个数，加 flags（id + hint）、provenance_counts 与 budget。"
-        "实测约 2k 字符 —— **默认入口**，批量看战报、快速判断时用它，不要一上来就 detail。",
+        "配装刚拿到手时用它：回答「这套到底读懂了没有」。把 EFT / DNA / killmail 归一化成"
+        "结构，返回 source_format、船（type_id/name/group）、模块件数（已装 / 货舱 / 逐槽位）、"
+        "技能档与 warnings —— 先看 ship 与 modules.fitted，再看 warnings。"
+        "**推荐的第一步**。限制：只归一化、不算任何维度；模块名认不出时给 candidates 而不"
+        "代填；result.fit 是引擎结构原样（不加工）。",
     ),
     "fit_killmail": (
         "战报上下文（谁打的、损失多少、挨了多少伤害）",
-        "战报上下文：损失价值（fitted/dropped/destroyed/total）、参战方（人数 / 总伤害 / "
+        "配装看完了，想知道这套为什么死、被谁打、值多少钱时用它：回答「这条战报的上下文是"
+        "什么」。返回损失价值（fitted/dropped/destroyed/total）、参战方（人数 / 总伤害 / "
         "Σdamage 与 victim.damage_taken 的校验 / 最终一击 / 按舰级与武器族的分桶 / 安全等级"
-        "分布）、星系与安全等级、以及「挨了多少伤害 vs 自身 EHP」。"
+        "分布）、星系与安全等级，以及「挨了多少伤害 vs 自身 EHP」。"
         "**分析一条战报时，先 fit_parse 看配装，再 fit_killmail 拿上下文；不要自己去打开 "
-        "zkillboard 网页。** 只接受 killmail（JSON / {killmail_id, hash} / killmail 链接）："
-        "EFT / DNA / 结构化配装会得到 not_a_killmail。拿不到的值一律 null（不猜），"
-        "damage_check 不等时给 mismatch + damage_diff（数据质量信号）。",
+        "zkillboard 网页。** 限制：只接受 killmail（JSON / {killmail_id, hash} / killmail "
+        "链接），EFT / DNA 会得到 not_a_killmail；拿不到的值一律 null（不猜），"
+        "damage_check 不等时给 mismatch + damage_diff（数据质量信号）；只给事实，不给生死结论。",
+    ),
+    "fit_index": (
+        "六维度摘要（L0，默认入口）",
+        "配装读懂了、要一个整体画像时用它：回答「这套整体什么样、哪个维度可疑」。返回 "
+        "firepower / survivability / mobility / resources / constraints / stability 六维度"
+        "各 3–5 个数，加 flags（id + hint）与 provenance_counts —— 先看 flags，那里有「哪儿"
+        "不对」的一句话。**默认入口**，批量看战报、快速判断时用它。限制：约 2k 字符，只有"
+        "摘要不展开明细；要看某个视角全字段用 fit_view，深挖用 fit_detail，不要一上来就 detail。",
     ),
     "fit_view": (
         "单视角全字段（L1）",
-        "单视角全字段：overview + provenance（measured/assumed/unknown 三态表）+ "
-        "unknown_reasons + confidence + flags + evidence，不降级、不裁剪（2–3k 字符）。"
-        "某个维度看起来可疑时用它展开。",
+        "fit_index 里某个维度看起来可疑时用它：回答「这个维度到底怎么算的」。返回单视角全"
+        "字段：overview + provenance（measured/assumed/unknown 三态表）+ unknown_reasons + "
+        "confidence + flags + evidence，不降级、不裁剪。限制：一次只看一个视角，2–3k 字符；"
+        "只要一个数就用 fit_get 更省。",
     ),
     "fit_get": (
         "按路径取一个值 + provenance",
-        "按路径取一个值，附带 provenance（三态）与 source_view，极小（几百字符）。"
-        "路径表达式与 L0/L1 同一套，如 mobility.speed_mps、firepower.weapons[].name、"
-        "budget.chars。**value 为 null 是合法答案**（该值未知或不适用）——"
-        "这时看 provenance 与 reason，别当取数失败。路径真的不存在才给 invalid_path + hint。",
+        "已经知道要哪个数、或在 fit_view 里看到可疑字段时用它：回答「这一个值是多少、可不可"
+        "信」。返回一个值 + provenance（三态）+ source_view，几百字符。"
+        "**value 为 null 是合法答案**（该值未知或不适用），这时看 provenance 与 reason，"
+        "别当取数失败。限制：只能取路径上已有的值，路径真的不存在才给 invalid_path + hint；"
+        "不做换算、不做评分。",
     ),
     "fit_detail": (
         "列表型明细（深挖）",
-        "列表型明细：升级候选、逐模块电容、完整技能表（meta.assumptions.skill_tier，512 条）。"
-        "不指定 view 时返回**六个视角全部**，体量很大（实测 10 KB 起）——"
-        "先 fit_view 定位，再 fit_detail(view=\"...\")；path 走 '<视角>.<字段>'。",
+        "fit_index / fit_view 定位到问题、要逐条明细时才用它：回答「具体是哪些模块、哪些升级"
+        "候选、完整技能表长什么样」。返回列表型明细：升级候选、逐模块电容、完整技能表"
+        "（meta.assumptions.skill_tier，512 条）。限制：不指定 view 时返回**六个视角全部**，"
+        "体量很大（实测 10 KB 起）—— 先 fit_view 定位，再 fit_detail(view=\"...\")；path 走 "
+        "'<视角>.<字段>'；工具不做截断：宁可大也不悄悄少东西。",
     ),
     "zkb_search": (
         "战报列表检索（谁在打谁 / 最近损失了什么）",
-        "查某人/某公司/某联盟/某船型/某星系/某区域的战报列表（AND 复合条件："
-        "多个条件同时给就是同时满足）。时间只能用 past_seconds（zkb 已停用起止时间："
-        "startTime/endTime 会返回 invalid_argument）；单页最多 200 条，更早的数据靠 "
-        "page 往回翻。side = kills / losses / both（both 合并去重并按 killmail_time 倒序）。"
-        "返回每条的 killmail_id / killmail_time / ship{type_id,name,group} / value / "
-        "labels / npc / solo，加整页聚合（total_value / median_value / by_ship / "
-        "time_span）；limit 只截断 kills 数组，count 与 aggregates 仍按整页算。"
-        "列表不含明细，明细用 fit_killmail。",
+        "还没决定看哪条战报时用它：回答「这段时间都有哪些战报」。查某人/某公司/某联盟/某船型"
+        "/某星系/某区域的列表（AND 复合条件：多个条件同时给就是同时满足）。时间只能用 "
+        "past_seconds（zkb 已停用起止时间：startTime/endTime 会返回 invalid_argument）；"
+        "单页最多 200 条，更早的数据靠 page 往回翻。返回每条 killmail_id / killmail_time / "
+        "ship{type_id,name,group} / value / labels / npc / solo，加整页聚合（total_value / "
+        "median_value / by_ship / time_span）；side = kills / losses / both。限制：列表不含明细"
+        "（明细用 fit_killmail）；limit 只截断 kills 数组，count 与 aggregates 仍按整页算；"
+        "1.2 s 限流，别在循环里逐条查。",
     ),
 }
 
@@ -789,26 +804,22 @@ def _build_tool_specs() -> tuple[dict, ...]:
 
 
 INSTRUCTIONS: str = (
-    "evefit 配装分析（EVE Online）。典型顺序："
-    "① fit_parse —— 先确认这套配装被正确读懂了（船 / 模块件数 / warnings）；"
-    "② fit_killmail —— **分析一条战报时**拿上下文（损失价值 / 参战方 / 伤害构成 / 最终一击 / "
-    "星系与安全等级 / 挨了多少伤害 vs 自身 EHP）；不要自己去打开 zkillboard 网页；"
-    "③ fit_index —— 默认入口，六维度摘要（约 2k 字符）；"
-    "④ fit_view / fit_get —— 某维度可疑就展开它，或按路径精确取一个数；"
-    "⑤ zkb_search —— **要先找战报**时用它：「谁在打这个星系」「这个公司最近损失了什么」"
-    "这类问法先 zkb_search 筛出 killmail_id，再对具体那条调 fit_killmail。"
-    "条件可复合（AND）；时间**只能用 past_seconds**（zkb 已停用 startTime/endTime），"
-    "单页最多 200 条、更早的靠 page 翻；它有 1.2 s 限流，别在循环里逐条查；"
-    "⑥ fit_detail —— 深挖（升级候选、完整技能表），只在需要时调，返回很大。"
-    "返回统一信封：成功 {ok:true, result, meta}，失败 {ok:false, error:{kind, ...}}。"
-    "业务失败时 isError=true 但仍是正常响应：读 error.kind（parse_failed / "
-    "ambiguous_ship / unknown_module / invalid_path / invalid_argument / "
-    "not_a_killmail / unknown_entity / rate_limited / network_failed / internal_error）"
-    "以及 candidates / hint / line / raw。"
-    "数值一律来自投影层，工具不做换算、不做评分与判词；"
-    "provenance 有三种状态（measured / assumed / unknown），unknown 不是 0，别当 0 用。"
-    "fit_killmail 里 null 不等于 0：拿不到的星系名 / 安全等级 / 价值块一律 null，"
-    "原因写在 warnings 里。"
+    "evefit 配装分析（EVE Online）。按这个顺序用：\n"
+    "① fit_parse 先确认读懂了（船 / 模块件数 / warnings）；\n"
+    "② fit_killmail 分析战报时拿上下文（价值 / 参战方 / 伤害）；\n"
+    "③ fit_index 默认入口：六维度摘要，先看 flags；\n"
+    "④ fit_view 展开可疑维度；⑤ fit_get 只取一个数（带 provenance）；\n"
+    "⑥ fit_detail 深挖，返回很大，按需；\n"
+    "⑦ zkb_search 要先找战报：筛 killmail_id 再回 ②。\n"
+    "三条判读纪律：\n"
+    "1) unknown 不是 0：provenance=unknown 别用常识补数，看 unknown_reasons"
+    "（not_applicable=本配装不适用、不是「不知道」；input_incomplete=输入不足；"
+    "ambiguous=无唯一答案）。\n"
+    "2) 顶层数值可能是不可达的叠加值：多推进同时启用时 speed_mps/signature_radius_m "
+    "叠加，用 mobility.propulsion_states.single 看「只开某一个」的真实值；"
+    "有 state_exclusive flag 就说明它。\n"
+    "3) 不要自己开 zkillboard/ESI 网页：战报上下文找 fit_killmail，列表检索找 zkb_search。\n"
+    "业务失败是 isError=true 的正常响应，读 error.kind。"
 )
 
 

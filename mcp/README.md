@@ -1,24 +1,26 @@
 # evefit MCP server（stdio + HTTP）
 
-把 `evefit/api.py` 的六个函数暴露成 **MCP 工具**，让 agent（Claude Desktop / Cursor /
-自研 agent…）能直接问「这套 Hecate 的机动怎么样」「这条战报是谁打的、损失多少」，而不是
-让 agent 自己写 Python —— 更不是让 agent 自己去打开 zkillboard 网页。
+把 `evefit/api.py` 的函数暴露成 **MCP 工具**，让 agent 直接问「这套配装什么样、哪里有问题」
+「这条战报是谁打的、损失多少」，而不是自己写 Python —— 更不是自己打开 zkillboard 网页。
 
-两种传输，**同一套协议实现**（同一个 `dispatch()`、同一套错误码、同一个信封）：
+**一句话定位：MCP 自己解释自己。** 服务的 `initialize.instructions` 给推荐顺序与三条判读
+纪律，`tools/list` 里每个工具的 `description` 写清「何时用 / 返回什么 / 已知限制」，
+`inputSchema` 写清参数与 enum。README 只留**运维契约**（怎么起、怎么连、错误语义、限制），
+**不复制工具文案** —— 文案的权威来源永远是 `mcp_server.py` 的 `_TOOL_DESCRIPTIONS`
+与 `INSTRUCTIONS`（Skill 只做发现性，见第 8 节）。
+
+- 服务（协议 + stdio 传输 + 命令行）：`evefit/mcp_server.py`
+- **HTTP 传输**：`evefit/mcp_http.py`
+- 真实客户端冒烟：`evefit/mcp/client_smoke.py`（stdio）、`evefit/mcp/client_smoke_http.py`（http）
+- 契约测试（含自解释守卫）：`evefit/tests/test_mcp_server.py`、`evefit/tests/test_mcp_http.py`
+
+两种传输，**同一套协议实现**（同一个 `dispatch()`、同一套错误码、同一个信封）；
+都是**零第三方依赖**：只需要 `eveshipfit-dogma-engine[sde]`，不需要 `mcp` 包（见第 9 节）。
 
 | 传输 | 启动 | 用途 |
 |---|---|---|
 | **stdio**（默认） | `python -m evefit.mcp_server` | 一个客户端一个子进程；本地客户端最省事 |
-| **HTTP**（Streamable HTTP） | `python -m evefit.mcp_server --transport http --host 0.0.0.0 --port 8080` | **能跨机器 / 用局域网访问**；容器里的唯一可行形态 |
-
-两种都是**零第三方依赖**：只需要 `eveshipfit-dogma-engine[sde]`，不需要 `mcp` 包
-（原因见文末「依赖路线」）。
-
-- 服务（协议 + stdio 传输 + 命令行）：`evefit/mcp_server.py`
-- **HTTP 传输**：`evefit/mcp_http.py`
-- 真实客户端冒烟：`evefit/mcp/client_smoke.py`（stdio）、
-  `evefit/mcp/client_smoke_http.py`（http）
-- 契约测试：`evefit/tests/test_mcp_server.py`、`evefit/tests/test_mcp_http.py`
+| **HTTP**（Streamable HTTP） | `python -m evefit.mcp_server --transport http --host 0.0.0.0 --port 8080` | **能跨机器 / 局域网访问**；容器里的唯一可行形态 |
 
 ---
 
@@ -40,6 +42,8 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"manual","version":"1"}}}' |
   uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m evefit.mcp_server
 ```
+
+回包里就有 `instructions`（推荐顺序 + 三条判读纪律）与 `capabilities.tools`。
 
 ### 1.2 HTTP（局域网 / 容器）
 
@@ -63,7 +67,7 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 
 ```powershell
 curl http://127.0.0.1:8080/health
-python -m evefit.mcp.client_smoke_http                    # 完整 HTTP 客户端冒烟（12 步）
+python -m evefit.mcp.client_smoke_http                    # 完整 HTTP 客户端冒烟
 python -m evefit.mcp.client_smoke_http --base-url http://127.0.0.1:18080
 ```
 
@@ -109,7 +113,7 @@ python -m evefit.mcp.client_smoke_http --base-url http://127.0.0.1:18080
 ### 2.2 `GET /health`（容器 healthcheck 的契约）
 
 ```json
-{"ok": true, "server": "evefit", "version": "1.0.0", "transport": "http", "tools": 5, "sessions": 3}
+{"ok": true, "server": "evefit", "version": "1.0.0", "transport": "http", "tools": 7, "sessions": 3}
 ```
 
 | 字段 | 值 |
@@ -118,7 +122,7 @@ python -m evefit.mcp.client_smoke_http --base-url http://127.0.0.1:18080
 | `server` | `evefit` |
 | `version` | `1.0.0`（= `mcp_server.SERVER_VERSION`） |
 | `transport` | `http` |
-| `tools` | 工具条数（`= len(mcp_server.TOOL_NAMES)`，与 `tools/list` 同源；**别抄数字**） |
+| `tools` | 工具条数（`= len(mcp_server.TOOL_NAMES)`，与 `tools/list` 同源；**别抄数字**，上面的 `7` 只是当前快照） |
 | `sessions` | 当前会话数（没握手过就是 `0`） |
 
 **字段名别改** —— 容器 healthcheck 按名取值。
@@ -206,7 +210,7 @@ Invoke-WebRequest -Method Post -Uri http://127.0.0.1:8080/mcp -Body $body -Conte
 
 | 字段 | 为什么要写 |
 |---|---|
-| `cwd` | `python -m evefit.mcp_server` 靠 **cwd** 找到 `evefit` 包。客户端不支持 `cwd` 时，把仓库根加进下面的 `PYTHONPATH`（见 2.2）。 |
+| `cwd` | `python -m evefit.mcp_server` 靠 **cwd** 找到 `evefit` 包。客户端不支持 `cwd` 时，把仓库根加进下面的 `PYTHONPATH`（见 3.2）。 |
 | `env.UV_CACHE_DIR` | uv 的缓存目录。不指定会落到用户级缓存（`%LOCALAPPDATA%\uv\cache`），与项目 `evefit/spike/uvcache` 里的既有缓存不共享，首次启动会重新下载 SDE / 引擎。 |
 | `env.PYTHONIOENCODING` | `utf-8`。Windows 默认代码页（cp936）会让子进程的 stderr 写崩、也会让管道里的中文变乱码。**stdout 我们按 UTF-8 字节读写**，这个变量管的是 stderr 与内部字符串。 |
 
@@ -235,31 +239,45 @@ Invoke-WebRequest -Method Post -Uri http://127.0.0.1:8080/mcp -Body $body -Conte
 
 ### 3.3 客户端连上之后
 
-先 `tools/list`（列出服务当前注册的工具），再按第 5 节的顺序调。服务的 `initialize` 结果里
-带一段 `instructions`，多数 agent 会自己读它来排调用顺序。
+先 `initialize`（拿 `instructions` 与 `capabilities.tools`），再 `tools/list`（拿全部工具 +
+schema），然后按 `instructions` 给的顺序调。**服务无业务状态**：每次调用自带 `fit`，
+不依赖会话上下文；`Engine` / `Index` / LRU 是进程级单例。
 
 当前握手信息：`serverInfo = {"name": "evefit", "version": "1.0.0"}`，
 `capabilities.tools = {"listChanged": false}`，
 支持协议版本 `2026-07-28 / 2025-11-25 / 2025-06-18 / 2025-03-26 / 2024-11-05`。
+协议版本 ≥ `2025-06-18` 时工具结果里**同时**给 `structuredContent`。
 
-## 4. 工具清单
+## 4. 工具：权威文案在 MCP 里，这里只有索引
 
-**条数与名字的唯一真源是 `mcp_server.TOOL_NAMES`**：`tools/list`、`/health` 的 `tools`、
-客户端冒烟、验收测试全部从它派生。下面这张表是**给人看的说明**，不是第二个清单 ——
-加工具时改 `TOOL_NAMES` 一处 + `_HANDLERS` + `_TOOL_DESCRIPTIONS`，测试与冒烟一行都不用动。
+**唯一真源是 `mcp_server.py`**：`TOOL_NAMES`（名字与顺序）、`_TOOL_DESCRIPTIONS`（title +
+description）、`_schema_for()`（参数）。`tools/list`、`/health` 的 `tools`、客户端冒烟、验收
+测试全部从它派生 —— README 这张表只是**给人看的索引**，不是第二份文案。
 
-### 4.1 配装类六个工具
+想读线上到底怎么写的（不需要引擎，纯文本）：
 
-| 工具 | 一句话 | 体量 | 参数 |
-|---|---|---|---|
-| `fit_parse` | 把输入归一化成结构，回显「我读懂了什么」（格式 / 船 / 模块件数 / 技能档 / warnings） | 中（~4 KB） | `fit` |
-| `fit_killmail` | **战报上下文**：损失价值 / 参战方 / 伤害构成 / 最终一击 / 星系与安全等级 / 挨了多少伤害 vs 自身 EHP | 小（~1.5 KB） | `fit` |
-| `fit_index` | **默认入口**：六维度摘要（L0）+ flags + budget | ~2 KB | `fit` |
-| `fit_view` | 单视角全字段（L1）：overview / provenance / unknown_reasons / confidence / flags | 2–3 KB | `fit`, `view`* |
-| `fit_get` | 按路径精确取一个值 + 它的 provenance / reason | 极小（~0.3 KB） | `fit`, `path`* |
-| `fit_detail` | 列表型明细（升级候选、逐模块电容、**完整技能表 512 条**） | 大（10 KB 起） | `fit`, `view`?, `path`? |
+```powershell
+cd F:\WorkSpace\GIT\opencode_general_workspace
+python -c "from evefit import mcp_server as m; print(m.INSTRUCTIONS); [print(n, '::', m._TOOL_DESCRIPTIONS[n][1]) for n in m.TOOL_NAMES]"
+```
 
-`*` = 必填。这六个工具都还接受三个可选参数（§10.2）；不接 `fit` 的检索类工具（`zkb_search`）不接受它们：
+### 4.1 索引（顺序 = 推荐调用顺序）
+
+| 工具 | 一句话 |
+|---|---|
+| `fit_parse` | 第一步：把输入归一化成结构，回显「我读懂了什么」 |
+| `fit_killmail` | 战报上下文：损失价值 / 参战方 / 伤害构成 / 星系与安全等级 / 受伤 vs EHP |
+| `fit_index` | 默认入口：六维度摘要（L0）+ flags + budget |
+| `fit_view` | 单视角全字段（L1）：overview / provenance / unknown_reasons / confidence / flags |
+| `fit_get` | 按路径精确取一个值 + 它的 provenance / reason |
+| `fit_detail` | 列表型明细（升级候选、逐模块电容、完整技能表 512 条） |
+| `zkb_search` | 战报列表检索（先筛 killmail_id，再对那条调 `fit_killmail`） |
+
+每个工具的「何时用 / 返回什么 / 限制」、每个参数的含义与默认值，都写在它的
+`description` / `inputSchema` 里 —— **别在这份 README 里补第二份**（复制就会漂移；
+`tests/test_mcp_server.py` 的三段守卫盯着这件事）。
+
+配装类工具另接受三个可选参数（`zkb_search` 没有 `fit`，也不接受它们）：
 
 | 参数 | 默认 | 可用值 |
 |---|---|---|
@@ -267,82 +285,19 @@ Invoke-WebRequest -Method Post -Uri http://127.0.0.1:8080/mcp -Body $body -Conte
 | `damage_profile` | `uniform` | `uniform`（25/25/25/25） |
 | `state_policy` | `engine_default` | `engine_default` |
 
-`view` 的六个值：`firepower`（火力）、`survivability`（生存）、`mobility`（机动）、
-`resources`（资源）、`constraints`（约束）、`stability`（不稳定）。
-
 `fit` 是**字符串**：EFT 文本、DNA 字符串（`fitting:` 前缀可有可无）、killmail 的 JSON
 文本，或者 zkillboard / ESI 的 killmail 链接（后两种会联网）。字典 / 数组也接受
 （会被直接递进 `api`），但 schema 里只广告 string。
 
-### `fit_killmail`：为什么要有它
+### 4.2 `zkb_search` 的调用注意（三条真会踩到的）
 
-zkillboard 与 ESI **各给一半**：zkillboard 有 `zkb` 价值块（fitted / dropped /
-destroyed / total、points、labels），ESI 有 `attackers` / `victim.damage_taken` 与逐件
-`items`。之前只把 `victim.ship_type_id + victim.items` 转成配装，其余全丢了，于是 agent
-会**自己开浏览器去看 zkillboard 网页**。这个工具把两半合起来给（`killmail_source` 回显
-`network` / `local`，`warnings` 说明哪些值缺失）。
-
-- 只接受 killmail：EFT / DNA / 结构化配装 → `ok:false` + `kind: "not_a_killmail"`；
-- 拿不到的值一律 `null`（星系名 / 安全等级 / 价值块），**不伪造**；
-- `attackers.damage_check`：`Σ attackers.damage_done == victim.damage_taken` 时是
-  `matches_victim`，否则 `mismatch` + `damage_diff`（数据质量信号，绝不静默）；
-- `by_weapon_family` 只有 `projectile` / `lazors` / `hybrid` / `missile` / `drone` /
-  `fighter` / `smartbomb` / `other`；分不清就是 `other`（不猜）；
-- `context.damage_taken_vs_ehp.ratio = damage_taken / ehp_mixed`，EHP **来自投影层**（`survivability.ehp_mixed`），
-  接口层不重算，也不给生死结论。
-
-### `zkb_search`：列表层（`pastSeconds` + 分页 + 限流）
-
-`fit_killmail` 是「一条战报有多细」，`zkb_search` 是「这段时间有哪些战报」：
-先用它筛出 `killmail_id`，再对感兴趣的那几条调 `fit_killmail`。
-
-| 维度 | 口径（都是实测） |
-|---|---|
-| 过滤条件 | `character` / `corporation` / `alliance` / `ship` / `solar_system` / `region`，**可同时给 = AND 复合**；名字或整数 id 都行（名字走 ESI `POST /universe/ids/`，结果进程内缓存） |
-| 时间 | **只能用 `past_seconds`**（秒）。`startTime` / `endTime` 已被 zkb 停用（`{"error": "startTime/endTime no longer supported in api because of abuse"}`），传了会得到 `invalid_argument`，**一次请求都不会发** |
-| 分页 | `page`（1 = 最新一页），**单页最多 200 条**；更早的数据靠往回翻页，没有别的回溯手段 |
-| `side` | `kills` / `losses` / `both`。`/api/kills/` 与 `/api/losses/` 是**两条独立路径**，`both` = 两次请求 + 合并去重 + 按 `killmail_time` 倒序 |
-| `limit` | 只截断返回的 `kills` 数组（1..200）；`count` 与 `aggregates` **仍按整页算**，截断这件事写在 `note` 里 |
-| 限流 | 所有出网请求串行 + 最小间隔 **1.2 s**（`ZKB_MIN_INTERVAL_S`）；被限流（429 / 403）→ `rate_limited`（带 `hint.min_interval_s`）。所以 `both` 至少花 2.4 s，别在循环里逐条查 |
-| 返回 | 每条 `killmail_id` / `killmail_time` / `ship{type_id,name,group}` / `value` / `labels` / `npc` / `solo`，加整页聚合 `total_value` / `median_value` / `by_ship` / `time_span`；`meta.urls` 回显**本次真正请求过的 URL** |
-| 不受支持 | 一个过滤条件都不给（裸的 `/api/kills/` 是全服流式数据，不是一次检索）→ `invalid_argument` |
-
-**`ship` 是受害者那艘船**，不是过滤条件本身：`side="kills"` + `ship=Sleipnir` 的意思是
-「Sleipnir 参与击杀的那些战报」，其中有些战报的受害者是别的船（实测第二行就是一艘
-Sabre）。想看「Sleipnir 自己怎么死的」用 `side="losses"`。
-
-**列表里没有完整配装**：`victim.items` 确实存在（实测：被弹出的模块），但本工具不返回它
-—— 明细一律走 `fit_killmail`。这条契约在 `note` 里也写着。
-
-### 典型调用顺序
-
-```
-zkb_search     ⓪ **要先找战报**时用它：「谁在打这个星系」「这公司最近损失了什么」
-   ↓            条件复合（AND）；时间只有 past_seconds；一页 200 条，更早的翻 page
-fit_parse      ① 先确认这套配装被正确读懂了（船对不对、模块读进来几件、有没有 warning）
-   ↓
-fit_killmail   ② 分析战报时拿上下文（价值 / 参战方 / 伤害构成 / 星系与安全等级）
-   ↓            ↑ 这一行就是为了**不让你去开 zkillboard 网页**
-fit_index      ③ 看六维度摘要，定位可疑的那个维度
-   ↓
-fit_view       ④ 展开可疑维度（要看全字段时）
-fit_get        ⑤ 或者只要一个数：mobility.speed_mps / firepower.dps.total / budget.chars
-   ↓
-fit_detail     ⑥ 真需要明细时才调（升级候选、逐模块电容、完整技能表）
-```
-
-举例：
-
-```json
-{"name": "zkb_search",  "arguments": {"ship": "Sleipnir", "solar_system": "Amamake", "past_seconds": 604800, "side": "losses"}}
-{"name": "zkb_search",  "arguments": {"character": 2121910483, "past_seconds": 86400, "side": "kills", "limit": 10}}
-{"name": "fit_parse",   "arguments": {"fit": "[Hecate, 139246907]\nDamage Control II\n..."}}
-{"name": "fit_killmail","arguments": {"fit": "https://zkillboard.com/kill/139239127/"}}
-{"name": "fit_index",   "arguments": {"fit": "[Hecate, 139246907]\nDamage Control II\n..."}}
-{"name": "fit_get",     "arguments": {"fit": "...", "path": "mobility.speed_mps"}}
-{"name": "fit_view",    "arguments": {"fit": "...", "view": "mobility"}}
-{"name": "fit_detail",  "arguments": {"fit": "...", "view": "stability"}}
-```
+- **时间只能是 `past_seconds`**：zkb 已停用 `startTime` / `endTime`（abuse 防护），传了会
+  得到 `invalid_argument`，而且**一次请求都不会发**（省配额、错误也更直接）。
+- **单页最多 200 条**：更早的数据靠 `page` 往回翻。`limit` 只截断返回的 `kills` 数组，
+  `count` 与 `aggregates` 仍按**整页**算 —— 截断这件事写在返回的 `note` 里，别把它读成
+  「一共就这么多」。
+- **有 1.2 s 硬限流**：所有出网请求串行 + 最小间隔 `ZKB_MIN_INTERVAL_S`（`both` 至少
+  2.4 s），429 / 403 → `rate_limited`。别在循环里逐条查；名字 → id 的解析结果会进程内缓存。
 
 ## 5. 返回契约
 
@@ -397,6 +352,9 @@ fit_detail     ⑥ 真需要明细时才调（升级候选、逐模块电容、�
 9. **`zkb_search` 有硬限流**：所有出网请求串行 + 最小间隔 1.2 s（`both` 至少 2.4 s），
    而且 zkb 单页最多 200 条、时间窗口只能用 `past_seconds`（起止时间已被停用）。
    它是**列表层**：拿不到完整配装，别指望用它替代 `fit_killmail`。
+10. **`unknown` 不是 0**：三态 provenance 里 `unknown` 表示「算不出来」或「不适用」，
+    不是零值；原因在 `unknown_reasons` 里（`not_applicable` / `input_incomplete` /
+    `ambiguous` / `engine_omits`）。工具不换算、不评分、不补数。
 
 ## 7. 自检 / 排查
 
@@ -409,7 +367,7 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m evefit.mcp.client_smoke_http
 uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m evefit.mcp.client_smoke_http --base-url http://127.0.0.1:18080
 
-# 契约测试（含子进程集成、stdout 纯净性、非永真断言、http 传输 30 条）
+# 契约测试（含子进程集成、stdout 纯净性、非永真断言、自解释守卫、http 传输）
 uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" --with pytest python -m pytest -q evefit/tests -p no:cacheprovider
 ```
 
@@ -422,11 +380,8 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 | `... --sdk` | 强制官方 SDK（需要 `--with mcp`；装不上会直接失败） |
 
 `client_smoke_http.py` 只有一条路径（标准库 `http.client`），两个开关：
-
-| 开关 | 默认 | 说明 |
-|---|---|---|
-| `--base-url` | `http://127.0.0.1:8080` | 服务地址。写 `0.0.0.0`（绑定地址不是可连地址）会被自动换成 `127.0.0.1` 并打一行提示 |
-| `--timeout` | `300` | 单请求超时（秒） |
+`--base-url`（默认 `http://127.0.0.1:8080`；写 `0.0.0.0` 会被自动换成 `127.0.0.1` 并打一行
+提示）、`--timeout`（默认 `300` 秒）。
 
 **常见事故 1：stdout 被污染。** 症状是「客户端说服务没响应 / 解析失败」。本服务做了两层
 防护：所有日志走 stderr；启动时把进程 fd 1 改指 stderr，协议通道走一份私有副本 ——
@@ -441,13 +396,40 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 
 **打开请求级日志**：`--log-level debug`（或 `EVEFIT_MCP_DEBUG=1`），写到 stderr。
 
-## 8. 依赖路线（为什么手写而不装 `mcp`）
+## 8. 没有 Skill 也能用吗
+
+**能，而且这是本项目的设计前提。** Skill 与 MCP 不是「二选一」，关系是「说明书 vs 产品」：
+
+| 通道 | 谁注入 | 覆盖什么 | 没了它还能用吗 |
+|---|---|---|---|
+| `initialize.instructions` | 客户端（握手结果） | 推荐顺序 + 三条判读纪律，约 600 字符 | **能**——见下面第 2 条 |
+| `tools/list[].description` | 客户端（工具清单） | 每个工具「何时用 / 返回什么 / 限制」 | —— 这就是主通道 |
+| `inputSchema` | 客户端（工具清单） | 参数、enum、默认值、必填 | —— 同上 |
+| `SKILL.md` | **用户自己装**的 Skill | **只**：何时用它 / 不该用它做什么 / 怎么连 / 三条纪律 | **能** |
+
+1. **客户端注入 `instructions` 时**：agent 一握手就拿到推荐顺序与三条判读纪律，接着
+   `tools/list` 拿到每个工具的三段说明 —— 不需要任何 Skill 就能正确导航。DSH 已实证
+   `instructions` 会被注入模型上下文；Claude Desktop / Cursor 等也走同一套握手。
+2. **客户端不注入 `instructions` 时**（有些客户端只注入工具清单）：靠 `description` 也能用。
+   每个工具描述都写明**何时用 / 返回什么 / 已知限制**，三段齐全由
+   `tests/test_mcp_server.py::test_every_tool_description_is_self_explaining` 逐条钉住
+   （删掉任一段就变红，配对断言见 `test_description_guard_is_not_vacuous`）；再加上
+   `TOOL_NAMES` 的顺序就是推荐调用顺序，顺序信息从清单里也读得出来。
+3. **Skill 的价值只是「发现性」**：在**还没连上 MCP** 的时候，让 agent / 用户知道「世界上有
+   evefit 这个东西、什么时候该想起它」。一旦连上，指引全部来自 MCP 本身。
+4. **所以 Skill 里不许复制工具细节**（工具清单、字段表、调用顺序细节）—— 那会变成第二份
+   真源，迟早与 MCP 漂移。`tests/test_mcp_server.py::test_skill_md_is_a_thin_shell` 钉住：
+   `SKILL.md` ≤ 60 行、每个工具名出现 ≤ 1 次、必须指向本 README。
+
+一句话：**MCP 是唯一真源，Skill 是门铃。** 门铃坏了不影响屋里有人。
+
+## 9. 依赖路线（为什么手写而不装 `mcp`）
 
 - 官方 `mcp` 包**能装**：实测 2025-12 的 `uv run --with mcp` 拉到 **2.3.0**。
 - 但**验收命令的临时环境里没有它**：`uv run --with "eveshipfit-dogma-engine[sde]==13.6.0"`
   下 `import mcp` → `ModuleNotFoundError`。让服务依赖 `mcp`，这条命令会死在导入阶段。
 - 而且 `mcp` 2.x 把 `FastMCP` 改名成 `MCPServer`、传输 API 也变了（`mcp.server.fastmcp`
-  会直接抛 `ModuleNotFoundError` 并让你看迁移指南），对「只想暴露 5 个纯函数」来说，
+  会直接抛 `ModuleNotFoundError` 并让你看迁移指南），对「只想暴露一组纯函数」来说，
   换来的抽象远大于收益。HTTP 传输同理：`StreamableHTTPSessionManager` 也在 `mcp` 包里，
   用不了。
 
@@ -457,9 +439,10 @@ MCP 的两种传输本身都很薄：
 - **Streamable HTTP**：一个 `POST /mcp` 收一条 JSON-RPC 消息，按 `Accept` 回 JSON 或一条
   SSE 事件；会话靠 `Mcp-Session-Id` 头；通知回 202。
 
-本服务实现 `initialize`（版本协商 + `capabilities.tools`）、`notifications/initialized`、
-`ping`、`tools/list`、`tools/call`，以及 `-32700 / -32600 / -32601 / -32602 / -32603` 五个
-错误码和通知不回包的规矩 —— 这就是全部，两种传输共用这一份。所以：
+本服务实现 `initialize`（版本协商 + `capabilities.tools` + `instructions`）、
+`notifications/initialized`、`ping`、`tools/list`、`tools/call`，以及
+`-32700 / -32600 / -32601 / -32602 / -32603` 五个错误码和通知不回包的规矩 —— 这就是全部，
+两种传输共用这一份。所以：
 
 - **服务**：手写，零第三方依赖（这是验收命令能跑起来的前提，也是唯一可行解）；
 - **客户端**：`client_smoke.py` 优先用官方 SDK（装了 `mcp` 时），否则用标准库

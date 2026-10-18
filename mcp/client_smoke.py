@@ -20,7 +20,9 @@ python -m evefit.mcp.client_smoke --stdio  # 强制手写 stdlib 客户端（零
   好处是「协议实现本身」被第二套独立代码验证一遍；没装就跳过，不算失败。
 
 两个客户端做的事完全一样：`initialize` → `notifications/initialized` → `tools/list`
-→ 依次调五个工具（含两个负例），打印每个调用的摘要与耗时，最后给 `PASS` / `FAIL`。
+→ 依次跑**用例表**（`build_cases()`：每个配装工具一次 + 两个负例），打印每个调用的摘要
+与耗时，最后给 `PASS` / `FAIL`。**用例表覆盖多少条与「注册了多少个工具」是两件事**：
+`tools/list` 的条数以服务返回为准（`zkb_search` 要联网，故意不进这张离线用例表）。
 
 顺带守住的一条硬约束
 --------------------
@@ -795,7 +797,10 @@ def _evaluate(
             for failure in failures:
                 print(f"  - {failure}")
         else:
-            print(f"PASS  {len(cases)}/{len(cases)}（五个工具 + 两个负例全部符合契约）")
+            print(
+                f"PASS  {len(cases)}/{len(cases)}"
+                f"（用例表全部符合契约；服务已注册 {len(info.tools)} 个工具）"
+            )
     return not failures
 
 

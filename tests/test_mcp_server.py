@@ -1,21 +1,24 @@
 """`evefit/mcp_server.py` 的契约测试（文档 §10.5「MCP (stdio)」）。
 
-钉住五件事：
+钉住六件事：
 
-1. **工具清单与 schema 形状**：五个名字、`fit` 必填且是 string、`fit_view.view` 是
-   六值 `enum`、`fit_get.path` 必填、共同参数带 `default` 且与 `api` 的常量同源；
+1. **工具清单与 schema 形状**：名字集合 == `mcp_server.TOOL_NAMES`（单一真源，本文件不
+   写工具名字面量）、`fit` 必填且是 string、`fit_view.view` 是六值 `enum`、
+   `fit_get.path` 必填、共同参数带 `default` 且与 `api` 的常量同源；
 2. **协议行为**：`initialize` 版本协商（支持列表内原样回、列表外回首选）、
    `capabilities.tools`、通知不回包、未知方法 `-32601`、坏 JSON `-32700`、
    坏请求 `-32600`、参数不合法 `-32602`；
 3. **业务错误不是协议错误**：`ok:false` 走 `result` + `isError:true`，
    `structuredContent` 里能读到 `kind` / `candidates` / `hint`；
 4. **`structuredContent` 按协商版本开关**：`2025-06-18` 起才有，`2024-11-05` 不该有；
-5. **真起子进程**：真客户端连上、五个工具都 `ok:true`（冒烟用例表覆盖 5 个；
-   `fit_killmail` 由本文件的进程内用例单独钉住），且 **stdout 里没有一行不是
-   JSON-RPC**（stderr 与 stdout 分开读）。
+5. **真起子进程**：真客户端连上、工具都 `ok:true`（冒烟用例表覆盖全部注册工具），
+   且 **stdout 里没有一行不是 JSON-RPC**（stderr 与 stdout 分开读）；
+6. **自解释守卫（T-51）**：每条工具 description 三段齐全（何时用 / 返回什么 / 限制）、
+   `instructions` 提到全部工具且长度受控、`SKILL.md` 是薄壳（不复制工具清单）。
 
-**断言非永真**：`test_smoke_goes_red_when_tool_name_is_wrong` 故意把用例里的工具名
-改错，配对断言「改之前 PASS / 改之后 FAIL」—— 改一次就能证明这些断言真的在断言
+**断言非永真**：每条守卫都配了一条「故意改坏 → 必须变红」的配对断言 ——
+`test_description_guard_is_not_vacuous` / `test_skill_guard_is_not_vacuous` /
+`test_smoke_goes_red_when_tool_name_is_wrong`。改一次就能证明这些断言真的在断言
 （PROGRESS 第 180 / 196 条的教训：空转的断言比没有断言更危险）。
 
 绝大多数断言用**进程内 `dispatch()`**（快、能精确看响应体）；只有「`python -m evefit.mcp_server`
@@ -826,3 +829,193 @@ def test_zkb_search_without_filters_is_invalid_argument(zkb_offline: list[str]) 
     assert envelope["error"]["kind"] == "invalid_argument"
     assert envelope["error"]["hint"]["accepted"]
     assert zkb_offline == []
+
+
+# =============================================================================
+# 八、自解释守卫（T-51：MCP 是唯一真源，Skill 只做发现性）
+# =============================================================================
+#
+# 背景（用户质疑「一定需要 skill 吗？MCP 本身能否替代？」的裁决）：
+#
+# - MCP 的 `initialize.instructions` 与 `tools/list[].description` **一定会被客户端注入
+#   上下文**（DSH 已实证），所以工具细节必须写在 MCP 里；
+# - Skill 只保留「何时用 / 怎么连 / 判读纪律」，**不复制工具细节** —— 复制就会漂移。
+#
+# 这几条守卫就是那个裁决的执行器：描述少一段、instructions 漏一个工具、SKILL.md 开始
+# 抄工具清单，任意一种都变红。它们都是**对的断言**，但对的断言也可能变成空转，
+# 所以每类都配一条「故意改坏 → 必须变红」的配对断言。
+
+WHEN_TOKENS: tuple[str, ...] = ("当你", "用于", "回答", "想知道")
+"""「何时用 / 它回答什么问题」的标志词（命中任一即认为这一段写了）。"""
+
+RETURN_TOKENS: tuple[str, ...] = ("返回", "给出", "包含")
+"""「返回里最该看什么」的标志词。"""
+
+LIMIT_TOKENS: tuple[str, ...] = ("限制", "注意", "不支持", "不含", "最多", "只用")
+"""「已知限制」的标志词。"""
+
+INSTRUCTIONS_MAX_CHARS = 800
+"""`initialize.instructions` 的字符上限：它是**索引**，不是文档（T-51）。"""
+
+DESCRIPTION_MAX_CHARS = 600
+"""单条工具描述的长度上限：防止某条描述又膨胀成一份小文档。"""
+
+SKILL_PATH = EVEFIT_ROOT / "skill" / "evefit" / "SKILL.md"
+"""Skill 载体（**整份文件都受守卫约束**：它只能是个薄壳）。"""
+
+SKILL_MAX_LINES = 60
+"""`SKILL.md` 的行数上限。"""
+
+SKILL_TOOL_NAME_MAX = 1
+"""每个工具名在 `SKILL.md` 里最多出现几次（允许提一句路由，不允许大段复制）。"""
+
+
+def _missing_sections(description: str) -> list[str]:
+    """一条 description 缺了哪几段（空列表 = 三段齐全）。
+
+    三段 = ① 何时用 / 回答什么问题 ② 返回里最该看什么 ③ 已知限制。
+    """
+    missing: list[str] = []
+    if not any(token in description for token in WHEN_TOKENS):
+        missing.append("何时用")
+    if not any(token in description for token in RETURN_TOKENS):
+        missing.append("返回什么")
+    if not any(token in description for token in LIMIT_TOKENS):
+        missing.append("限制")
+    return missing
+
+
+@pytest.mark.parametrize("name", TOOL_NAMES)
+def test_every_tool_description_is_self_explaining(name: str) -> None:
+    """**每个工具的 description 都必须自解释三段**（何时用 / 返回什么 / 限制）。
+
+    这是 T-51 的核心守卫：工具细节只允许存在于 MCP 里（Skill 不复制），所以「描述写全」
+    不再是文案偏好，而是**唯一真源的完整性要求**。缺任一段 → 红。
+    """
+    description = _tool_spec(name)["description"]
+    missing = _missing_sections(description)
+    assert missing == [], (
+        f"{name} 的 description 缺 {missing}（三段 = 何时用 / 返回什么 / 限制）；"
+        f"工具细节只有 MCP 这一份，不能省：\n{description}"
+    )
+    assert len(description) <= DESCRIPTION_MAX_CHARS, (
+        f"{name} 的 description {len(description)} 字符，超过 {DESCRIPTION_MAX_CHARS}"
+        "（描述是索引，不是文档）"
+    )
+
+
+def test_instructions_lists_every_tool_in_recommended_order() -> None:
+    """`instructions` 必须提到**全部**工具名，且顺序 = 推荐调用顺序（= `TOOL_NAMES`）。"""
+    instructions = _rpc(
+        "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}}
+    )["result"]["instructions"]
+    assert instructions == mcp_server.INSTRUCTIONS, "握手返回的就是模块常量本身"
+
+    positions: list[int] = []
+    for name in TOOL_NAMES:
+        assert name in instructions, f"instructions 漏了 {name}（顺序指引不完整）"
+        positions.append(instructions.index(name))
+    assert positions == sorted(positions), (
+        f"instructions 里工具必须按推荐调用顺序出现，实际顺序索引 {positions}"
+    )
+
+
+def test_instructions_stays_an_index_not_a_document() -> None:
+    """`instructions` 控制长度，且三条判读纪律的关键锚点必须都在里面。"""
+    instructions = mcp_server.INSTRUCTIONS
+    assert len(instructions) <= INSTRUCTIONS_MAX_CHARS, (
+        f"instructions {len(instructions)} 字符，超过 {INSTRUCTIONS_MAX_CHARS}："
+        "它应该是一份索引（顺序 + 三条纪律），不是一份文档"
+    )
+    for anchor in (
+        "unknown_reasons",  # 纪律①：unknown 不是 0
+        "propulsion_states.single",  # 纪律②：顶层数值的叠加/不可达
+        "state_exclusive",  # 纪律②：flag 提示
+        "zkillboard",  # 纪律③：不要自己开网页
+    ):
+        assert anchor in instructions, f"instructions 缺判读纪律的锚点：{anchor}"
+
+
+def test_description_guard_is_not_vacuous(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**配对断言**：把某条 description 的「限制」段删掉 → 守卫必须变红。
+
+    走的是真实链路（改 `_TOOL_DESCRIPTIONS` → 清 `_SPECS_CACHE` → 从 `tools/list` 取回
+    描述），所以它同时证明「守卫读的是线上那份文案」而不是测试自己编的副本。
+    """
+    name = "fit_index"
+    title, description = mcp_server._TOOL_DESCRIPTIONS[name]
+    assert _missing_sections(description) == [], "前提：真描述三段齐全"
+
+    broken = "看配装时用它，回答这套整体什么样；返回六维度摘要。"  # 缺「限制」段
+    assert _missing_sections(broken) == ["限制"]
+
+    monkeypatch.setitem(mcp_server._TOOL_DESCRIPTIONS, name, (title, broken))
+    monkeypatch.setattr(mcp_server, "_SPECS_CACHE", None)
+    assert "限制" in _missing_sections(_tool_spec(name)["description"])
+
+
+def _skill_problems(text: str) -> list[str]:
+    """`SKILL.md` 的守卫（空列表 = 合格）。
+
+    只查两件**结构**事：行数上限、工具名出现次数上限。它们各自对应一种退化：
+    前者退化成一份文档，后者退化成工具清单的副本。
+    """
+    problems: list[str] = []
+    line_count = len(text.splitlines())
+    if line_count > SKILL_MAX_LINES:
+        problems.append(f"行数 {line_count} > {SKILL_MAX_LINES}")
+    for name in TOOL_NAMES:
+        count = text.count(name)
+        if count > SKILL_TOOL_NAME_MAX:
+            problems.append(f"{name} 出现 {count} 次 > {SKILL_TOOL_NAME_MAX}")
+    return problems
+
+
+def test_skill_md_is_a_thin_shell() -> None:
+    """`SKILL.md` 只留「何时用 / 怎么连 / 三条纪律」，不复制工具细节。
+
+    守卫分两层：结构（行数 + 工具名次数）交给 `_skill_problems()`；内容锚点（怎么连、
+    指向 README、不该做什么、三条纪律）在这里直接断言。
+    """
+    text = SKILL_PATH.read_text(encoding="utf-8")
+
+    assert _skill_problems(text) == [], (
+        f"{SKILL_PATH} 退化了：{_skill_problems(text)}；"
+        "工具清单 / 字段表 / 调用顺序细节都属于 MCP 描述，不能复制过来"
+    )
+    assert "mcp/README.md" in text, "SKILL.md 必须指向 mcp/README.md（客户端配置在那里）"
+    assert "python -m evefit.mcp_server --transport http" in text, "怎么连必须一行写清"
+    assert "不生成配装" in text, "必须写明「不该用它做什么」"
+    for anchor in (
+        "unknown_reasons",  # 纪律①
+        "propulsion_states.single",  # 纪律②
+        "state_exclusive",  # 纪律②
+        "zkillboard",  # 纪律③
+    ):
+        assert anchor in text, f"SKILL.md 缺判读纪律的锚点：{anchor}"
+
+
+def test_skill_guard_is_not_vacuous() -> None:
+    """**配对断言**：把工具清单式的表格塞回 `SKILL.md` → `_skill_problems()` 必须报错。
+
+    抄法要贴近真实退化形态：一张表（每个工具名一次）**加**一句「调用顺序如下」的名单
+    —— 名单里再出现一次，于是每个工具名都越界（≤ 1 是给「提一句路由」留的额度）。
+    """
+    text = SKILL_PATH.read_text(encoding="utf-8")
+    assert _skill_problems(text) == [], "前提：现在的 SKILL.md 是合格的薄壳"
+
+    copied_table = (
+        text
+        + "\n\n## 工具清单\n\n"
+        + "\n".join(f"| `{name}` | 一句话 | 参数 |" for name in TOOL_NAMES)
+        + "\n\n调用顺序：" + " / ".join(TOOL_NAMES) + "。\n"
+    )
+    problems = _skill_problems(copied_table)
+    for name in TOOL_NAMES:
+        assert any(name in problem for problem in problems), (
+            f"把 {name} 抄进 SKILL.md 之后守卫没报错：{problems}"
+        )
+
+    too_long = text + "\n" * (SKILL_MAX_LINES + 1)
+    assert any("行数" in problem for problem in _skill_problems(too_long))
+
