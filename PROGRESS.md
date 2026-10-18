@@ -382,6 +382,31 @@
 283. **我的第 7 个错误**：我断定「L0 的 `budget.chars` 继承了旧 views+modes 口径，需要改代码」——**错**。HEAD 时代码已是 body-only（旧口径只会算出 1,040–1,066，实际报 1,996–2,118）。**真正错的是验收脚本的比较对象**。
    → 教训：**「两个数不一致」时，先确认哪个是基准，再断定谁是错的**。我直接假定「产品错」，而实际是度量工具错 —— 这和之前「可疑的零值其实是对的」是同一类思维惯性（**先怀疑被测量对象，不怀疑尺子**）。
 284. **我任务书的第 5 处错误**：我要求「`budget.chars` 与重新序列化长度差 ≤1」—— 但「重新序列化」若指**完整输出**，与 body 恒等式数学上互斥（恒差 46）。→ **验收报告 §10.5 的措辞需同步**：比较用 body、护栏用 full。
+285. **T-42 侦察结论（决定性）：pyfa 解决不了跨组互斥。**
+   - `eos` 只做**同组**互斥：`max_group.py:70` 用 `item._type.group_id` 计数；`const/eve.py` 的 `maxGroupActive=763` / `Online=978` / `Fitted=1544`
+   - **实跑证据**：Panther `MWD(g46) + MJD(g1189)` 进 eos `validate()` → 只有 `skill_requirement` / `state`，**没有 `max_group_active`**；Bifrost `AB(g46) + MWD(g46)` → 有 `max_group_active`（`group_id=46, quantity=2, max_allowed=1`）
+   - SDE 数据面（build 3607705）里 `maxGroupActive` 覆盖 339 type / 36 group（值都是 1.0），**没有任何「A 组禁 B 组」字段**，`disallow*` 家族无此语义
+   → **两个引擎在这条规则上完全等价**，换引擎不能解决，必须自己补规则层。
+286. **数值对拍 16 条**（口径统一「全 512 技能=5 级」）：逐件 DPS **15/16 相对差 <1e-6**；无人机 2.6e-08；**分层 HP 16/16 逐位一致**；对齐 16/16；CPU/PG 16/16。→ **无系统性数值偏差，数值核心等价。**
+287. **对拍抓出我们一个真 bug**：`Defender Launcher I`（拦截弹发射器）被算进伤害（本引擎 160.0 / eos 0）→ **拦截弹不该算 DPS**。
+288. **三处分歧归因**：① 口径差（RAH 自适应抗性、`get_volley` 定义不同）② **状态语义**（f12 Oneiros `speed 411,642 vs 2,935 = 140×`，与 f67 同根因；f15 Raven `sig 1,115 vs 462`，MJD 的 +150% 被当常驻）③ 我们多算 Defender。
+289. **迁移代价估算**：`engine/` 928 行全废、`views/` 2,804 行全部重写取数路径、provenance/reasons 语义输入重建、65 样本基线 2,860 断言重算、分层 L0/L1 契约重建、tests 至少 60% 要改 → 粗估 **33–51 个任务**（对照整个 P0→P2 是 41 个），而**收益 ≈ 0 条我们缺的规则**。
+290. **裁决：不换引擎**。空洞补在**规则层**：① `config/activation_groups.json` 人工规则表（每条带来源与核实日期，不许编）② `constraints` 之上新增 `state_exclusive` 规则族 ③ `propulsion_states` 补「单推进」分支 + 顶层数值标注「全 active 是不可达状态」。pyfa 探针保留作**离线对拍工具**（起一套 eos 约 5 秒）。
+291. **环境副作用**：`spike/pyfa_scratch/eos-master/` 与部分 `uvcache/builds-v0/.tmp*/` 被 Windows 权限锁成**不可读不可删**（`tarfile.extractall` 撞 ACL）。本会话提权审批被禁用，未强行扩权。均为垃圾目录，不影响功能。
+292. **T-43 完成（702 passed）**：新建 `config/activation_groups.json`（`propulsion` = 组 `[46, 1189, 1533]`，`limit: active=1`，带 `source` / `verified_by` / `verified_at` / `note`）；`propulsion_state_conflict` 与 `propulsion_illegal_stack` **合并为 `state_exclusive`**（同一冲突恒一条）；`propulsion_states.single` 输出**单推进分支**（玩家真实状态）；`Defender Launcher I`（group 512）**排除出伤害**。
+293. **规则表上线第一轮就撞上真实跨组样本**：`f48`（Gnosis，MWD+MJD）—— 引擎 `validate()` 对推进类 `max_group` **一条都不报**，而我们的配置表正确命中（`source=config`，`group_ids=[46,1189]`）。**以后不用造合成样本自证。**
+294. **`single` 的实测数值**（3 位小数，均独立重算核对）：f67 = AB 112.719 / MJFG 49.076 / MWD 306.195 m/s（顶层 59,928.363）；Panther = MWD-only 1519.858、MJD-only 227.5（顶层 1519.858）。
+295. **一个我发现的措辞不精确（待修）**：Panther 的**顶层速度 1519.858 恰好等于「只开 MWD」** → 速度其实**可达**；不可达的是**信号半径**（顶层 3814.894 含 MJD 蓄力的 +150%，而只开 MWD 时是 1656）。→ flag 文案里「顶层数值……不可达状态」对速度不成立，应区分字段。
+296. **事故与恢复**：T-43 用 PowerShell 追加测试时因 `$lines` 未在同进程定义，**把 `tests/test_views_a.py` 覆盖成 70 行**；它用 `git show HEAD:tests/test_views_a.py`（只读）恢复后重做全部编辑。→ **这正说明仓库化是对的**：没有 git 就真丢了。教训：**批量改文件优先用编辑工具，不要用 shell 重定向拼内容**。
+297. **T-44 预期外科手术（已批准，沿用 T-38 先例）**：裁决要求 f67 的 `evidence.modules` 含 MJFG、`group_ids` 含 1533，而 `test_views_a.py` 第 1798–1833 行逐条钉住了旧形状（`[46]` / `"AB 与 MWD"`），且该文件不在其写入范围。→ **批准最小外科手术**（只改 f67 专属的 3–4 行，f27/f57 分支仍钉旧形状，其余一律不动、不放宽）。
+  → 通则：**「跨任务改名/改形状」必须包含全部引用点同步**，否则尾巴必留；写入范围与实际需要冲突时，**优先保证一致性，越界要如实上报**。
+298. **`evidence` 将同时保留 `source`(字符串) 与 `sources`(数组)** —— 为兼容既有断言。这是**临时冗余**，`sources` 是权威；等 P4 定义对外 schema 时去掉 `source`。记为欠账。
+299. **T-44 完成（707 passed）**：`BUDGET_CHARS` **17,000 → 19,000**（`render_overview` / `render_detail` 逻辑 **0 行改动**）；`state_exclusive.evidence` 改为「**引擎报的组 ∪ 配置表命中的组**」并集 + `sources` 数组（顺序恒 `engine → config`）。
+300. 三样本实测（额度 19,000）：**f47 17,350 / f67 17,314 / f12 18,654，全部 `degraded=False`**。
+301. **f67 的 evidence**：`group_ids [46, 1533]`、`modules "AB、MJFG、MWD"`（**装配顺序**，不是字母序；≥3 件用「、」连接）、`sources ["engine","config"]`。Panther：`group_ids [46,1189]`、`sources ["config"]`。
+302. **我的算术又错了一次**：我说公式会算出 22,000，实际 `18,631 × 1.2 = 22,357.2` → ceil 到 **23,000**。19,000 对 f12 的实际余量是 **346 chars ≈ 1.85%**。
+303. **第二次外科手术**：`test_views_a.py` 只改 f67 的 3 处断言 + 1 个文案常量 + 1 段注释，**没有放宽任何断言** —— f27/f57 仍精确钉旧形状，f67 反而从「旧形状」**收紧**成新形状。
+304. **一个容易顺手改错的点**：`mwd_sig_increase.evidence.propulsion` 仍只含 AB/MWD 两件（MJFG 的 SDE group 名不同），f67 上 `len == 2` 的断言**仍然成立**，别顺手改成 3。
 
 ---
 

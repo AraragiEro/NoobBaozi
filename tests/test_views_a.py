@@ -248,6 +248,20 @@ def _string_leaf_paths(node: object, prefix: str = "") -> list[str]:
     return found
 
 
+def _string_leaf_items(node: object, prefix: str = "") -> list[tuple[str, str]]:
+    """`(路径, 字符串值)` 列表（路径写法与 `_string_leaf_paths` 完全一致）。"""
+    found: list[tuple[str, str]] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            found.extend(_string_leaf_items(value, f"{prefix}.{key}" if prefix else str(key)))
+    elif isinstance(node, list):
+        for position, value in enumerate(node):
+            found.extend(_string_leaf_items(value, f"{prefix}[{position}]"))
+    elif isinstance(node, str):
+        found.append((prefix, node))
+    return found
+
+
 def _raw_value(attributes: dict, attribute_id: int) -> float | None:
     """从引擎**原始** attributes 里取一个值（兼容 `{base, value}` 与裸数两种形态）。
 
@@ -864,6 +878,15 @@ def test_repair_engine_missing_raw_becomes_zero_and_has_source_false(ctx: ViewCo
 # =============================================================================
 
 
+def _is_single_module_name_path(path: str) -> bool:
+    """`propulsion_states.single[0].module` 这类「模块名」叶子（T-43 新增）。
+
+    它是**事实**（船上那件模块叫什么），与 `firepower.weapons[].name` 同一类，不是判词。
+    只放行这一条**精确**路径族：`single` 之下再加别的字符串字段必须重新过守门测试。
+    """
+    return path.startswith("propulsion_states.single[") and path.endswith("].module")
+
+
 def test_views_only_emit_whitelisted_strings(ctx: ViewContext) -> None:
     """字符串只允许出现在名字 / 家族 / 伤害类型 / 口径提示里（红线：判词归 agent）。"""
     allowed = {
@@ -879,7 +902,18 @@ def test_views_only_emit_whitelisted_strings(ctx: ViewContext) -> None:
     for view_name in VIEW_NAMES:
         overview = build_view(view_name, ctx)["overview"]
         found = set(_string_leaf_paths(overview))
-        assert found <= allowed[view_name], f"{view_name} 出现计划外的字符串字段：{sorted(found)}"
+        extra = found - allowed[view_name]
+        if view_name != "mobility":
+            assert extra == set(), f"{view_name} 出现计划外的字符串字段：{sorted(extra)}"
+            continue
+        # T-43：机动视角只多一类字符串 —— `propulsion_states.single[].module`（模块名）。
+        # 断言比「加进白名单」更紧：**值必须真的是已装推进类模块的名字**。
+        assert all(_is_single_module_name_path(path) for path in extra), (
+            f"mobility 出现计划外的字符串字段：{sorted(extra)}"
+        )
+        names = {item.get("name") for item in _propulsion_class_items(ctx)}
+        values = {value for path, value in _string_leaf_items(overview) if path in extra}
+        assert values <= names, f"single[].module 必须是已装推进类模块的名字，实际 {sorted(values)}"
 
 
 def test_views_do_not_recompute_units(ctx: ViewContext) -> None:
@@ -1454,7 +1488,13 @@ def test_t37_zero_fill_is_not_vacuous(real_ctx, monkeypatch: pytest.MonkeyPatch)
     若哪天有人把补值分支删掉，本测试会以 `None != 0.0` 当场失败——证明它不是永真。
     """
 
-    def engine_only(attrs: dict[int, float], attribute_id: int, *, has_weapon_system: bool):
+    def engine_only(
+        attrs: dict[int, float],
+        attribute_id: int,
+        *,
+        has_weapon_system: bool,
+        excluded: float = 0.0,
+    ):
         return attrs.get(attribute_id)
 
     monkeypatch.setattr(firepower, "_dps_raw", engine_only)
@@ -1638,17 +1678,22 @@ def test_fighter_bay_summary_reports_count_types_and_ship_capacity(real_ctx) -> 
 
 
 # =============================================================================
-# 九、T-35：推进状态语义（双推进叠加 / 「推进关闭」口径）
+# 九、T-35 / T-43：推进状态语义（状态互斥 / 「推进关闭」口径 / 单推进分支）
 # =============================================================================
 #
 # 随堂测试 f67 暴露的两件事（都属「状态语义缺失」，与 X1 的 Loki cloak 同类）：
 #
 # 1. 引擎**不会**因为 `max_group … limit=active` 硬违规自动降级模块，于是 AB 的
 #    `speedFactor 156.25` 与 MWD 的 `631.25` 一起叠上 → 59,928.363 m/s，而机动视角
-#    没有任何提示 → `propulsion_state_conflict`（T-38 改名，旧名已废弃）
-#    只陈述事实（数值一个都不改）；
+#    没有任何提示 → `state_exclusive`（T-43 起的唯一 id；历史 id
+#    `propulsion_illegal_stack` / `propulsion_state_conflict` 都已废弃）只陈述事实；
 # 2. `mwd_sig_increase` 文案写「关闭时 65.72 m」，同视角 `propulsion_states.off.sig_m`
 #    却是 60.0 —— 两个「关闭时」是两个不同的状态（只关推进 vs 全模块离线）。
+#
+# T-43 把「引擎同组互斥」与「配置表跨组互斥（MWD+MJD）」统一成**一条**诊断
+# `state_exclusive`；T-44 起 evidence 不再「引擎命中即停」——`group_ids` / `modules` 是
+# 「引擎报的组 ∪ 配置表命中涉及的组」的并集，`sources`（`engine` / `config` 的并集）
+# 说明每一部分分别是谁发现的（f67 的 MJFG 只有配置表覆盖得到）。
 
 F67_SPOTCHECK = "f67-spotcheck-139255942.json"
 """Bifrost 指挥驱逐舰（killmail 139255942）：历史上第一条真实存在的双推进配置。"""
@@ -1656,17 +1701,33 @@ F67_SPOTCHECK = "f67-spotcheck-139255942.json"
 PROPULSION_GROUP = "Propulsion Module"
 """推进模块的 SDE group 名（AB 与 MWD 同组；`shared.PROPULSION_GROUP` 的测试侧独立写法）。"""
 
-PROPULSION_STACK_FLAG = "propulsion_state_conflict"
-"""T-38 改名后的 id（旧名已废弃）：推进模块同组同时启用 → **状态冲突**。
+PROPULSION_CLASS_GROUP_IDS = (46, 1189, 1533)
+"""「推进类」的三个 SDE group id（AB/MWD · MJD · MJFG）—— 测试侧独立写一遍。
 
-口径（主人裁决）：双推进一起带很常见，只是**不能同时启用** —— 所以这不是配装问题。
+第三个数（1533）是 f67 上真装着的 `Micro Jump Field Generator`，所以 f67 的推进类是
+**3 件**：引擎只报得了 group 46 的两件，MJFG 那件只有配置表覆盖得到。
 """
 
-PROPULSION_STACK_MESSAGE = (
-    "推进模块同组同时启用（AB 与 MWD），游戏内同一时刻只能启用其一；"
-    "速度/信号/对齐基于「多个推进同时启用」的非真实状态"
+STATE_EXCLUSIVE_FLAG = "state_exclusive"
+"""T-43 起的唯一 id：状态互斥（同组 + 跨组，一个规则族一条输出）。"""
+
+LEGACY_STACK_FLAGS = ("propulsion_state_conflict", "propulsion_illegal_stack")
+"""历史 id（T-38 / T-35）：**只用来断言它们已经不存在**，不要再拿它们当 flag 名。"""
+
+ENGINE_SOURCE = "engine"
+"""`evidence.source`：引擎原生 `max_group` 已覆盖的冲突。"""
+
+CONFIG_SOURCE = "config"
+"""`evidence.source`：引擎报不出来、只有 `config/activation_groups.json` 覆盖的冲突。"""
+
+STATE_EXCLUSIVE_MESSAGE_F67 = (
+    "推进类同时启用（AB、MJFG、MWD），游戏内同一时刻只能启用其一；"
+    "顶层数值按这些模块同时启用计算（不可达状态）"
 )
-"""T-38 裁决后的文案（f67 逐字）：`{conflict}` 由 evidence 渲染，f67 → `AB 与 MWD`。"""
+"""f67 逐字文案：`{label}` / `{modules}` 由 evidence 渲染（f67 → `推进类` / `AB、MJFG、MWD`）。
+
+T-44 起 `modules` 列**全部已启用的推进类模块**（按装配顺序），旧的 `AB 与 MWD`
+把同时启用的 MJFG(1533) 吞掉了。"""
 
 DUAL_PROPULSION_ACTIVE = (
     F67_SPOTCHECK,
@@ -1677,8 +1738,17 @@ DUAL_PROPULSION_ACTIVE = (
 
 ⚠️ **f27 也在这组里**（实测）：它名字叫 dual-prop，两个推进模块确实都是 active，引擎
 同样报 `max_group` 硬违规。任务书把 f27 列进「正常单推进样本」是笔误 —— 按字面把它写成
-「无 flag」等于要求视角对引擎已经报出的硬违规闭嘴。真正「带两件推进但只有一件启用」的
-样本是 f1（MWD active + AB offline）、f9 / f45（推进模块 offline）。
+「无 flag」等于要求视角对引擎已经报出的硬违规闭嘴。真正「带两件推进但只有一件启用」
+的样本是 f1（MWD active + AB offline）、f9 / f45（推进模块 offline）。
+"""
+
+CROSS_GROUP_PROPULSION = ("f48-random-gnosis.json",)
+"""**跨组**推进样本（引擎报不出来、只有配置表覆盖得到的那一类）。
+
+f48 随机 Gnosis 装 `50MN Microwarpdrive I`(group 46) + `Medium Micro Jump Drive`(group 1189)，
+两件都 active → 与 f67 的 AB+MWD（同组）是完全不同的成因：引擎 `validate()` 对这套配装
+一条推进类 `max_group` 都不报（T-42 报告 §3.4 的同一现象），所以这条 flag 只能来自
+`config/activation_groups.json`（`source: "config"`）。
 """
 
 SINGLE_PROPULSION = (
@@ -1686,7 +1756,11 @@ SINGLE_PROPULSION = (
     "f5-no-mwd.json",
     "f45-t3c-subsys-3.json",
 )
-"""单推进（或带两件但只有一件 active）样本：**不得**出现 `propulsion_state_conflict`。"""
+"""单推进（或带两件但只有一件启用）样本：**不得**出现 `state_exclusive`。
+
+f1 / f45 都**带两件**推进模块，但只有一件 active —— 另一件 offline，游戏内没有任何
+「同时启用」，所以不报（这条区分的是「带几件」与「同时开几件」，别混）。
+"""
 
 
 def _propulsion_items(ctx: ViewContext) -> list[dict]:
@@ -1698,49 +1772,242 @@ def _propulsion_items(ctx: ViewContext) -> list[dict]:
     ]
 
 
+def _propulsion_class_items(ctx: ViewContext) -> list[dict]:
+    """已装**推进类**模块（group id 是 46 / 1189 / 1533，测试侧独立判定）。"""
+    return [
+        item
+        for item in ctx.items(BASE)
+        if item.get("slot_type") != "cargo" and item.get("group_id") in PROPULSION_CLASS_GROUP_IDS
+    ]
+
+
+def _flag_list(ctx: ViewContext) -> list[dict]:
+    """`state_exclusive` 的全部命中（列表：多个冲突可以各出一条，**不合并**）。"""
+    return [flag for flag in D.evaluate(ctx) if flag["id"] == STATE_EXCLUSIVE_FLAG]
+
+
+def _panther_ctx(ctx_from_eft):
+    """Panther + `500MN MWD`(46) + `Large MJD`(1189)：任务 #139141897 的玩家实测对象。
+
+    真实对局里这两件不能同时开，但引擎与 pyfa/eos 都报 0 条 `max_group`
+    （T-42 报告 §3.4）→ 只能由配置表补。
+    """
+    return ctx_from_eft(
+        "[Panther, 跨组推进]\n"
+        "500MN Microwarpdrive II\n"
+        "Large Micro Jump Drive\n"
+        "Damage Control II\n"
+    )
+
+
 @pytest.mark.parametrize("name", DUAL_PROPULSION_ACTIVE)
-def test_dual_propulsion_emits_state_conflict_flag(real_ctx, name: str) -> None:
+def test_dual_propulsion_emits_state_exclusive_from_engine(real_ctx, name: str) -> None:
     """双推进 active：必须有一条 `mobility` flag 说明「这组数是叠加出来的」。"""
     ctx = real_ctx(name)
     flags = {flag["id"]: flag for flag in D.evaluate(ctx)}
 
-    assert PROPULSION_STACK_FLAG in flags, f"{name}: 缺 flag，实际 {sorted(flags)}"
-    flag = flags[PROPULSION_STACK_FLAG]
+    assert STATE_EXCLUSIVE_FLAG in flags, f"{name}: 缺 flag，实际 {sorted(flags)}"
+    flag = flags[STATE_EXCLUSIVE_FLAG]
     assert flag["view"] == "mobility"
-    assert flag["evidence"]["used"] == 2 and flag["evidence"]["allowed"] == 1
-    assert flag["evidence"]["group_id"] == 46
-    assert flag["message"].startswith("推进模块同组同时启用（")
-    assert "游戏内同一时刻只能启用其一；速度/信号/对齐基于「多个推进同时启用」的非真实状态" in flag["message"]
+    assert flag["evidence"]["source"] == ENGINE_SOURCE
+    if name == F67_SPOTCHECK:
+        # T-44：evidence 合并引擎组与配置表组 —— 46 来自引擎、1533（MJFG）只有配置表覆盖得到
+        assert flag["evidence"]["group_ids"] == [46, 1533]
+        assert flag["evidence"]["sources"] == [ENGINE_SOURCE, CONFIG_SOURCE]
+    else:
+        assert flag["evidence"]["group_ids"] == [46]
+        assert flag["evidence"]["sources"] == [ENGINE_SOURCE]
+    assert flag["evidence"]["limit"] == "active=1"
+    assert flag["evidence"]["label"] == "推进类"
+    # 短标签的顺序 = 装配顺序（f27 是 MWD 先装，f67 是 AB 先装）；两个模块用「 与 」、
+    # 三个及以上用「、」连接 —— 集合比；f67 的 MJFG 由 T-44 补进 evidence
+    labels = set(flag["evidence"]["modules"].replace("、", " 与 ").split(" 与 "))
+    if name == F67_SPOTCHECK:
+        assert labels == {"AB", "MWD", "MJFG"}, "f67 装了 AB + MWD + MJFG，三件都必须进 evidence"
+    else:
+        assert labels == {"AB", "MWD"}
+    assert "游戏内同一时刻只能启用其一" in flag["message"]
+    assert "不可达状态" in flag["message"], "顶层值不可达这件事必须被说出口"
+
+    # **不重复报**：引擎那条与配置表那条是同一个冲突 → 只出一条；旧 id 一条都不许残留
+    assert len(_flag_list(ctx)) == 1, f"{name}: 同一冲突出了 {len(_flag_list(ctx))} 条"
+    for legacy in LEGACY_STACK_FLAGS:
+        assert legacy not in flags, f"{name}: 旧 id {legacy!r} 不得再产出（改 id 不是加别名）"
 
     # 叠加双方的**模块名**不重复进本 flag 的 evidence：`mwd_sig_increase` 已经给了
-    # （体积预算 17000 chars，f47 就差这一点；见 diagnostics 里的注释）
+    # （体积预算 19,000 chars，见 diagnostics 里的注释）
     propulsion_flag = flags["mwd_sig_increase"]
     assert len(propulsion_flag["evidence"]["propulsion"]) == 2
 
     if name == F67_SPOTCHECK:
-        assert flag["evidence"]["conflict"] == "AB 与 MWD"
+        assert flag["evidence"]["modules"] == "AB、MJFG、MWD", "f67 的装配顺序：AB → MJFG → MWD"
         assert propulsion_flag["evidence"]["propulsion"] == [
             "1MN Y-S8 Compact Afterburner",
             "5MN Y-T8 Compact Microwarpdrive",
         ]
-        assert flag["message"] == PROPULSION_STACK_MESSAGE
+        assert flag["message"] == STATE_EXCLUSIVE_MESSAGE_F67
+
+
+@pytest.mark.parametrize("name", CROSS_GROUP_PROPULSION)
+def test_cross_group_propulsion_emits_state_exclusive_from_config(real_ctx, name: str) -> None:
+    """**跨组**推进（MWD + MJD）：引擎不报，配置表必须补上 `source: "config"`。"""
+    ctx = real_ctx(name)
+    flags = _flag_list(ctx)
+
+    assert len(flags) == 1, f"{name}: 跨组互斥应当恰好一条，实际 {len(flags)}"
+    flag = flags[0]
+    assert flag["view"] == "mobility"
+    assert flag["evidence"]["source"] == CONFIG_SOURCE
+    assert flag["evidence"]["group_ids"] == [46, 1189]
+    assert flag["evidence"]["limit"] == "active=1"
+    assert "游戏内同一时刻只能启用其一" in flag["message"]
+    # 前置：这两件确实是两个不同 SDE group 的推进类模块（否则这条测试没有区分力）
+    assert {item.get("group_id") for item in _propulsion_class_items(ctx)} == {46, 1189}
+
+
+def test_cross_group_flag_needs_no_engine_violation(real_ctx) -> None:
+    """**对照实验**：同一份配装，引擎 `validate()` 一条推进类 `max_group` 都不报。
+
+    这条是「为什么要有配置表」的最小证据（T-42 报告 §3.4）：把它删掉，上面那条测试
+    就退化成「引擎也会报」的重复断言。
+    """
+    ctx = real_ctx(CROSS_GROUP_PROPULSION[0])
+    group_ids = {
+        violation["rule"].get("group_id")
+        for violation in ctx.engine.validate(ctx.fit)
+        if isinstance(violation, dict)
+        and isinstance(violation.get("rule"), dict)
+        and violation["rule"].get("type") == "max_group"
+    }
+    assert not (group_ids & set(PROPULSION_CLASS_GROUP_IDS)), (
+        f"引擎居然报了推进类 max_group（{sorted(group_ids)}）—— 那这条 flag 就不是配置表的功劳"
+    )
+
+
+def test_panther_cross_group_mwd_plus_mjd(ctx_from_eft) -> None:
+    """Panther（`500MN MWD` + `Large MJD`）：玩家实测「不能同时开」的那一对。"""
+    ctx = _panther_ctx(ctx_from_eft)
+    flags = _flag_list(ctx)
+
+    assert len(flags) == 1, f"Panther: 应当恰好一条 state_exclusive，实际 {len(flags)}"
+    flag = flags[0]
+    assert flag["evidence"]["source"] == CONFIG_SOURCE
+    assert flag["evidence"]["group_ids"] == [46, 1189]
+    assert flag["evidence"]["modules"] == "MWD 与 MJD"
+    assert flag["view"] == "mobility"
+    # 前置：两件都真的装上了、都在启用态（否则这条测试是空转）
+    assert [item.get("state") for item in _propulsion_class_items(ctx)] == ["active", "active"]
+
+
+def test_activation_groups_table_is_audited() -> None:
+    """规则表本身：**每条都必须带来源与核实日期**（红线：不编造）。"""
+    groups = shared.activation_groups()
+
+    assert groups, "config/activation_groups.json 读不到（或结构变了）"
+    by_id = {group.id: group for group in groups}
+    assert "propulsion" in by_id
+
+    group = by_id["propulsion"]
+    assert group.members == frozenset({46, 1189, 1533})
+    assert group.limit == "active=1"
+    assert group.label and group.label_short
+    # 来源 / 核实人是**人工知识**的凭据，不许留空（这条是防「下次忘了写」的机器门）
+    assert group.source.strip()
+    assert group.verified_by.strip()
+    assert len(group.verified_at.strip()) >= 9, f"核实日期格式不对：{group.verified_at!r}"
+    assert group.note.strip()
+
+    # 容错：文件读不到 → 空规则、不崩（诊断退化为「只有引擎原生互斥」）
+    assert shared.activation_groups(EVE_ROOT / "spike" / "no-such-activation-groups.json") == ()
+
+
+def test_state_exclusive_flag_is_driven_by_the_config_table(
+    ctx_from_eft, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**变异自检**：把表里的 members 清空 → Panther 那条 flag 必须消失。
+
+    没有这条断言，「配置表驱动它」可能只是句注释（本项目踩过「假绿」的坑，见 T-31）。
+    """
+    ctx = _panther_ctx(ctx_from_eft)
+    assert _flag_list(ctx), "前提：正常加载规则表时 Panther 必须报一条"
+
+    blank = tuple(
+        shared.ActivationGroup(
+            id=group.id,
+            label=group.label,
+            label_short=group.label_short,
+            members=frozenset(),
+            limit=group.limit,
+            source=group.source,
+            verified_by=group.verified_by,
+            verified_at=group.verified_at,
+            note=group.note,
+        )
+        for group in shared.activation_groups()
+    )
+    monkeypatch.setattr(shared, "activation_groups", lambda path=None: blank)
+
+    assert _flag_list(ctx) == [], "members 清空后不该再报（否则这条 flag 不是配置表驱动的）"
+
+
+def test_single_branch_lists_each_propulsion_class_module(ctx_from_eft) -> None:
+    """`propulsion_states.single`：每个推进类模块一条，**数值与「只开它」的独立重算一致**。
+
+    Panther 装两件**不同组**的推进模块（MWD 46 / MJD 1189）：只按 group 名数会数成 1 个，
+    所以这条同时钉住「推进类 = 配置表登记的 group 集合」这个口径。
+    """
+    ctx = _panther_ctx(ctx_from_eft)
+    entries = build_view("mobility", ctx)["overview"]["propulsion_states"]["single"]
+    class_items = _propulsion_class_items(ctx)
+
+    assert len(entries) == 2, f"Panther 有 2 个推进类模块，实际 {len(entries)} 条：{entries}"
+    assert [entry["module"] for entry in entries] == [item["name"] for item in class_items]
+
+    # 独立复算：自己挑模块、自己改 state、自己算（不复用 shared.with_single_propulsion）
+    positions = [
+        position
+        for position, item in enumerate(ctx.items(BASE))
+        if item.get("group_id") in PROPULSION_CLASS_GROUP_IDS
+    ]
+    assert len(positions) == 2
+    for entry, keep in zip(entries, positions):
+        fit = copy.deepcopy(ctx.fit)
+        for position in positions:
+            fit["items"][position]["state"] = "active" if position == keep else "offline"
+        recomputed = ship_attributes(ctx.engine.calculate(fit))
+        assert entry["speed_mps"] == round(recomputed[A.ATTR_MAX_VELOCITY], 3), entry["module"]
+        assert entry["sig_m"] == round(recomputed[A.ATTR_SIGNATURE_RADIUS], 3), entry["module"]
+        assert entry["align_time_s"] == round(recomputed[A.ATTR_ALIGN_TIME], 3), entry["module"]
+
+    # 只开 MJD 时速度必须低于只开 MWD（MJD 不给 speedFactor）—— 证明这一支真在算不同状态
+    speeds = {entry["module"]: entry["speed_mps"] for entry in entries}
+    assert speeds["Large Micro Jump Drive"] < speeds["500MN Microwarpdrive II"]
+
+
+@pytest.mark.parametrize("name", ("f5-no-mwd.json", "f60-no-propulsion.eft"))
+def test_single_branch_is_empty_with_less_than_two_propulsion(real_ctx, name: str) -> None:
+    """0 / 1 个推进类模块 → `single` 是**空列表**（没有可选状态，也不额外计算）。"""
+    ctx = real_ctx(name)
+    assert len(_propulsion_class_items(ctx)) <= 1, "前提：该样本最多一个推进类模块"
+    assert build_view("mobility", ctx)["overview"]["propulsion_states"]["single"] == []
 
 
 @pytest.mark.parametrize("name", SINGLE_PROPULSION)
 def test_single_propulsion_samples_have_no_stack_flag(real_ctx, name: str) -> None:
-    """单推进样本**不得**产出该 flag（否则就是把正常配装说成状态冲突）。"""
+    """单推进样本**不得**产出该 flag（否则就是把正常配装说成状态互斥）。"""
     ctx = real_ctx(name)
     ids = {flag["id"] for flag in D.evaluate(ctx)}
-    assert PROPULSION_STACK_FLAG not in ids, f"{name}: 单推进不该报同组冲突"
+    assert STATE_EXCLUSIVE_FLAG not in ids, f"{name}: 单推进不该报状态互斥"
 
 
-def test_f67_stack_flag_keeps_engine_numbers_and_module_states(real_ctx) -> None:
+def test_f67_state_exclusive_keeps_engine_numbers_and_module_states(real_ctx) -> None:
     """`只给事实`：速度仍是引擎原值，模块状态一个都不许改（降级是求解，不在本期）。
 
     - `speed_mps = 59,928.363`（overload 134,777.472）：**不许**重算、不许挑一个模块停用；
-    - 两件推进模块仍是 `active`（引擎不降级，我们也不降级）；
-    - `mwd_sig_increase` 与 `propulsion_state_conflict` **并存**：一条说信号被撑大，
-      一条说撑大的那个数是叠加出来的，两条不冲突。
+    - 三件推进类模块仍是 `active`（引擎不降级，我们也不降级）；
+    - `mwd_sig_increase` 与 `state_exclusive` **并存**：一条说信号被撑大，一条说撑大的
+      那个数是叠加出来的，两条不冲突；
+    - 顶层值不可达这件事由 flag 说出口（`single` 只给可选状态，不改顶层口径）。
     """
     ctx = real_ctx(F67_SPOTCHECK)
     overview = build_view("mobility", ctx)["overview"]
@@ -1753,12 +2020,24 @@ def test_f67_stack_flag_keeps_engine_numbers_and_module_states(real_ctx) -> None
         overview["propulsion_states"]["active"]["speed_mps"], overview["speed_mps"]
     )
 
-    assert [item.get("state") for item in _propulsion_items(ctx)] == ["active", "active"], (
-        "不得为了让数值好看而自动停用模块"
-    )
+    assert [item.get("state") for item in _propulsion_class_items(ctx)] == [
+        "active",
+        "active",
+        "active",
+    ], "不得为了让数值好看而自动停用模块"
 
     ids = {flag["id"] for flag in D.evaluate(ctx)}
-    assert {PROPULSION_STACK_FLAG, "mwd_sig_increase"} <= ids
+    assert {STATE_EXCLUSIVE_FLAG, "mwd_sig_increase"} <= ids
+
+    # f67 装 3 件推进类（AB + MWD + MJFG）：`single` 给 3 条，且每条都低于叠加值
+    entries = overview["propulsion_states"]["single"]
+    assert [entry["module"] for entry in entries] == [
+        "1MN Y-S8 Compact Afterburner",
+        "Micro Jump Field Generator",
+        "5MN Y-T8 Compact Microwarpdrive",
+    ], "顺序必须是装配顺序"
+    for entry in entries:
+        assert entry["speed_mps"] is not None and entry["speed_mps"] < overview["speed_mps"]
 
 
 @pytest.mark.parametrize("name", DUAL_PROPULSION_ACTIVE)
@@ -1867,4 +2146,76 @@ def test_propulsion_off_is_none_without_index(engine: Engine) -> None:
         "align_time_s": None,
     }, "查不到 group 名就该说不知道，而不是把当前状态抄一遍"
     assert overview["propulsion_states"]["base"]["speed_mps"] is not None, "其余档不受影响"
+
+
+# =============================================================================
+# 十、T-43：拦截弹发射器不算对敌伤害
+# =============================================================================
+#
+# `Defender Launcher I` 的弹药是**拦截弹**（`Defender Missile I`），用来打掉来袭导弹。
+# 引擎仍给它 `-12 = 160` / `-21 = 800`（f11 实测），pyfa/eos 同一件给 `0`
+# （T-42 报告 §4.2 表 A 唯一例外）→ 这是我们产品里 `dps` 偏高的一条真实来源。
+
+F11_SVIPUL = "f11-t3d-svipul.json"
+"""Svipul：4 门 `280mm Howitzer Artillery II` + 1 具 `Defender Launcher I`。"""
+
+DEFENDER_GROUP = "Missile Launcher Defender"
+"""拦截弹发射器的 SDE group 名（**精确名**，不是 `Missile Launcher` 前缀）。"""
+
+DEFENDER_DPS = 160.0
+"""引擎给 `Defender Launcher I` 的装备级 `-12`（f11 实测 159.99999999998238）。"""
+
+
+def _defender_items(ctx: ViewContext) -> list[dict]:
+    """已装的拦截弹发射器（测试侧独立判定：精确 group 名，不查生产常量）。"""
+    return [
+        item
+        for item in ctx.items(BASE)
+        if item.get("slot_type") != "cargo" and item.get("group_name") == DEFENDER_GROUP
+    ]
+
+
+def test_defender_launcher_is_not_a_damage_weapon(real_ctx) -> None:
+    """拦截弹发射器不进 `weapons[]`，它的 160 也不进 `dps.base`（T-43 靶心）。"""
+    ctx = real_ctx(F11_SVIPUL)
+    overview = build_view("firepower", ctx)["overview"]
+    attrs = ctx.attrs(BASE)
+
+    # 前置（非空转）：它真的装着，且引擎真的给了 160 / 800
+    defenders = _defender_items(ctx)
+    assert len(defenders) == 1, "前提：f11 装了一具拦截弹发射器"
+    assert _close(defenders[0]["attributes"][A.ATTR_DAMAGE_DPS], DEFENDER_DPS)
+    assert _close(defenders[0]["attributes"][A.ATTR_DAMAGE_VOLLEY], 800.0)
+
+    # 它不出现在武器清单里，也不冒充任何 family
+    names = [record["name"] for record in overview["weapons"]]
+    assert names == ["280mm Howitzer Artillery II"], f"武器清单多了东西：{names}"
+    assert {record["family"] for record in overview["weapons"]} == {"projectile"}
+
+    # `dps.base` = 船级 -12 − 拦截弹那 160（逐件 -12 之和与船级值差 < 1e-12 → 相减不是近似）
+    assert _close(overview["dps"]["base"], round(attrs[A.ATTR_DAMAGE_DPS] - DEFENDER_DPS, 3))
+    assert overview["dps"]["base"] == 205.013, "快照：只剩 4 门炮的 DPS"
+    assert overview["dps"]["with_reload"] < attrs[A.ATTR_DAMAGE_DPS_WITH_RELOAD]
+
+    # `dph` 只聚合武器记录 → 不含拦截弹的 800；舰船级 `-11` 里那 800 仍在（引擎原值）
+    assert overview["dph"] == 1408.841, "快照：4 × 352.210 = 1408.841"
+    assert overview["dph"] < attrs[A.ATTR_DAMAGE_ALPHA]
+
+
+def test_defender_exclusion_is_not_vacuous(real_ctx, monkeypatch: pytest.MonkeyPatch) -> None:
+    """**变异自检**：把排除表清空 → 拦截弹发射器必须重新回到武器清单与 `dps.base`。
+
+    没有这条断言，「排除拦截弹」可能只是句注释（本项目踩过「假绿」的坑）。
+    """
+    ctx = real_ctx(F11_SVIPUL)
+    monkeypatch.setattr(shared, "NON_DAMAGE_WEAPON_GROUPS", frozenset())
+
+    overview = build_view("firepower", ctx)["overview"]
+    names = [record["name"] for record in overview["weapons"]]
+
+    assert "Defender Launcher I" in names, "排除表清空后它必须回来（否则断言是永真的）"
+    assert _close(
+        overview["dps"]["base"], round(ctx.attrs(BASE)[A.ATTR_DAMAGE_DPS], 3)
+    ), "排除表清空后 dps.base 必须回到引擎原值（含那 160）"
+
 

@@ -175,7 +175,7 @@ from evefit.project.views import ViewContext, available_views, build_view
 from evefit.project.views.base import BASE, ship_attributes
 from evefit.project.views.loader import VIEW_MODULES, load_views
 
-BUDGET_CHARS: int = 17000
+BUDGET_CHARS: int = 19000
 """overview 的字符预算（`len(json.dumps(views)) + len(json.dumps(modes))`）。
 
 **实测值，不是拍的**（T-15 / T-18 / 样本 `spike/kill.json`，六视角 + 全 4 技能档 512 技能）：
@@ -194,7 +194,8 @@ BUDGET_CHARS: int = 17000
   **+223** 与 `modes` **+341**。这两块都是 T-17 承诺的出口（「未建模/不可用」与「模式对比」），
   不能再省——能省掉的只是「重复声明这个是 A」的 4,870 chars；
 - 因此**默认路径 `degraded == False`**（14,083 < 17,000）；只有更大的配装才会触发降级。
-  实测见 `tests/test_render.py::test_default_budget_fits_real_sample`。
+  以上是 **T-18 的 `spike/kill.json` 单样本**实测，`tests/test_render.py::test_default_budget_fits_real_sample`
+  至今仍钉着它（该样本确实不降级）。**但 17,000 已经装不下其它真实配装**，见 T-44 一段。
 - **T-32 复测（本任务新增 `unknown_reasons` 之后，同一份样本 `spike/kill.json`）**：
   `views` **14,681 chars**（T-18 之后又长出 `fighter_bay.*` / `feasible` / `over_budget.*`
   等叶子，172 个叶子）→ 加上 `unknown_reasons`（18 条 `unknown`，**+979 chars**）为
@@ -202,6 +203,25 @@ BUDGET_CHARS: int = 17000
   **预算值本轮不上调**：17,000 依然装得下，抬阈值只会削弱护栏；但余量已从 20% 掉到 6%，
   下一次「再加一个出口」时**必须重新按 `ceil(实测 × 1.2 ÷ 1000) × 1000` 重定**，
   不要靠放宽断言过关。
+- **T-44 裁决：17,000 → 19,000（有意为之的临时放宽）。** T-43 给 `propulsion_states`
+  加了 `single` 分支（每个推进类模块一条）后，L1 原始体量实测（六视角 + 全 4 技能档、
+  紧凑序列化 = `budget.chars` 口径）：
+  `f47` 16,885 → **17,327**、`f67` 16,723 → **17,269**、`f12` 18,178 → **18,631**
+  （f12 在 17,000 下**本来就降级**）。于是 f47 / f67 **新增降级**，代价是
+  **`flags` 全部丢 `evidence`**（诊断证据整块消失，不是「少几行」）+ `cap_by_module` /
+  `cap_sensitivity` 截到 5 项 —— 这是产品缺陷，不是未来风险（PROGRESS §3 第 256 条②）。
+  T-44 的 evidence 合并又给每条 `state_exclusive` 加了一个 `sources` 数组，
+  实测体量再 +23~45：`f47` **17,350** / `f67` **17,314** / `f12` **18,654**，
+  19,000 下三者仍全部 `degraded == False`（最小余量 346 chars ≈ 1.9%）。
+  - **取值依据**：`18,631 × 1.02 ≈ 19,004`，按千位取整落到 **19,000**（余量 ≈1.9%，
+    仍只有约 2%）；按旧公式 `ceil(实测 × 1.2 ÷ 1000) × 1000` 在 f12 上会落 **23,000** 档
+    （`18,631 × 1.2 = 22,357.2` → 23,000），19,000 明显更严格。
+  - **为什么允许放宽**：agent 的默认入口已改为 L0（`summary.render_index`，约 2,000 字符），
+    17,000 这条护栏服务的 `render_overview` 正逐渐变成「detail 转储层」；为保住
+    「诊断证据不许消失」这条红线，临时把预算抬到刚好装下最大的实测样本（18,654）。
+  - **撤销条件（P3 待办）**：等 overview 的 `provenance` / `unknown_reasons` 下沉到 detail 层
+    （它们目前是 overview 的大头），预算**必须压回 17,000 以下**；届时按实测重新计算，
+    不许把 19,000 当既成事实沿用。
 
 测试用 `monkeypatch` 把它调小来验证降级路径（所以函数里必须**在调用时**读这个模块常量）。
 """

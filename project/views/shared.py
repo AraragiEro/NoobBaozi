@@ -35,15 +35,30 @@
 互不相等的「关闭时信号半径」。现在变体的构造（`with_propulsion_off()`）与判定（group 名
 `Propulsion Module`）都只写在这里，两个调用方拿到的是同一个浮点数。
 
+**T-43 新增三件事，都在这一个文件里收口**：
+
+1. **「单推进」态**（`with_single_propulsion()` / `propulsion_single_attrs()`）：只启用一个
+   推进模块、其余置 offline，其余模块保持当前状态。它回答的是「玩家真实会用的状态」，
+   与 `propulsion_states.base`（引擎按导入规则把能开的全开）不互相冒充；
+2. **状态互斥规则表**（`activation_groups()`）：读 `config/activation_groups.json`，
+   补引擎 `max_group` 覆盖不到的**跨组**互斥（MWD+MJD 这类）。文件缺失 → 空规则、不崩；
+3. **拦截弹发射器不是对敌武器**（`NON_DAMAGE_WEAPON_GROUPS` / `classify_weapon` /
+   `non_damage_weapon_dps()`）：判定只此一份，`weapons[]` 与船级 `dps` 的扣减同源。
+
 数值纪律（与其他视角一致）：入参已是**物理单位**（秒 / m³），本模块不再缩放；
 缺值给 `None` 不补 0；浮点一律过 `units.fmt`。
 """
 
 from __future__ import annotations
 
+import json
 import math
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 
 from evefit.config import attributes as A
+from evefit.config import paths as _paths
 from evefit.config.attributes import ATTR_CHARGE_RATE, ATTR_EXPLOSION_DELAY
 from evefit.project import units
 from evefit.project.views.base import (
@@ -85,6 +100,20 @@ FAMILY_BY_GROUP: dict[str, str] = {
 MISSILE_GROUP_PREFIX: str = "Missile Launcher"
 """导弹发射器的 group 名前缀（实测 `Missile Launcher` / `Missile Launcher Light` /
 `Missile Launcher Rapid Heavy` / `Missile Launcher XL Cruise` 等 14 个 group 都以此开头）。"""
+
+NON_DAMAGE_WEAPON_GROUPS: frozenset[str] = frozenset({"Missile Launcher Defender"})
+"""**不产生对敌伤害**的「武器」group 名 —— 目前只有拦截弹发射器（T-43）。
+
+业务事实（不是「引擎给不给键」）：
+- `Defender Launcher I`（type **44102**，SDE group **512** = `Missile Launcher Defender`）装的
+  弹药是 `Defender Missile I`（type **32782**，group 88 `Defender Missiles`）——**拦截弹**，
+  用来打掉来袭导弹，不打船；
+- 引擎照给 `-12 = 160`、`-21 = 800`（f11 实测），因为这两个派生属性是「模块级伤害 DPS /
+  齐射量」，**不区分对敌与否**；pyfa/eos 同一件给 `0`（T-42 报告 §4.2 表 A 唯一例外）。
+- 所以判据用**业务事实**（这批发射器的弹药是拦截弹 → 不是对敌武器），并且必须是
+  **精确 group 名**而不是 `Missile Launcher` 前缀：前缀会把 `Missile Launcher Rapid Light`
+  这类真武器一起误伤（红线 N4 的反面：不猜）。
+"""
 
 DRONE_SLOT_TYPE: str = "drone_bay"
 """无人机槽位类别（软件设计 §7.3 的合法 slot.type）。"""
@@ -175,6 +204,13 @@ def classify_weapon(item: dict, source: dict[int, float]) -> tuple[bool, str | N
     这套判定把「扫描发射器」正确地排除在外：它有周期（51）与弹药，但没有射程（54）、
     弹药也没有爆炸半径，且不在家族的 group 表里。
 
+    **T-43：拦截弹发射器（`Defender Launcher`）不是对敌武器。** 判据是业务事实 ——
+    它的弹药是拦截弹（`Defender Missile`），用来打掉来袭导弹、不打船（`NON_DAMAGE_WEAPON_GROUPS`
+    里的实测依据）。引擎仍会为它派生 `-12 = 160` / `-21 = 800`（f11 实测），所以只排除
+    `classify_weapon` 是不够的：`firepower` 的 `dps.base` / `dps.with_reload` 读的是
+    **船级** `-12` / `-13`，那里面照样含这 160 → 视角侧要按同一张表把它的贡献扣掉
+    （`firepower._non_damage_dps()` 调 `non_damage_weapon_dps()`，判定只此一份）。
+
     判定只此一份：`firepower.weapons[]` 与两个视角的 `ammo_endurance_s` 都走它，
     否则「哪些模块算武器」一旦分叉，弹药续航会再次出现两个视角不一致（D5 的根因之一）。
     """
@@ -188,6 +224,11 @@ def classify_weapon(item: dict, source: dict[int, float]) -> tuple[bool, str | N
         return False, None
 
     group = item.get("group_name") or ""
+    if group in NON_DAMAGE_WEAPON_GROUPS:
+        # 拦截弹发射器（T-43）：引擎照给 `-12`/`-21`，但它不产生对敌伤害 → 不是武器。
+        # 必须排在导弹前缀判定**之前**：`Missile Launcher Defender` 也以该前缀开头，
+        # 排在后面就会被当成导弹发射器收进 `weapons[]`（f11 实测 160 DPS 的来源）。
+        return False, None
     if group.startswith(MISSILE_GROUP_PREFIX):
         return True, "missile"
     family = FAMILY_BY_GROUP.get(group)
@@ -491,3 +532,213 @@ def propulsion_off_attrs(ctx: ViewContext) -> dict[int, float] | None:
         return ctx.attrs(BASE)
     fit = with_propulsion_off(ctx.fit, positions)
     return ship_attributes(ctx.calculate_variant(PROPULSION_OFF_VARIANT, fit))
+
+
+# =============================================================================
+# 「单推进」态（T-43：玩家真实会用的状态，而不是全部同时启用）
+# =============================================================================
+
+SINGLE_PROPULSION_VARIANT_TEMPLATE: str = "shared:single:{position}"
+"""「只启用第 N 个推进模块」变体的缓存 key 模板（`{position}` = `fit["items"]` 原下标）。"""
+
+
+def propulsion_class_members() -> frozenset[int]:
+    """「推进类」的 SDE group_id 集合（= 配置表里登记的全部组成员）。
+
+    为什么单推进分支要用它而不是 `PROPULSION_GROUP`（那只是 group 46 的**名字**）：
+    `Micro Jump Drive`(1189) / `Micro Jump Field Generators`(1533) 与 `Propulsion Module`(46)
+    在游戏里同属「同一时刻只能启用其一」的一类（`config/activation_groups.json` 的
+    `propulsion` 组），但它们的 SDE group 名完全不同。Panther 的 `MWD + MJD` 就是两条
+    不同组的推进模块 —— 只按 group 名数，会把「2 个推进模块」数成 1 个。
+
+    配置表读不到时返回**空集合**（由调用方退回 group 名判据，不猜）。
+    """
+    members: set[int] = set()
+    for group in activation_groups():
+        members |= group.members
+    return frozenset(members)
+
+
+def propulsion_class_positions(ctx: ViewContext, variant: str = BASE) -> list[int] | None:
+    """已装**推进类**模块在 `fit["items"]` 里的原下标（跨 SDE group）；没有索引时 `None`。
+
+    成员判定优先用配置表登记的 group_id（这才是「同一时刻只能启用其一」的那一类）；
+    配置表读不到时退回 group 名 `Propulsion Module` —— 那是**降级**路径，只覆盖 AB/MWD。
+    """
+    if ctx.index is None:
+        return None
+    members = propulsion_class_members()
+    positions: list[int] = []
+    for position, item in enumerate(ctx.items(variant)):
+        if item.get("slot_type") == SLOT_CARGO:
+            continue
+        group_id = item.get("group_id")
+        if members:
+            if isinstance(group_id, int) and not isinstance(group_id, bool) and group_id in members:
+                positions.append(position)
+        elif item.get("group_name") == PROPULSION_GROUP:
+            positions.append(position)
+    return positions
+
+
+def with_single_propulsion(fit: dict, positions: list[int], keep: int) -> dict:
+    """只把 `keep` 这一个推进模块置 `active`，其余推进模块置 `offline`（不改入参）。
+
+    其它模块（护盾扩展、装甲、无人机…）**保持当前状态**，与 `with_propulsion_off()` 同一口径：
+    这里回答的是「玩家只开这一个推进模块时是什么样」，不是「整船重置」。
+
+    为什么 `keep` 一律置 `active`（而不是保持它原本的 state）：这是**玩家可选状态**的枚举，
+    不是当前状态的快照。f1 的 AB 当前是 `offline`，但「只开 AB」仍是玩家真会做的一个选择，
+    必须能算出来；当前状态由 `propulsion_states.base` 表达，两者互不冒充。
+    """
+    targets = set(positions)
+    items: list[dict] = []
+    for position, item in enumerate(fit.get("items") or []):
+        if position in targets:
+            items.append({**item, "state": "active" if position == keep else "offline"})
+        else:
+            items.append(item)
+    return {**fit, "items": items}
+
+
+def propulsion_single_attrs(ctx: ViewContext, position: int) -> dict[int, float] | None:
+    """只启用下标 `position` 那个推进类模块时的船体属性。
+
+    「推进类」的成员判定见 `propulsion_class_positions()`（配置表登记的 group，跨 SDE group）。
+    - 没有索引 / `position` 不是推进类模块 → `None`（判定不了，不猜）；
+    - 否则重算一次（缓存 key 按下标区分，同一 ctx 只算一次）。
+    """
+    positions = propulsion_class_positions(ctx)
+    if positions is None or position not in positions:
+        return None
+    fit = with_single_propulsion(ctx.fit, positions, position)
+    key = SINGLE_PROPULSION_VARIANT_TEMPLATE.format(position=position)
+    return ship_attributes(ctx.calculate_variant(key, fit))
+
+
+# =============================================================================
+# 不产生对敌伤害的「武器」（T-43：拦截弹发射器）
+# =============================================================================
+
+
+def non_damage_weapon_dps(
+    ctx: ViewContext, attribute_id: int, variant: str = BASE
+) -> float:
+    """装上的拦截弹发射器对**船级 DPS 属性**（`-12` / `-13`）的贡献合计。
+
+    为什么必须单独扣：`classify_weapon()` 只能把拦截弹发射器挡在 `weapons[]` 外，
+    而 `dps.base` / `dps.with_reload` 读的是**船级** `-12 damageDps` / `-13
+    damageDpsWithReload` —— 引擎把拦截弹的 160 / 133.33 也加进去了（f11 实测，
+    逐件 `-12` 之和 = 船级值，差 < 1e-12，所以直接相减不是近似）。
+
+    判定与「算不算武器」**同一张表**（`NON_DAMAGE_WEAPON_GROUPS`），不另写一套。
+    单独成函数而不是塞进 `weapon_records()`：这份贡献是**要扣除的噪声**，
+    不是一条武器记录，混进记录表会让 `weapons[]` 与 `dph` 又把它算回来。
+    """
+    total = 0.0
+    for item in ctx.items(variant):
+        if item.get("group_name") not in NON_DAMAGE_WEAPON_GROUPS:
+            continue
+        value = (item.get("attributes") or {}).get(attribute_id)
+        if value is None:
+            continue
+        total += float(value) * max(int(item.get("quantity") or 1), 1)
+    return total
+
+
+# =============================================================================
+# 「状态互斥」规则表（T-43：`config/activation_groups.json`）
+# =============================================================================
+# 为什么规则放在**配置**里而不是代码里（T-42 报告 §5.2）：引擎原生 `max_group` 只按 SDE
+# group 计数（同组才互斥），SDE 里**没有任何**「A 组禁 B 组」的字段，pyfa/eos 也一样
+# （`max_group.py:96-99`）。这条知识属于「知道但数据里没有」，与 `config/attributes.py`
+# 的常量表同一类资产：显式登记、可审计、每条带来源与核实日期。
+# 引擎的 `max_group` 违规仍然由引擎判（那是它的强项），本表只补它覆盖不到的部分；
+# 两者的**输出形状统一**成一条诊断 `state_exclusive`（见 `project/diagnostics.py`）。
+
+ACTIVATION_GROUPS_PATH: Path = _paths.PROJECT_ROOT / "config" / "activation_groups.json"
+"""规则表路径（走 `config/paths.py`，不写死绝对路径）。"""
+
+
+@dataclass(frozen=True, slots=True)
+class ActivationGroup:
+    """一组「同一时刻只能启用其一」的模块组（按 SDE group_id 登记）。
+
+    字段与 `config/activation_groups.json` 一一对应；`label_short` 只用于诊断文案
+    （L1 体积预算紧，完整口径留在 `label`），缺失时回退到 `label`。
+    """
+
+    id: str
+    label: str
+    label_short: str
+    members: frozenset[int]
+    limit: str
+    source: str
+    verified_by: str
+    verified_at: str
+    note: str
+
+
+def _activation_group_from_raw(raw: object) -> ActivationGroup | None:
+    """一条 JSON 记录 → `ActivationGroup`；结构不对返回 `None`（跳过，不猜）。
+
+    容错是刻意的（本函数在**运行时**被每次诊断调用）：规则表是人工维护的资产，
+    多一条写错的记录不该让整份报告炸；但**结构错误不静默猜**——缺 id / members 的
+    条目直接跳过，`source` / `verified_at` 留给测试去钉（测试跑在真实表上）。
+    """
+    if not isinstance(raw, dict):
+        return None
+    group_id = raw.get("id")
+    members = raw.get("members")
+    limit = raw.get("limit")
+    if not isinstance(group_id, str) or not group_id:
+        return None
+    if not isinstance(members, list) or not members:
+        return None
+    if not isinstance(limit, str) or not limit:
+        return None
+    parsed = [member for member in members if isinstance(member, int) and not isinstance(member, bool)]
+    if not parsed:
+        return None
+    label = raw.get("label") if isinstance(raw.get("label"), str) else group_id
+    label_short = raw.get("label_short") if isinstance(raw.get("label_short"), str) else label
+    return ActivationGroup(
+        id=group_id,
+        label=label or group_id,
+        label_short=label_short or label or group_id,
+        members=frozenset(parsed),
+        limit=limit,
+        source=raw.get("source") if isinstance(raw.get("source"), str) else "",
+        verified_by=raw.get("verified_by") if isinstance(raw.get("verified_by"), str) else "",
+        verified_at=raw.get("verified_at") if isinstance(raw.get("verified_at"), str) else "",
+        note=raw.get("note") if isinstance(raw.get("note"), str) else "",
+    )
+
+
+@lru_cache(maxsize=8)
+def _load_activation_groups_cached(path_text: str) -> tuple[ActivationGroup, ...]:
+    """读规则表（按路径缓存）。**文件缺失 / JSON 坏 / 顶层结构不对 → 空规则，不抛**。"""
+    try:
+        data = json.loads(Path(path_text).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ()
+    if not isinstance(data, dict) or not isinstance(data.get("groups"), list):
+        return ()
+    groups: list[ActivationGroup] = []
+    for raw in data["groups"]:
+        parsed = _activation_group_from_raw(raw)
+        if parsed is not None:
+            groups.append(parsed)
+    return tuple(groups)
+
+
+def activation_groups(path: Path | str | None = None) -> tuple[ActivationGroup, ...]:
+    """「状态互斥」组列表（默认读 `config/activation_groups.json`）。
+
+    容错口径：规则表读不到时返回**空元组** —— 于是「跨组互斥检测」整体退化为
+    「只有引擎原生 `max_group`」，而不是抛异常把整份报告打断。这是本表的**降级**路径，
+    不是正常路径（`tests/test_views_a.py` 用「清空 members → flag 消失」证明它真的驱动输出）。
+    """
+    target = Path(path) if path is not None else ACTIVATION_GROUPS_PATH
+    return _load_activation_groups_cached(str(target))
+

@@ -23,7 +23,8 @@
 8. 加载器：`load_views()` = 六视角、`VIEW_MODULES` 每项都声明了 `FIELD_SOURCES`；
 9. **overview 粒度改写**：`resources.upgrade_space` 在 overview 里是摘要、
    在 `render_detail(view="resources")` 里是**完整原样**的候选列表；默认预算下
-   `degraded is False`（T-18 实测 14,083 chars < 17,000）。
+   `degraded is False`（T-18 的 `spike/kill.json` 14,083 chars < 17,000；
+   T-44 裁决后预算是 **19,000**，f47 17,350 / f67 17,314 / f12 18,654 也全部不降级）。
 10. **整数键字典**（`constraints.skill_floor.count_by_level`）按等级逐条出 provenance
     （`...count_by_level.<level>`），等级来自数据、不硬编码。
 11. **C1 顶层 `modes`**：键恒存在；Hecate 恒给 Defense / Propulsion / Sharpshooter
@@ -1060,6 +1061,41 @@ def test_default_budget_fits_real_sample(ctx: ViewContext) -> None:
     assert rendered["budget"]["degraded"] is False, "默认预算装不下真实样本，先重测 chars 再改 BUDGET_CHARS"
     assert rendered["budget"]["chars"] == _measure(rendered["views"], rendered["modes"])
     assert rendered["budget"]["chars"] <= render.BUDGET_CHARS
+
+
+T44_BUDGET_SAMPLES: tuple[str, ...] = (
+    "f47-random-raptor",
+    "f67-spotcheck-139255942",
+    "f12-logistics-oneiros",
+)
+"""T-44 预算裁决的三个样本（stem 形式，`_load_instance_fit()` 自己配输入文件）。
+
+T-43 加 `propulsion_states.single` 后的 L1 原始体量：f47 16,885 → **17,327**、
+f67 16,723 → **17,269**、f12 18,178 → **18,631**（f12 在 17,000 下本来就降级）；
+T-44 的 evidence 合并（`sources` 数组）再 +23~45。17,000 下 f47/f67 **新增降级**，
+代价是 `flags` 全部丢 `evidence` + 两个列表截到 5 项 → 裁决抬到 **19,000**。
+"""
+
+
+@pytest.mark.parametrize("stem", T44_BUDGET_SAMPLES)
+def test_default_budget_fits_t44_samples(engine: Engine, index, stem: str) -> None:
+    """`BUDGET_CHARS = 19,000` 下 f47 / f67 / f12 **全部 `degraded == False`**。
+
+    改前（17,000）：三者 `degraded` 全为 True，`flags` 全部丢 `evidence`
+    —— 那不是「少几行」，是诊断证据整块消失（PROGRESS §3 第 256 条②）。
+    若这条炸了：说明真实载荷又超过 19,000，先按实测重算再定预算，
+    不要靠放宽断言过关（`render.BUDGET_CHARS` 的 docstring 有撤销条件）。
+    """
+    rendered = render.render_overview(_make_ctx(engine, index, stem))
+
+    assert rendered["budget"]["degraded"] is False, f"{stem}: 19,000 下不该降级"
+    assert rendered["budget"]["chars"] == _measure(rendered["views"], rendered["modes"])
+    assert rendered["budget"]["chars"] <= render.BUDGET_CHARS
+    # 未降级 = 诊断证据还完整（降级的第一档就是抹掉它）
+    assert any(entry["flags"] for entry in rendered["views"].values()), f"{stem}: 前提：必须有 flag"
+    for entry in rendered["views"].values():
+        for flag in entry["flags"]:
+            assert "evidence" in flag, f"{stem}: 未降级时 {flag['id']} 必须保留 evidence"
 
 
 def test_tiny_budget_degrades_but_keeps_numbers(

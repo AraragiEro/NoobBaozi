@@ -22,15 +22,22 @@
 正确值（载机停在机库不参战，T-28 改造实验已证）。它存在的唯一目的，是让下游知道
 「`weapons[]` 里没有战斗机、`dps.fighter` 是 0」**并非**数据缺失。
 
-还有 `propulsion_state_conflict`（T-35 / T-38 改名）：推进模块触发了引擎 `max_group … limit=active`
-硬违规（f67 是历史上第一条真实存在的双推进配置）。它的形状是**第 1 类 + 第 2 类的组合**：
-「是否有」状态互斥（同组只能启用其一）+ 「相对」事实回显（被叠加出来的速度是多少）。
-**它不重算、不降级、不挑模块**：数值全部保持引擎原样，只把「这些数基于叠加」说出口——
-否则下游 agent 会把 f67 的 `59,928.363 m/s` 当成有效数据（驱逐舰不可能有这个速度）。
+还有 `state_exclusive`（T-43；前身是 T-35 的 `propulsion_illegal_stack` → T-38 的
+`propulsion_state_conflict`）：推进类模块**同一时刻只能启用其一**。它把两段判据统一成
+**一条**输出 —— ① 引擎原生 `max_group … limit=active` 超限（同组，如 AB+MWD）、
+② `config/activation_groups.json` 登记的**跨组**互斥（如 MWD(46)+MJD(1189)：引擎与
+pyfa/eos 都不报，SDE 里也没有可驱动字段，见 T-42 报告 §3）。`evidence.sources` 说明这条
+互斥的每一部分**分别是谁发现的**（`["engine"]` / `["config"]` / 两者并集，T-44 起合并）
+——引擎只报得了它自己那个 SDE group，配置表补上的组必须一起列进 `evidence`，否则读者会
+以为那件模块没参与冲突（f67 的 MJFG(1533) 就是这样被吞掉的）。
+它的形状是**第 1 类 + 第 2 类的组合**：「是否有」状态互斥（同组只能启用其一）+
+「相对」事实回显（被叠加出来的速度是多少）。
+**它不重算、不降级、不挑模块**：数值全部保持引擎原样，只把「这些数基于多个模块同时启用」
+说出口——否则下游 agent 会把 f67 的 `59,928.363 m/s`、f12 的 `411,642 m/s` 当成有效数据。
 
-**口径（T-38 主人裁决）**：双推进一起带是**很常见的事**，只是确实**不能同时启用**——
-所以这不是「配装有问题」，而是**状态冲突**：id 与文案都不许出现判词，只说「同一时刻只能启用其一」
-与「这组数基于多个推进同时启用的非真实状态」。
+**口径（T-38 主人裁决 + T-43 术语锁定）**：双推进一起带是**很常见的事**，只是确实
+**不能同时启用**——所以这不是「配装有问题」，而是**状态互斥**：id 与文案都不许出现判词，
+只说「同一时刻只能启用其一」与「顶层数值按这些模块同时启用计算（不可达状态）」。
 同类历史缺陷：X1（Loki covert cloak 让 CPU 占用虚高）修在资源视角，这次暴露在机动视角
 ——**根因都是「状态语义缺失」，不是数值读错**。
 
@@ -579,30 +586,43 @@ def _rule_mwd_sig_increase(facts: _Facts) -> dict | None:
 
 
 def _propulsion_label(name: str) -> str:
-    """推进模块名 → 短标签（`AB` / `MWD`）；认不出的**原样返回名字**（不猜）。"""
+    """推进模块名 → 短标签（`AB` / `MWD` / `MJD` / `MJFG`）；认不出的**原样返回名字**（不猜）。"""
     if "Afterburner" in name:
         return "AB"
     if "Microwarpdrive" in name:
         return "MWD"
+    if "Micro Jump Field Generator" in name:
+        return "MJFG"
+    if "Micro Jump Drive" in name:
+        return "MJD"
     return name
 
 
 def _conflict_text(names: list[str]) -> str:
-    """多个推进模块 → 「AB 与 MWD」这种并列说法（>2 个用顿号，顺序同装配顺序）。"""
+    """多个模块 → 「AB 与 MWD」这种并列说法（>2 个用顿号，顺序同装配顺序）。
+
+    用短标签而不是完整模块名：完整名在 `mwd_sig_increase.evidence.propulsion` 里已有，
+    这里再抄一遍只是让同一份输出多一份拷贝（L1 体积预算紧，见 `render.BUDGET_CHARS`）。
+    """
     labels = [_propulsion_label(name) for name in names]
     return " 与 ".join(labels) if len(labels) == 2 else "、".join(labels)
 
 
-def _propulsion_active_limit_violation(facts: _Facts) -> dict | None:
-    """在引擎 `validate()` 里找「推进模块同组超过 active 上限」那条硬违规。
+# =============================================================================
+# 状态互斥（T-43）：引擎原生 `max_group` + `config/activation_groups.json` 的跨组规则
+# =============================================================================
+
+
+def _engine_active_group_conflicts(facts: _Facts) -> list[int]:
+    """引擎 `validate()` 里「某 SDE group 同时启用的件数超过 `active` 上限」的 group_id。
 
     判据**用引擎的结论，不自己数**：`rule.type == "max_group"` 且 `limit == "active"` 且
-    `used > allowed`，并且违规**目标模块**的 group 名是 `Propulsion Module`
-    （同一套 group 判据在 `views/shared.py`，两边不会分叉）。
-    其它 `max_group`（例如 f22 的 group 1770 `limit=active` 违规、挂点/装备组）不命中。
+    `used > allowed`。哪些 group 属于「状态互斥」规则族由**配置表**决定（见调用方），
+    所以这里不按 group 名过滤 —— f22 的 group 1770 违规照样被返回，但配置表没登记它，
+    就不会被当成 `state_exclusive`（旧实现按 `Propulsion Module` 名过滤，等价但更脆）。
     """
-    violations = facts.ctx.engine.validate(facts.ctx.fit)
-    for violation in violations:
+    conflicts: list[int] = []
+    for violation in facts.ctx.engine.validate(facts.ctx.fit):
         if not isinstance(violation, dict):
             continue
         rule = violation.get("rule")
@@ -618,63 +638,155 @@ def _propulsion_active_limit_violation(facts: _Facts) -> dict | None:
             continue
         if used <= allowed:
             continue
-        target = violation.get("target")
-        index = target.get("index") if isinstance(target, dict) else None
-        if not isinstance(index, int) or isinstance(index, bool):
+        group_id = rule.get("group_id")
+        if not isinstance(group_id, int) or isinstance(group_id, bool):
             continue
-        if not 0 <= index < len(facts.items):
-            continue
-        if facts.group_name(facts.items[index].get("type_id")) != _shared.PROPULSION_GROUP:
-            continue
-        return {
-            "group_id": rule.get("group_id"),
-            "used": int(round(float(used))),
-            "allowed": int(round(float(allowed))),
-        }
-    return None
+        if group_id not in conflicts:
+            conflicts.append(group_id)
+    return conflicts
 
 
-def _rule_propulsion_state_conflict(facts: _Facts) -> dict | None:
-    """推进模块触发了 `max_group … limit=active` 硬违规 → 速度/信号/对齐基于**状态冲突**。
+def _open_group_modules(facts: _Facts, members: frozenset[int]) -> list[dict]:
+    """`members`（SDE group_id 集合）里**处于启用态**的已装模块，顺序 = 装配顺序。
 
-    T-35 / f67（历史上第一条真实存在的双推进配置：`1MN AB` + `5MN MWD` 同时 active）：
+    合并视图带 `group_id`（`views/base._merge_items()` 从索引补的），所以这里不查索引；
+    但**没有索引时 `group_id` 恒为 `None`** → 判定不了，返回空列表（不猜，红线 N4）。
+    """
+    return [
+        item
+        for _position, item in facts.fitted()
+        if item.get("group_id") in members and item.get("state") in _OPEN_STATES
+    ]
 
-    - 引擎**不会**因为 `max_group` 违规自动把模块降级，于是 `-37 maxVelocity` 把
-      AB 的 `speedFactor 156.25` 与 MWD 的 `631.25` **一起叠上**：f67 算出
-      `59,928.363 m/s`（overload `134,777.472`）——驱逐舰不可能的速度；
-    - 数值**保持引擎原样**（本规则一个数都不改、也不挑一个模块停用——降级是求解，不在本期），
-      它只负责把「这组数基于多个推进同时启用」这件事**说出口**，否则下游 agent 会把
-      59,928 m/s 当成有效数据；
-    - 判据是引擎的硬违规 + 装配事实（有几件推进模块处于开启态），**不设数值阈值**。
-    - **口径（T-38 主人裁决）**：双推进一起带很常见，只是**不能同时启用**——所以这不是
-      「配装有问题」，而是**状态冲突**；id、文案、注释一律不写判词。
 
-    与 `no_propulsion` 同属机动视角；`mwd_sig_increase` 也会在双推进时命中，
-    两条 flag 不冲突：一条说「信号半径被撑大」，一条说「撑大的那个数是叠加出来的」。
+def _state_exclusive_evidence(
+    *,
+    group_ids: list[int],
+    names: list[str],
+    group: _shared.ActivationGroup,
+    sources: list[str],
+) -> dict:
+    """`state_exclusive` 的 evidence（形状见 `config/diagnostics.json` 的 message 模板）。
+
+    `sources` 表达「**这条互斥的每个部分分别是谁发现的**」（T-44 起是并集，顺序恒定
+    `engine` → `config`）：
+
+    - `"engine"`：引擎原生 `max_group` 报了至少一个组（同组超限），本规则族只是把它换成
+      统一形状；
+    - `"config"`：`activation_groups.json` 补上了引擎覆盖不到的组（MWD + MJD 这类跨组互斥，
+      或 f67 的 MJFG(1533) 这种引擎按 group 计数报不出来的第三件）。
+
+    并集是**证据完整性**的要求：只报引擎那一组时，f67 的 `modules` 只有 `AB 与 MWD`，
+    MJFG(1533) 虽然同时启用却不在 evidence 里 —— 读者会以为它没参与冲突（T-44 裁决）。
+
+    `source` 保留为**单值主因**（= `sources[0]`，引擎优先）：T-43 的消费方按它分流，
+    改成纯数组会让既有断言与下游一起断；完整口径看 `sources`。
+
+    **不给 `used` / `allowed`**：引擎那两个数说的是「同组件数 vs 上限」，对跨组冲突无意义；
+    统一成同一形状后，读者要的信息是「哪些组、哪几件、什么上限」，件数由 `modules` 表达。
+    """
+    return {
+        "group_ids": group_ids,
+        "modules": _conflict_text(names),
+        "label": group.label_short,
+        "limit": group.limit,
+        "source": sources[0],
+        "sources": list(sources),
+    }
+
+
+def _rule_state_exclusive(facts: _Facts) -> dict | None:
+    """同一时刻只能启用其一：**引擎原生同组互斥**与**配置表跨组互斥**合成一条诊断。
+
+    为什么必须自己补（T-42 侦察报告 §3，实跑证据）：引擎的 `max_group` 计数的 key 是
+    **SDE group**，所以 `AB(46) + MWD(46)` 会报、`MWD(46) + MJD(1189)` **不报**
+    （实测 `hard_violations: 0`）；pyfa/eos 的 `max_group.py:96-99` 同样按 type 的 group
+    计数，SDE 里也没有任何「A 组禁 B 组」的字段。跨组这条只能由我们的规则层补。
+
+    **T-44 起 evidence 合并（不再是「引擎命中即 return」）**，两段判据先各自收集、再合成一条：
+
+    1. **引擎侧**：`validate()` 报了某个 group 的 `max_group … limit=active` 超限，且该
+       group 是配置表某组的成员 → 记入 `engine_groups`（不在这张表里的 group 跳过，
+       如 f22 的 1770）；
+    2. **配置侧**：某个登记组里有 ≥ 2 件处于启用态 → 记一次命中（引擎报不出来时它就是
+       唯一依据；引擎报了时它仍然贡献「引擎没看见的那些组」）；
+    3. **`group_ids` = 引擎报的组 ∪ 配置命中涉及的组**（并集、升序）：
+       - f67（AB + MJFG + MWD 全 active）→ `[46, 1533]`（46 来自引擎，1533 来自配置表）；
+       - Panther / f48（MWD 46 + MJD 1189，引擎不报）→ `[46, 1189]`；
+       - f27 / f57（AB + MWD，同组两件）→ `[46]`（引擎与配置表都只看得到 46，仍是 `[46]`）；
+    4. **`modules` = 上述并集里所有处于启用态（active / overload）的模块**（装配顺序、
+       短标签）：f67 因此列出 `AB、MJFG、MWD` 三件，而不是只列引擎那一组的两件；
+    5. **`sources` = 谁发现的**：f67 → `["engine", "config"]`（1533 只有配置表覆盖得到）；
+       Panther → `["config"]`；f27 / f57 → `["engine"]`（配置表没有补出引擎之外的组）。
+
+    **只出一条**：两段判据合成**一条** flag（`group_ids` / `modules` / `sources` 都是并集，
+    不是各报一条）——「同一冲突不重复报」与「证据不许漏」在这里是同一件事的两面（T-44）。
+
+    **不挑「停用哪个」**（降级是求解，不在本期）：数值全部保持引擎原样，本规则只把
+    「这组数基于多个模块同时启用」这件事说出口。术语是**状态互斥**，不是配装问题
+    （PROGRESS §3 第 240 条）。
+
+    没有索引 / 配置表读不到 → `None`：判定不了就闭嘴，不猜。
     """
     if not facts.index_available:
         return None
-    over = _propulsion_active_limit_violation(facts)
-    if over is None:
+    groups = _shared.activation_groups()
+    if not groups:
         return None
 
-    open_modules = [
-        item for _position, item in facts.propulsions() if item.get("state") in _OPEN_STATES
+    owner: dict[int, _shared.ActivationGroup] = {}
+    for config in groups:
+        for member in config.members:
+            owner.setdefault(member, config)
+
+    engine_groups = [
+        group_id for group_id in _engine_active_group_conflicts(facts) if group_id in owner
     ]
-    if len(open_modules) < 2:  # 违规存在但开启态不足两件 → 事实对不上，宁可不报（不猜）
+
+    hits: list[tuple[_shared.ActivationGroup, list[dict]]] = []
+    for config in groups:
+        modules = _open_group_modules(facts, config.members)
+        if len(modules) >= 2:
+            hits.append((config, modules))
+
+    if not engine_groups and not hits:
         return None
 
-    names = [item.get("name") or f"type_id {item.get('type_id')}" for item in open_modules]
-    # evidence **只放别处拿不到的事实**（体积预算 + 不重复）：
-    # - 模块名在 `mwd_sig_increase.evidence.propulsion` 里已有，不再抄一遍；
-    # - 被叠加出来的速度/信号就是同一视角的 `overview.speed_mps` / `signature_radius_m`，
-    #   再放进 evidence 只是让同一份输出多一份拷贝（f47 会因此挤破 17000 chars 预算）。
-    return {
-        "conflict": _conflict_text(names),
-        "group_id": over["group_id"],
-        "used": over["used"],
-        "allowed": over["allowed"],
-    }
+    involved: set[int] = set(engine_groups)
+    for _config, modules in hits:
+        involved |= {
+            item["group_id"]
+            for item in modules
+            if isinstance(item.get("group_id"), int) and not isinstance(item.get("group_id"), bool)
+        }
+
+    relevant: list[_shared.ActivationGroup] = []
+    for group_id in sorted(involved):
+        config = owner.get(group_id)
+        if config is not None and config not in relevant:
+            relevant.append(config)
+    if not relevant:
+        return None
+
+    members = frozenset().union(*(config.members for config in relevant))
+    modules = _open_group_modules(facts, members)
+    if len(modules) < 2:
+        return None  # 违规/命中存在但启用态不足两件 → 事实对不上，宁可不报（不猜）
+
+    sources: list[str] = []
+    if engine_groups:
+        sources.append("engine")
+    # 「config 参与」= 它补出了引擎没报的组（f67 的 1533）；引擎一个都没报时它当然参与。
+    if hits and (not engine_groups or bool(involved - set(engine_groups))):
+        sources.append("config")
+
+    primary = owner[engine_groups[0]] if engine_groups else hits[0][0]
+    return _state_exclusive_evidence(
+        group_ids=sorted(involved),
+        names=[item.get("name") or f"type_id {item.get('type_id')}" for item in modules],
+        group=primary,
+        sources=sources,
+    )
 
 
 def _rule_resist_hole(facts: _Facts) -> dict | None:
@@ -864,7 +976,7 @@ _HANDLERS: dict[str, Callable[[_Facts], dict | None]] = {
     "drone_bandwidth_idle": _rule_drone_bandwidth_idle,
     "no_propulsion": _rule_no_propulsion,
     "mwd_sig_increase": _rule_mwd_sig_increase,
-    "propulsion_state_conflict": _rule_propulsion_state_conflict,
+    "state_exclusive": _rule_state_exclusive,
     "resist_hole": _rule_resist_hole,
     "repaired_but_unstable": _rule_repaired_but_unstable,
     "alpha_dph_ratio": _rule_alpha_dph_ratio,

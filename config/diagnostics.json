@@ -45,10 +45,10 @@
       "message": "推进模块 {propulsion_state} 时信号半径 {signature_radius_m} m，关闭时为 {signature_radius_off_m} m（{sig_ratio} 倍）"
     },
     {
-      "id": "propulsion_state_conflict",
+      "id": "state_exclusive",
       "view": "mobility",
       "enabled": true,
-      "message": "推进模块同组同时启用（{conflict}），游戏内同一时刻只能启用其一；速度/信号/对齐基于「多个推进同时启用」的非真实状态"
+      "message": "{label}同时启用（{modules}），游戏内同一时刻只能启用其一；顶层数值按这些模块同时启用计算（不可达状态）"
     },
     {
       "id": "resist_hole",

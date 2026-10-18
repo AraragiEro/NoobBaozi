@@ -80,6 +80,15 @@
    无载机时给空结构（`count 0 / types [] / capacity_used_m3 0.0`），schema 恒在。
    注意 `dps.fighter = 0.0` 在机库场景是**正确的 0**，绝不改成 `null` 或报错——
    「有没有在打」由 `dps.fighter` 说，「机库里有没有货」由 `fighter_bay` 说。
+10. **拦截弹发射器不算伤害（T-43）**：`Defender Launcher I`（SDE group
+    `Missile Launcher Defender`）的弹药是**拦截弹**（`Defender Missile I`），用来打掉来袭
+    导弹、不打船。引擎仍为它派生 `-12 = 160` / `-21 = 800`（f11 实测），pyfa/eos 同一件给
+    `0`（T-42 报告 §4.2 唯一例外）。判定只写一份：`shared.NON_DAMAGE_WEAPON_GROUPS` +
+    `shared.classify_weapon()`（把它挡在 `weapons[]` 外，于是 `dph` / `damage_split` /
+    `range` / `ammo_endurance_s` 全都不含它），**船级** `-12` / `-13` 的那部分由
+    `shared.non_damage_weapon_dps()` 扣掉（`dps.base` / `dps.with_reload` /
+    `overload.*.dps` 都走 `_dps_raw()` 的 `excluded`）。判据是**业务事实**（这批发射器的
+    弹药是拦截弹），不是「引擎给不给键」——后者会随实现细节漂移（PROGRESS §3 第 245 条）。
 
 `FIELD_SOURCES` 的映射约定：能指到**唯一来源属性**的给属性 ID（归一化/聚合的量指到
 它的定义性属性，例如「四系伤害占比」→ 对应的弹药伤害属性）；由多个属性共同决定的
@@ -311,6 +320,7 @@ def _dps_raw(
     attribute_id: int,
     *,
     has_weapon_system: bool,
+    excluded: float = 0.0,
 ) -> float | None:
     """引擎的 DPS 属性（`-12` / `-13`）→ 原始值；**缺键口径与 `_dph()` 一致**（T-37）。
 
@@ -327,11 +337,19 @@ def _dps_raw(
     → 保持 `None`（与 `_dph()` 对 f26 的判据逐字对齐，不新造口径）。
 
     只补这一种缺键：值存在时原样返回（`0.0` 也是值，不是缺值），所以既有样本逐位不变。
+
+    `excluded`（T-43）：**不产生对敌伤害**的模块对这条船级属性的贡献合计
+    （`shared.non_damage_weapon_dps()`，目前只有拦截弹发射器）。引擎把拦截弹的
+    `-12 = 160` / `-13 = 133.33` 也算进了船级值（f11 实测），逐件 `-12` 之和与船级值
+    差 < 1e-12，所以**相减不是近似**。扣减放在**原始值**上做（`_value()` 之前）：
+    先各自取 3 位小数再相减会让末位与「逐件重算」错开 1e-3。
     """
     value = attrs.get(attribute_id)
     if value is None and not has_weapon_system:
         return 0.0
-    return value
+    if value is None:
+        return None
+    return float(value) - excluded
 
 
 def _weapon_list(records: list[dict]) -> list[dict]:
@@ -475,8 +493,18 @@ def _overload_block(
     overload_attrs = ctx.attrs(OVERLOAD)
     overload_range = _range_block(shared.weapon_records(ctx, OVERLOAD))
 
-    off_dps = _dps_raw(base_attrs, _a.ATTR_DAMAGE_DPS, has_weapon_system=has_weapon_system)
-    on_dps = _dps_raw(overload_attrs, _a.ATTR_DAMAGE_DPS, has_weapon_system=has_weapon_system)
+    off_dps = _dps_raw(
+        base_attrs,
+        _a.ATTR_DAMAGE_DPS,
+        has_weapon_system=has_weapon_system,
+        excluded=shared.non_damage_weapon_dps(ctx, _a.ATTR_DAMAGE_DPS, BASE),
+    )
+    on_dps = _dps_raw(
+        overload_attrs,
+        _a.ATTR_DAMAGE_DPS,
+        has_weapon_system=has_weapon_system,
+        excluded=shared.non_damage_weapon_dps(ctx, _a.ATTR_DAMAGE_DPS, OVERLOAD),
+    )
     off_range = base_range["optimal_m"]
     on_range = overload_range["optimal_m"]
 
@@ -518,6 +546,13 @@ def build(ctx: ViewContext) -> dict:
     # 「有没有任何武器系统」只判一次：`dph`（T-36）与 `dps` 系列（T-37）共用同一个事实，
     # 两处各写一套判据就是下一轮「同一情形两种输出」的来源。
     has_weapon_system = _has_any_weapon_system(records, fighter_bay["count"])
+    # T-43：拦截弹发射器不产生对敌伤害。`weapon_records()` 已经不收它（`weapons[]` / `dph` /
+    # 射程 / 弹药续航都不会把它算进来），但船级 `-12` / `-13` 是引擎派生值、仍含它的
+    # 160 / 133.33 → 这里按**同一张**排除表（`shared.NON_DAMAGE_WEAPON_GROUPS`）扣掉。
+    excluded_dps = shared.non_damage_weapon_dps(ctx, _a.ATTR_DAMAGE_DPS, BASE)
+    excluded_dps_reload = shared.non_damage_weapon_dps(
+        ctx, _a.ATTR_DAMAGE_DPS_WITH_RELOAD, BASE
+    )
 
     overview = {
         "weapons": _weapon_list(records),
@@ -525,13 +560,19 @@ def build(ctx: ViewContext) -> dict:
         "dps": {
             # T-37：缺 `-12` / `-13` 且一个武器系统都没有 → `0.0`（见 `_dps_raw()`）。
             "base": _value(
-                _dps_raw(attrs, _a.ATTR_DAMAGE_DPS, has_weapon_system=has_weapon_system)
+                _dps_raw(
+                    attrs,
+                    _a.ATTR_DAMAGE_DPS,
+                    has_weapon_system=has_weapon_system,
+                    excluded=excluded_dps,
+                )
             ),
             "with_reload": _value(
                 _dps_raw(
                     attrs,
                     _a.ATTR_DAMAGE_DPS_WITH_RELOAD,
                     has_weapon_system=has_weapon_system,
+                    excluded=excluded_dps_reload,
                 )
             ),
             "drone": _value(attrs.get(_a.ATTR_DRONE_DPS)),

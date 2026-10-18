@@ -1093,30 +1093,36 @@ def test_mjfg_cap_load_is_period_average_not_instantaneous(real_ctx) -> None:
 
 
 # =============================================================================
-# 十、T-38：`propulsion_state_conflict`（原 `propulsion_illegal_stack`）
+# 十、T-43：`state_exclusive`（历史 id：`propulsion_illegal_stack` → `propulsion_state_conflict`）
 # =============================================================================
 #
-# 口径（主人裁决，T-38）：**双推进一起带是很常见的事，只是确实不能同时开** ——
-# 所以这**不是**配装问题，而是**状态冲突**：
+# 口径（主人裁决，T-38 定、T-43 沿用）：**双推进一起带是很常见的事，只是确实不能同时开** ——
+# 所以这**不是**配装问题，而是**状态互斥**：
 #
-# 1. id 从 `propulsion_illegal_stack` 改成 **`propulsion_state_conflict`**（旧 id 不得再出现）；
-# 2. 文案改成「同组同时启用（{conflict}）… 同一时刻只能启用其一 … 基于『多个推进同时启用』
-#    的非真实状态」，**全文不得出现判词**（`FORBIDDEN_WORDS`）；
+# 1. id 从 `propulsion_state_conflict` 统一成 **`state_exclusive`**（旧 id 不得再出现）：
+#    引擎原生同组互斥（AB+MWD）与配置表跨组互斥（MWD+MJD）现在是**同一个规则族**；
+#    T-44 起 `group_ids` / `modules` 取并集、`sources`（`engine` / `config` 的并集）
+#    说明每一部分分别是谁发现的（f67 的 MJFG(1533) 只有配置表覆盖得到）。
+# 2. 文案是「{label}同时启用（{modules}），游戏内同一时刻只能启用其一；顶层数值按这些
+#    模块同时启用计算（不可达状态）」，**全文不得出现判词**（`FORBIDDEN_WORDS`）；
 # 3. 判据与数值一个字都不许动：引擎不降级、我们也不降级（那是求解，不在本期）。
 
 import evefit.project.views.mobility  # noqa: F401  （导入即注册）
 
-STATE_CONFLICT_FLAG = "propulsion_state_conflict"
-"""T-38 后的唯一 id。"""
+STATE_EXCLUSIVE_FLAG = "state_exclusive"
+"""T-43 后的唯一 id（同组 + 跨组，一个规则族一条输出）。"""
 
-LEGACY_STACK_FLAG = "propulsion_illegal_stack"
-"""旧 id（T-35）：**只用来断言它已经不存在**，不要再拿它当 flag 名。"""
+LEGACY_STACK_FLAGS = ("propulsion_state_conflict", "propulsion_illegal_stack")
+"""历史 id（T-38 / T-35）：**只用来断言它们已经不存在**，不要再拿它们当 flag 名。"""
 
-STATE_CONFLICT_MESSAGE = (
-    "推进模块同组同时启用（AB 与 MWD），游戏内同一时刻只能启用其一；"
-    "速度/信号/对齐基于「多个推进同时启用」的非真实状态"
+STATE_EXCLUSIVE_MESSAGE = (
+    "推进类同时启用（AB、MJFG、MWD），游戏内同一时刻只能启用其一；"
+    "顶层数值按这些模块同时启用计算（不可达状态）"
 )
-"""f67 逐字文案（`{conflict}` 渲染成 `AB 与 MWD`）。"""
+"""f67 逐字文案（`{label}` / `{modules}` 渲染成 `推进类` / `AB、MJFG、MWD`）。
+
+T-44 起 `modules` 列**全部已启用的推进类模块**（f67 = AB + MJFG + MWD，按装配顺序），
+不再是引擎报的那一组（旧文案 `AB 与 MWD` 把 MJFG 吞掉了）。"""
 
 DUAL_PROPULSION_SAMPLES = (F67_SPOTCHECK, "f27-dual-prop.json", "f57-dual-prop.eft")
 """两个推进模块**都是 active** 的样本（引擎报 `group_id=46 used=2 / allowed=1`）。
@@ -1126,65 +1132,226 @@ DUAL_PROPULSION_SAMPLES = (F67_SPOTCHECK, "f27-dual-prop.json", "f57-dual-prop.e
 """
 
 SINGLE_PROPULSION_SAMPLES = ("f1-hecate-killmail.eft", "f5-no-mwd.json", "f45-t3c-subsys-3.json")
-"""单推进（或带两件但只有一件 active）：**不得**出现状态冲突 flag。"""
+"""单推进（或带两件但只有一件 active）：**不得**出现状态互斥 flag。"""
 
 
 def test_config_rule_and_implementation_are_renamed_together() -> None:
     """config 与实现必须同口径：新 id 在两边都在、旧 id 在两边都不在。
 
     `test_projection_core.py::test_config_rules_match_implementation` 校验「集合相等」，
-    这里补的是**名字本身**：改名的两个文件谁漏了都会红（T-38 靶心之一）。
+    这里补的是**名字本身**：改名涉及的 config / diagnostics 谁漏了都会红。
     """
     rules = {rule.id: rule for rule in D.load_rules()}
+    implemented = set(D.implemented_rules())
 
-    assert STATE_CONFLICT_FLAG in rules, f"config 缺新 id，实际：{sorted(rules)}"
-    assert LEGACY_STACK_FLAG not in rules, "config 里旧 id 必须删掉（改 id 不是加别名）"
-    assert STATE_CONFLICT_FLAG in set(D.implemented_rules())
-    assert LEGACY_STACK_FLAG not in set(D.implemented_rules())
+    assert STATE_EXCLUSIVE_FLAG in rules, f"config 缺新 id，实际：{sorted(rules)}"
+    assert STATE_EXCLUSIVE_FLAG in implemented
+    for legacy in LEGACY_STACK_FLAGS:
+        assert legacy not in rules, f"config 里旧 id {legacy!r} 必须删掉（改 id 不是加别名）"
+        assert legacy not in implemented
 
-    rule = rules[STATE_CONFLICT_FLAG]
-    assert rule.view == "mobility"
+    rule = rules[STATE_EXCLUSIVE_FLAG]
+    assert rule.view == "mobility", "推进类互斥只影响机动视角的数值"
     assert rule.enabled is True
-    # 模板必须只依赖 {conflict}（evidence 里另外三项 used/allowed/group_id 不进文案）
-    assert "{conflict}" in rule.message
-    assert rule.message.endswith("的非真实状态")
-    assert "同一时刻只能启用其一" in rule.message
+    # 模板只依赖 {label} / {modules}（evidence 另外三项 group_ids/limit/source 不进文案）
+    assert "{label}" in rule.message and "{modules}" in rule.message
+    assert "游戏内同一时刻只能启用其一" in rule.message
+    assert "不可达状态" in rule.message
     for word in FORBIDDEN_WORDS:
         assert word not in rule.message, f"文案里出现了判词 {word!r}"
 
 
+def _state_exclusive_labels(flag: dict) -> set[str]:
+    """`evidence.modules` → 短标签集合。
+
+    两个模块用 `" 与 "` 连接、三个及以上用 `"、"`（`diagnostics._conflict_text()`），
+    这里两种分隔符都拆，只比集合、不比顺序（顺序 = 装配顺序，由 f67 分支单独逐字钉）。
+    """
+    return set(str(flag["evidence"]["modules"]).replace("、", " 与 ").split(" 与 "))
+
+
 @pytest.mark.parametrize("name", DUAL_PROPULSION_SAMPLES)
-def test_dual_propulsion_emits_state_conflict_flag(real_ctx, name: str) -> None:
-    """双推进同时启用：必须有一条 `mobility` flag 说明「这组数基于状态冲突」。"""
+def test_dual_propulsion_emits_state_exclusive_flag(real_ctx, name: str) -> None:
+    """双推进同时启用：必须有一条 `mobility` flag 说明「这组数基于状态互斥」。"""
     ctx = real_ctx(name)
-    flags = {flag["id"]: flag for flag in D.evaluate(ctx)}
+    flags = [flag for flag in D.evaluate(ctx) if flag["id"] == STATE_EXCLUSIVE_FLAG]
+    ids = {flag["id"] for flag in D.evaluate(ctx)}
 
-    assert STATE_CONFLICT_FLAG in flags, f"{name}: 缺 flag，实际 {sorted(flags)}"
-    assert LEGACY_STACK_FLAG not in flags, "旧 id 不得再产出（改 id 不是加别名）"
+    assert len(flags) == 1, f"{name}: 同一冲突必须恰好一条，实际 {len(flags)}"
+    assert not (set(LEGACY_STACK_FLAGS) & ids), "旧 id 不得再产出（改 id 不是加别名）"
 
-    flag = flags[STATE_CONFLICT_FLAG]
+    flag = flags[0]
     assert flag["view"] == "mobility"
-    assert flag["evidence"]["used"] == 2 and flag["evidence"]["allowed"] == 1
-    assert flag["evidence"]["group_id"] == 46
-    assert flag["message"].startswith("推进模块同组同时启用（")
+    assert flag["evidence"]["source"] == "engine", "主因仍是引擎（`sources` 才给完整口径）"
+    assert 46 in flag["evidence"]["group_ids"], "AB 与 MWD 同属 group 46"
+    assert flag["evidence"]["limit"] == "active=1"
+    # 短标签顺序 = 装配顺序（f27 是 MWD 先装、f67 是 AB 先装）→ 集合比；f67 逐字钉
+    assert {"AB", "MWD"} <= _state_exclusive_labels(flag), "引擎那一组的两件必须都在 modules 里"
     assert "游戏内同一时刻只能启用其一" in flag["message"]
     for word in FORBIDDEN_WORDS:
         assert word not in flag["message"], f"{name}: 文案里出现了判词 {word!r}"
 
-    # 体积预算：叠加双方的模块名**不重复进本 flag 的 evidence**（`mwd_sig_increase` 已有）
-    assert len(flags["mwd_sig_increase"]["evidence"]["propulsion"]) == 2
+    # 体积预算：叠加双方的**模块名**不重复进本 flag 的 evidence（`mwd_sig_increase` 已有）
+    mwd_flag = next(flag for flag in D.evaluate(ctx) if flag["id"] == "mwd_sig_increase")
+    assert len(mwd_flag["evidence"]["propulsion"]) == 2
     assert "propulsion" not in flag["evidence"]
 
     if name == F67_SPOTCHECK:
-        assert flag["evidence"]["conflict"] == "AB 与 MWD"
-        assert flag["message"] == STATE_CONFLICT_MESSAGE
+        # T-44：evidence 必须合并引擎组与配置表组，MJFG(1533) 一件都不许漏
+        assert flag["evidence"]["group_ids"] == [46, 1533], "46 来自引擎、1533 来自配置表"
+        assert flag["evidence"]["sources"] == ["engine", "config"]
+        assert _state_exclusive_labels(flag) == {"AB", "MWD", "MJFG"}, "f67 的 MJFG 也同时启用"
+        assert flag["message"] == STATE_EXCLUSIVE_MESSAGE
+    else:
+        # f27 / f57 只有同组两件：并集 == 引擎那一组，`sources` 不该凭空多出 `config`
+        assert flag["evidence"]["group_ids"] == [46]
+        assert flag["evidence"]["sources"] == ["engine"]
+        assert _state_exclusive_labels(flag) == {"AB", "MWD"}
+
+
+PANTHER_EFT = (
+    "[Panther, 跨组推进]\n"
+    "500MN Microwarpdrive II\n"
+    "Large Micro Jump Drive\n"
+    "Damage Control II\n"
+)
+"""Panther + `500MN MWD`(46) + `Large MJD`(1189)：玩家实测「不能同时开」的那一对。
+
+两件属于**不同** SDE group，引擎与 pyfa/eos 都报 0 条 `max_group`（T-42 报告 §3.4）
+→ 这条 flag 只能来自 `config/activation_groups.json`。
+"""
+
+
+@pytest.fixture(scope="module")
+def ctx_from_eft(engine: Engine, index):
+    """EFT 文本 → `ViewContext`（技能档同 `real_ctx`，写法同 `tests/test_views_a.py`）。"""
+
+    def factory(text: str) -> ViewContext:
+        fit = engine.load_eft(text)
+        fit["character"] = {"skills": derive_skill_tier(fit, engine, index=index)}
+        return ViewContext(
+            engine=engine,
+            index=index,
+            fit=fit,
+            assumptions=default_assumptions(fit, engine, index=index),
+            meta=engine.meta(),
+        )
+
+    return factory
+
+
+def test_panther_cross_group_state_exclusive_sources(ctx_from_eft) -> None:
+    """Panther（MWD + MJD）：**只有配置表**覆盖 → `sources == ["config"]`。"""
+    ctx = ctx_from_eft(PANTHER_EFT)
+    flags = [flag for flag in D.evaluate(ctx) if flag["id"] == STATE_EXCLUSIVE_FLAG]
+
+    assert len(flags) == 1, f"Panther: 应当恰好一条 state_exclusive，实际 {len(flags)}"
+    evidence = flags[0]["evidence"]
+    assert evidence["group_ids"] == [46, 1189]
+    assert evidence["sources"] == ["config"]
+    assert evidence["source"] == "config", "主因是配置表（引擎一条都不报）"
+    assert evidence["modules"] == "MWD 与 MJD"
+    assert evidence["limit"] == "active=1"
+    # 前置：两件都真的装上了、都在启用态（否则这条测试是空转）
+    propulsion = [
+        item
+        for item in ctx.items(BASE)
+        if item.get("slot_type") != "cargo" and item.get("group_id") in (46, 1189)
+    ]
+    assert [item.get("state") for item in propulsion] == ["active", "active"]
+
+
+def test_f67_group_ids_lose_mjfg_when_table_drops_the_group(
+    real_ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**变异自检**：配置表不再登记 1533 → f67 的 `group_ids` 不再含 1533。
+
+    这条钉的是「1533 完完全全由配置表驱动」：引擎 `max_group` 只数 group 46，
+    它从来不会报 MJFG。两种收窄各验一次：
+
+    1. `members` 收成只剩 `{46}` → flag 仍在（引擎那条 46 的冲突），但 `group_ids == [46]`；
+    2. `members` **整个清空** → 配置表不再驱动任何东西，flag 整体消失（`group_ids` 自然也没有 1533）。
+    """
+    from evefit.project.views import shared as views_shared
+
+    def with_members(groups: tuple, members: frozenset[int]) -> tuple:
+        """把每条登记组的 members 换掉（其余字段原样，label/limit 不影响判定）。
+
+        `groups` 由调用方先取好：下面会 monkeypatch `activation_groups` 本身，
+        在替身里再回调它就会无限递归。
+        """
+        return tuple(
+            views_shared.ActivationGroup(
+                id=group.id,
+                label=group.label,
+                label_short=group.label_short,
+                members=members,
+                limit=group.limit,
+                source=group.source,
+                verified_by=group.verified_by,
+                verified_at=group.verified_at,
+                note=group.note,
+            )
+            for group in groups
+        )
+
+    ctx = real_ctx(F67_SPOTCHECK)
+    registered = views_shared.activation_groups()
+    assert registered, "前提：规则表必须能读到"
+    before = [
+        flag["evidence"]["group_ids"]
+        for flag in D.evaluate(ctx)
+        if flag["id"] == STATE_EXCLUSIVE_FLAG
+    ]
+    assert before == [[46, 1533]], f"前提：正常加载规则表时 f67 必须含 1533，实际 {before}"
+
+    # ① 只删 1533：46 的冲突还在（引擎报的），但 MJFG 必须从 evidence 里消失
+    trimmed = with_members(registered, frozenset({46}))
+    monkeypatch.setattr(views_shared, "activation_groups", lambda path=None: trimmed)
+
+    flags = [flag for flag in D.evaluate(ctx) if flag["id"] == STATE_EXCLUSIVE_FLAG]
+    assert flags, "引擎原生 46 那条冲突不该因为配置表变窄而消失"
+    assert [flag["evidence"]["group_ids"] for flag in flags] == [[46]], (
+        "1533 从配置表消失后，不再出现在 group_ids 里（否则它是写死在代码里的）"
+    )
+    assert "MJFG" not in flags[0]["evidence"]["modules"]
+    assert flags[0]["evidence"]["sources"] == ["engine"]
+
+    # ② 整个清空：配置表不驱动任何东西 → flag 不出现（group_ids 也就没有 1533）
+    blank = with_members(registered, frozenset())
+    monkeypatch.setattr(views_shared, "activation_groups", lambda path=None: blank)
+    assert [flag for flag in D.evaluate(ctx) if flag["id"] == STATE_EXCLUSIVE_FLAG] == [], (
+        "members 清空后不该再报（否则这条 flag 不是配置表驱动的）"
+    )
 
 
 @pytest.mark.parametrize("name", SINGLE_PROPULSION_SAMPLES)
-def test_single_propulsion_stays_silent_about_state_conflict(real_ctx, name: str) -> None:
-    """单推进（或两件但只有一件 active）**不得**报状态冲突（否则就是把正常配装说成冲突）。"""
+def test_single_propulsion_stays_silent_about_state_exclusive(real_ctx, name: str) -> None:
+    """单推进（或两件但只有一件 active）**不得**报状态互斥（否则就是把正常配装说成冲突）。"""
     ids = {flag["id"] for flag in D.evaluate(real_ctx(name))}
-    assert STATE_CONFLICT_FLAG not in ids, f"{name}: 单推进不该报状态冲突"
+    assert STATE_EXCLUSIVE_FLAG not in ids, f"{name}: 单推进不该报状态互斥"
+
+
+def test_cross_group_sample_is_reported_through_the_config_source(real_ctx) -> None:
+    """跨组样本（f48：MWD + MJD）在渲染层也走同一条 flag，`source` 是 `config`。
+
+    只测 `engine` 方向的话，配置表哪天读不到（空规则）也不会有测试变红。
+    """
+    from evefit.project import render as R
+
+    rendered = R.render_overview(real_ctx("f48-random-gnosis.json"))
+    mobility_flags = [
+        flag
+        for flag in rendered["views"]["mobility"]["flags"]
+        if flag["id"] == STATE_EXCLUSIVE_FLAG
+    ]
+
+    assert len(mobility_flags) == 1
+    assert mobility_flags[0]["evidence"]["source"] == "config"
+    assert mobility_flags[0]["evidence"]["sources"] == ["config"]
+    assert mobility_flags[0]["evidence"]["group_ids"] == [46, 1189]
+    for word in FORBIDDEN_WORDS:
+        assert word not in json.dumps(mobility_flags[0], ensure_ascii=False), word
 
 
 def test_rendered_overview_carries_the_renamed_flag_in_mobility(real_ctx) -> None:
@@ -1198,12 +1365,12 @@ def test_rendered_overview_carries_the_renamed_flag_in_mobility(real_ctx) -> Non
     overview_output = R.render_overview(real_ctx(F67_SPOTCHECK))
     mobility_flags = {flag["id"]: flag for flag in overview_output["views"]["mobility"]["flags"]}
 
-    assert STATE_CONFLICT_FLAG in mobility_flags
-    assert LEGACY_STACK_FLAG not in mobility_flags
-    assert STATE_CONFLICT_FLAG not in {
+    assert STATE_EXCLUSIVE_FLAG in mobility_flags
+    assert not (set(LEGACY_STACK_FLAGS) & set(mobility_flags))
+    assert STATE_EXCLUSIVE_FLAG not in {
         flag["id"] for flag in overview_output["flags"]
     }, "mobility 的 flag 不该掉进顶层兜底桶"
-    assert mobility_flags[STATE_CONFLICT_FLAG]["message"] == STATE_CONFLICT_MESSAGE
+    assert mobility_flags[STATE_EXCLUSIVE_FLAG]["message"] == STATE_EXCLUSIVE_MESSAGE
 
     text = json.dumps(overview_output["views"], ensure_ascii=False)
     for word in FORBIDDEN_WORDS:

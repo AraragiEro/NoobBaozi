@@ -468,7 +468,8 @@
      "subpaths": [
       "off",
       "active",
-      "overload"
+      "overload",
+      "single"
      ],
      "provenance": "assumed",
      "confidence": "A",
@@ -476,7 +477,20 @@
      "unit": null,
      "source_attrs": [],
      "meaning": "推进 off/active/overload 三态下的 {speed_mps, sig_m, align_time_s}",
-     "severe": "high"
+     "severe": "high",
+     "single_schema": {
+      "kind": "array",
+      "item_keys": [
+       "module",
+       "speed_mps",
+       "sig_m",
+       "align_time_s"
+      ],
+      "meaning": "每个已启用推进模块单独生效时的一组值；单推进配装为空数组",
+      "counting_rule": "条数 == 已装推进类模块数（MWD / AB / MJF / MJD，按模块而非 group 名）",
+      "distinguish_rule": "用 speed_mps / sig_m 区分状态；**不要用 align_time_s**（两模块 massAddition 相同时可能逐位相同）",
+      "since": "T-43"
+     }
     }
    ]
   },
@@ -991,5 +1005,35 @@
   "rule": "稀疏平行表，只挂在 provenance == unknown 的路径上；每条 unknown 都要有原因",
   "hard_gate": "unclassified 必须报缺陷",
   "since": "T-35"
+ },
+ "flag_ids": {
+  "state_exclusive": {
+   "view": "mobility",
+   "meaning": "推进类模块同一时刻只能启用其一；同一冲突**只出一条**",
+   "evidence_keys": [
+    "group_ids",
+    "modules",
+    "label",
+    "limit",
+    "source",
+    "sources"
+   ],
+   "authoritative": "sources（数组）；source 是临时兼容字段，只做存在性检查",
+   "since": "T-43（前身：propulsion_illegal_stack / propulsion_state_conflict）"
+  },
+  "forbidden_legacy_ids": [
+   "propulsion_state_conflict",
+   "propulsion_illegal_stack"
+  ]
+ },
+ "budget_expectation": {
+  "BUDGET_CHARS": 19000,
+  "since": "T-44",
+  "note": "比实测 max 18,631 多约 2%；撤销条件：overview 的 provenance/reasons 下沉到 detail 层后压回 17,000 以下",
+  "must_be_not_degraded": [
+   "f12-logistics-oneiros",
+   "f47-random-raptor",
+   "f67-spotcheck-139255942"
+  ]
  }
 }

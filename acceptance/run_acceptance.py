@@ -1593,6 +1593,168 @@ def check_unknown_reasons(case: str, payload: dict, spec: dict) -> list[Defect]:
     return defects
 
 
+ENGINE_INDEX_FOR_CHECKS = None
+"""SDE 索引（main 里赋值）。只用于把 `type_id` 解析成模块名（识别拦截弹 / 推进类模块）。"""
+
+
+LEGACY_FLAG_IDS = ("propulsion_state_conflict", "propulsion_illegal_stack")
+"""T-43 已删除的旧 flag id；产品侧有「旧 id 不得再产出」的断言，这里独立复核。"""
+
+STATE_EXCLUSIVE = "state_exclusive"
+PROPULSION_KEYWORDS = ("Microwarpdrive", "Afterburner", "Micro Jump Field Generator",
+                       "Micro Jump Drive")
+
+
+def all_flags(payload: dict) -> list[tuple[str, dict]]:
+    views = payload.get("views", payload)
+    out: list[tuple[str, dict]] = []
+    if isinstance(views, dict):
+        for view_name, node in views.items():
+            if isinstance(node, dict):
+                for flag in node.get("flags") or []:
+                    if isinstance(flag, dict):
+                        out.append((view_name, flag))
+    return out
+
+
+def check_state_exclusive(case: str, payload: dict) -> list[Defect]:
+    """T-43 契约：`state_exclusive` 唯一、在 mobility、evidence 形状正确；旧 id 禁用。"""
+    defects: list[Defect] = []
+    flags = all_flags(payload)
+    for view_name, flag in flags:
+        if flag.get("id") in LEGACY_FLAG_IDS:
+            defects.append(Defect(
+                "provenance 错误", "high", case, f"{view_name}.flags[{flag.get('id')}]",
+                "旧 id 不得再产出（T-43）", f"{flag.get('id')} 出现了",
+                "产品侧已有断言；这里是独立复核"))
+
+    hits = [(v, f) for v, f in flags if f.get("id") == STATE_EXCLUSIVE]
+    if not hits:
+        return defects
+    if len(hits) > 1:
+        defects.append(Defect(
+            "口径错误", "high", case, "flags[state_exclusive]",
+            "同一冲突只出一条", f"{len(hits)} 条（视图 {[v for v, _ in hits]}）"))
+    for view_name, flag in hits:
+        if view_name != "mobility":
+            defects.append(Defect(
+                "口径错误", "medium", case, f"{view_name}.flags[state_exclusive]",
+                "view == mobility", view_name))
+        evidence = flag.get("evidence")
+        if not isinstance(evidence, dict):
+            # T-44 在补 evidence 合并；缺失记 medium 而非 high
+            defects.append(Defect(
+                "字段缺失", "medium", case, f"{view_name}.flags[state_exclusive].evidence",
+                "{group_ids, modules, label, limit, source, sources}", repr(evidence)))
+            continue
+        allowed = {"group_ids", "modules", "label", "limit", "source", "sources"}
+        extra = set(evidence) - allowed
+        if extra:
+            defects.append(Defect(
+                "口径错误", "medium", case, f"{view_name}.flags[state_exclusive].evidence",
+                f"只允许 {sorted(allowed)}", sorted(extra)))
+        groups = evidence.get("group_ids")
+        if not (isinstance(groups, list) and all(isinstance(g, int) for g in groups)):
+            defects.append(Defect(
+                "口径错误", "medium", case, f"{view_name}.flags[state_exclusive].evidence.group_ids",
+                "int 数组（引擎 ∪ 配置表 的并集）", repr(groups)))
+        modules = evidence.get("modules")
+        if not (isinstance(modules, str) and modules.strip()) and not (
+                isinstance(modules, list) and modules):
+            defects.append(Defect(
+                "字段缺失", "medium", case, f"{view_name}.flags[state_exclusive].evidence.modules",
+                "列出所有已启用的推进类模块", repr(modules)))
+        if "source" not in evidence:
+            defects.append(Defect(
+                "字段缺失", "low", case, f"{view_name}.flags[state_exclusive].evidence.source",
+                "存在（临时兼容字段，T-44）", "缺失"))
+        sources = evidence.get("sources")
+        if sources is not None and not isinstance(sources, list):
+            defects.append(Defect(
+                "口径错误", "medium", case, f"{view_name}.flags[state_exclusive].evidence.sources",
+                "数组（权威字段）", repr(sources)))
+    return defects
+
+
+def fitted_propulsion(facts: "CaseFacts", index) -> list[str]:
+    """已装推进类模块名（按**模块**识别，不按 group 名 —— Panther 的 MWD/MJD 不同组）。
+
+    `facts.fit["items"]` 只有 `type_id`，名字必须走 SDE 索引解析。
+    """
+    names: list[str] = []
+    for item in facts.fit.get("items") or []:
+        slot = (item.get("slot") or {}).get("type") or ""
+        if slot in ("cargo", "implant", "booster", "drone_bay", "fighter_bay"):
+            continue                     # 货舱里常备备用推进模块，不能算"已装"
+        name = item.get("name") or ""
+        if not name and index is not None:
+            row = index.get_type(item.get("type_id"))
+            name = row["name"] if row else ""
+        if not name:
+            continue
+        if any(keyword.lower() in name.lower() for keyword in PROPULSION_KEYWORDS):
+            names.append(name)
+    return names
+
+
+def check_propulsion_single(case: str, payload: dict, facts: "CaseFacts", index) -> list[Defect]:
+    """T-43/T-44：`propulsion_states.single` 的形状、条数与「按 speed/sig 可区分」。"""
+    defects: list[Defect] = []
+    overview, _table = resolve_view_entry(payload.get("views", payload), "mobility")
+    if not isinstance(overview, dict):
+        return defects
+    states = overview.get("propulsion_states")
+    if not isinstance(states, dict):
+        return defects
+    if "single" not in states:
+        defects.append(Defect(
+            "字段缺失", "high", case, "mobility.propulsion_states.single",
+            "数组（T-43 新增）", "缺失"))
+        return defects
+    single = states["single"]
+    if not isinstance(single, list):
+        defects.append(Defect(
+            "口径错误", "high", case, "mobility.propulsion_states.single",
+            "数组（形状恒定，单推进为空数组）", type(single).__name__))
+        return defects
+
+    fitted = fitted_propulsion(facts, index)
+    # T-43 契约：单推进配装（≤1 个推进模块）→ `single` 为空数组；
+    # 只有 ≥2 个推进模块时才有意义（每个单独启用时的状态）。
+    expected_count = 0 if len(fitted) <= 1 else len(fitted)
+    if len(single) != expected_count:
+        defects.append(Defect(
+            "口径错误", "high", case, "mobility.propulsion_states.single",
+            f"条数 == 已装推进模块数（{expected_count}：{fitted}；单推进应为空数组）",
+            f"{len(single)} 条"))
+
+    for index, entry in enumerate(single):
+        if not isinstance(entry, dict):
+            defects.append(Defect("口径错误", "high", case,
+                                  f"mobility.propulsion_states.single[{index}]",
+                                  "dict", type(entry).__name__))
+            continue
+        for key in ("module", "speed_mps", "sig_m", "align_time_s"):
+            if key not in entry:
+                defects.append(Defect("字段缺失", "medium", case,
+                                      f"mobility.propulsion_states.single[{index}].{key}",
+                                      "存在", "缺失"))
+        if not isinstance(entry.get("module"), str) or not entry.get("module"):
+            defects.append(Defect("口径错误", "medium", case,
+                                  f"mobility.propulsion_states.single[{index}].module",
+                                  "非空字符串", repr(entry.get("module"))))
+
+    # 用 speed/sig 判断"是否真的在算不同状态"；**不要用 align_time**
+    signatures = [(entry.get("speed_mps"), entry.get("sig_m"))
+                  for entry in single if isinstance(entry, dict)]
+    if len(signatures) >= 2 and len(set(signatures)) != len(signatures):
+        defects.append(Defect(
+            "口径错误", "high", case, "mobility.propulsion_states.single",
+            "各状态的 (speed_mps, sig_m) 互不相同",
+            f"出现重复：{signatures}"))
+    return defects
+
+
 def check_provenance_instances(case: str, payload: dict, spec: dict,
                                oracle: "ProvenanceOracle") -> list[Defect]:
     """T-27 实例规则 + 数组元素口径。
@@ -1783,14 +1945,21 @@ def check_view_structure(case: str, payload: dict, spec: dict,
                 confidence_oracle.default, confidence_oracle.levels))
 
     # ---- 口径：与引擎事实直查比对 ----
-    defects.extend(check_semantics(case, views, facts))
+    defects.extend(check_semantics(case, views, facts, ENGINE_INDEX_FOR_CHECKS))
     # ---- 单位 ----
     defects.extend(check_units(case, views, facts))
     return defects
 
 
-def check_semantics(case: str, views: dict, facts: CaseFacts) -> list[Defect]:
+def check_semantics(case: str, views: dict, facts: CaseFacts, index=None) -> list[Defect]:
     defects: list[Defect] = []
+    has_defender = False
+    if index is not None:
+        for item in facts.fit.get("items") or []:
+            row = index.get_type(item.get("type_id"))
+            if row and "defender" in (row["name"] or "").lower():
+                has_defender = True
+                break
     for view_name in views:
         node = resolve_view(views, view_name)
         if not isinstance(node, dict):
@@ -1823,6 +1992,16 @@ def check_semantics(case: str, views: dict, facts: CaseFacts) -> list[Defect]:
                 expected_value = expected_value / 1000.0
             # 渲染层用 fmt(3) 压小数位；0.39744→0.397 的相对误差已达 1.1e-3，
             # 所以必须叠加「半个末位」的绝对容差，否则会误报口径错误。
+            # T-43 契约：拦截弹（Defender Launcher）**不计入伤害** —— 投影层会从
+            # `dps.*` / `dph` 里扣掉它的贡献，而引擎的 `-12`/`-11` 仍包含它。
+            # 这是**文档化的口径差异**，不是缺陷：记 low 观察并跳过严格比对。
+            if has_defender and path.startswith(("dps.", "dph")):
+                defects.append(Defect(
+                    "口径错误", "low", case, f"{view_name}.{path}",
+                    "投影口径排除拦截弹（T-43）",
+                    f"引擎={expected_value:.3f} / 投影={float(target):.3f}",
+                    "含 Defender Launcher：差值来自被排除的拦截弹，非缺陷"))
+                continue
             if not math.isclose(float(target), expected_value,
                                 rel_tol=RENDER_REL_TOL, abs_tol=5e-4):
                 category = "口径错误"
@@ -2255,6 +2434,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         eng = EngineFacts()
+        global ENGINE_INDEX_FOR_CHECKS
+        ENGINE_INDEX_FOR_CHECKS = eng.index
     except Exception as exc:  # noqa: BLE001
         print(f"引擎 / SDE 不可用：{type(exc).__name__}: {exc}", file=sys.stderr)
         print("检查 UV_CACHE_DIR 与 eveshipfit-dogma-engine[sde]==13.6.0", file=sys.stderr)
@@ -2355,6 +2536,8 @@ def main(argv: list[str] | None = None) -> int:
             defects.extend(check_feasible(case_name, payload_views, facts))
             defects.extend(check_fighter_chain(case_name, payload_views, facts))
             defects.extend(check_provenance_instances(case_name, payload_views, spec, oracle))
+            defects.extend(check_state_exclusive(case_name, payload_views))
+            defects.extend(check_propulsion_single(case_name, payload_views, facts, eng.index))
             defects.extend(check_unknown_reasons(case_name, payload_views, spec))
             defects.extend(check_view_structure(case_name, payload_views, spec, facts,
                                                 oracle, confidence_oracle))

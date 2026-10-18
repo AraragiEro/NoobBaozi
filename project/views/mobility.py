@@ -14,8 +14,7 @@
    `base`（当前状态）速度 1271.613 / 信号 385.0 / 对齐 11.861；
    `off`（全模块 offline）216.0 / 70.0 / 8.035；
    `overload`（全模块 overload）1799.419 / 385.0 / 11.861。
-   实测 active 相对 online：速度 ×5.89、信号半径 ×5.5（385 / 70）、对齐 +47.6%。
-3. 键名说明（两份文档口径不同，这里统一交代）：
+   实测 active 相对 online：速度 ×5.89、信号半径 ×5.5（385 / 70）、对齐 +47.6%。3. 键名说明（两份文档口径不同，这里统一交代）：
    - `"base"` = **当前状态**（引擎导入规则的 state；本样本推进模块是 active，
      所以与 `"active"` 数值相同，但语义不同，照实分开给）；
    - `"off"` = 全部模块 `offline`（任务书里写作 `offline` 档，`acceptance/field_spec.json`
@@ -35,11 +34,27 @@
    `off` 的语义**不变**（仍是全模块离线）。构造只写一份：`views/shared.py` 的
    `propulsion_off_attrs()`（诊断规则也调它）。
    ⚠️ 本档**不是**求解：它不挑「保留 AB 还是保留 MWD」，双推进样本里两个都关；
-   「只开 AB / 只开 MWD」那种单推进分支属于玩家真实状态求解，不在本期。
-4. `mass` 也随推进状态变化（实测 offline 1050000 / active 1550000，差 500000
+   「只开 AB / 只开 MWD」那种分支由 `"single"` 表达（T-43，见第 4 条）。
+4. **`"single"` 是「单推进」分支（T-43 新增）**：列表，每个已装**推进类**模块一条
+   `{module, speed_mps, sig_m, align_time_s}` —— 语义是「**只启用这一个**推进模块，
+   其余推进模块置 offline，其它模块保持当前状态」（构造在 `shared.with_single_propulsion()`,
+   与 `propulsion_off` 同一套写法）。「推进类」= `config/activation_groups.json` 登记的
+   group 46 / 1189 / 1533（AB/MWD · MJD · MJFG）：Panther 的 `MWD + MJD` 是两条不同组
+   的推进模块，只按 group 名数会把它数成 1 个。
+   它回答的是**玩家真实会用的状态**：`base` / `active` 是「引擎按导入规则把能开的全开」，
+   双推进样本里那是个**不可达状态**（同一时刻只能启用其一，见诊断 `state_exclusive`），
+   拿它当真值就会读出 f67 的 59,928 m/s 这种数。
+   - **顶层 `speed_mps` / `signature_radius_m` 数值不变**（仍是引擎全 active 值）：它是既有
+     契约字段，改口径会动 L0/L1 与全部验收基线。可达性提示由诊断 flag `state_exclusive`
+     的文案给出（「顶层数值按这些模块同时启用计算（不可达状态）」），不在本层加字段
+     （L1 体积预算紧，`render.BUDGET_CHARS = 17,000`）。
+   - 只有 **0 或 1 个**推进模块时给 `[]`：没有可选状态，不额外计算（省一次引擎调用）。
+   - 顺序 = 装配顺序（`shared.propulsion_positions()` 的原下标顺序），不按数值排序：
+     读者要靠顺序对上「船上那两件」，排序会让它变成另一套清单。
+5. `mass` 也随推进状态变化（实测 offline 1050000 / active 1550000，差 500000
    正是 5MN MWD 的 massAddition）。本视角按字段规格只给**当前状态**的 `mass_kg`；
    其它状态下的质量需要时请用对齐时间反推（`align ∝ mass × agility`），本层不另设字段。
-5. 进场时间 = `align_time_s` + 跃迁飞行时间；后者引擎不给、属自研公式，不在本视角
+6. 进场时间 = `align_time_s` + 跃迁飞行时间；后者引擎不给、属自研公式，不在本视角
    （字段规格 §3 明确：单配装视角只给 `warp_speed_au_s` 与对齐时间）。
 
 `FIELD_SOURCES` 的映射约定同其它视角：单属性决定的给属性 ID，合成值给 `None`。
@@ -70,7 +85,11 @@ ACTIVE_SPEC: dict = {
 """
 
 STATE_KEYS: tuple[str, ...] = ("base", "off", "propulsion_off", "active", "overload")
-"""`propulsion_states` 的五档（语义见模块 docstring §3）。"""
+"""`propulsion_states` 的五档（语义见模块 docstring §3）。
+
+第六个键 `"single"` 不是「一档状态」而是一组状态（每个推进模块各一条），所以不进
+`STATE_KEYS`：`summary._propulsion_state()` 之类的「逐档相等比对」只该看单值档。
+"""
 
 STATE_FIELDS: tuple[tuple[str, int], ...] = (
     ("speed_mps", _a.ATTR_MAX_VELOCITY),
@@ -101,8 +120,22 @@ FIELD_SOURCES: dict[str, int | None] = {
     "propulsion_states.overload.speed_mps": _a.ATTR_MAX_VELOCITY,
     "propulsion_states.overload.sig_m": _a.ATTR_SIGNATURE_RADIUS,
     "propulsion_states.overload.align_time_s": _a.ATTR_ALIGN_TIME,
+    # T-43 的「单推进」分支：容器本身是合成值（整张清单由已装模块枚举而来）→ `None`；
+    # 三个量仍是同一组属性的重算结果。**容器必须登记**：只有 0/1 个推进模块时
+    # `single` 是空列表，渲染层会把它折叠成容器叶子 `propulsion_states.single`，
+    # 没登记就落 `unknown` → `reasons.py` 里没有 mobility 的条件字段规则 → `unclassified`
+    # （`test_render.py` 的守门断言「出现即缺陷」会立刻红）。
+    "propulsion_states.single": None,
+    "propulsion_states.single[].speed_mps": _a.ATTR_MAX_VELOCITY,
+    "propulsion_states.single[].sig_m": _a.ATTR_SIGNATURE_RADIUS,
+    "propulsion_states.single[].align_time_s": _a.ATTR_ALIGN_TIME,
 }
-"""overview 点路径 → 来源属性 ID（各档都是同一组属性的不同状态重算结果）。"""
+"""overview 点路径 → 来源属性 ID（各档都是同一组属性的不同状态重算结果）。
+
+`propulsion_states.single[].module` 是**模块名**（字符串，元素内的定性字段），渲染层靠
+容器/元素登记给三态；它不在这里登记属性 ID（`FIELD_SOURCES` 只放 `int` 或 `None`），
+而由 `"propulsion_states.single": None` 的容器回退覆盖（`render._source_of()` 第 2 条）。
+"""
 
 
 # =============================================================================
@@ -124,6 +157,40 @@ def _active_attrs(ctx: ViewContext) -> dict[int, float]:
 def _state_block(attrs: dict[int, float]) -> dict[str, float | None]:
     """一档推进状态下的 `{speed_mps, sig_m, align_time_s}`。"""
     return {name: _value(attrs.get(attribute_id)) for name, attribute_id in STATE_FIELDS}
+
+
+def _single_states(ctx: ViewContext) -> list[dict]:
+    """「只启用这一个推进模块」的逐模块清单（模块 docstring §4）。
+
+    只有 **0 / 1 个**推进模块时返回 `[]`：没有可选状态，也不浪费一次引擎调用。
+    顺序 = 装配顺序；每个条目一条 `{module, speed_mps, sig_m, align_time_s}`。
+
+    「推进模块」= **推进类**（`shared.propulsion_class_positions()`：配置表登记的 group 46 /
+    1189 / 1533），不是只有 group 名 `Propulsion Module` —— Panther 的 `MWD + MJD` 是两条
+    不同组的推进模块，只按 group 名数会把它数成 1 个（T-43 的跨组口径同一个来源）。
+
+    `module` 是**模块名**而不是「保留哪个」的裁决：本视角只枚举事实，不替玩家决定开哪个。
+    """
+    positions = shared.propulsion_class_positions(ctx)
+    if positions is None or len(positions) < 2:
+        return []
+
+    items = ctx.items(BASE)
+    entries: list[dict] = []
+    for position in positions:
+        attrs = shared.propulsion_single_attrs(ctx, position)
+        if attrs is None:
+            continue  # 判定不了就跳过（不拿 base 冒充，红线 N4）
+        block = _state_block(attrs)
+        entries.append(
+            {
+                "module": items[position].get("name"),
+                "speed_mps": block["speed_mps"],
+                "sig_m": block["sig_m"],
+                "align_time_s": block["align_time_s"],
+            }
+        )
+    return entries
 
 
 # =============================================================================
@@ -161,6 +228,10 @@ def build(ctx: ViewContext) -> dict:
             "propulsion_off": _state_block(propulsion_off or {}),
             "active": _state_block(_active_attrs(ctx)),
             "overload": _state_block(ctx.attrs(OVERLOAD)),
+            # T-43：玩家真实会用的状态（只开一个）；0 / 1 个推进模块时是 `[]`。
+            # 顶层 `speed_mps` / `signature_radius_m` **不改口径**（仍是引擎全 active 值），
+            # 「那组值不可达」由诊断 flag `state_exclusive` 说出口（见模块 docstring §4）。
+            "single": _single_states(ctx),
         },
     }
     return {"view": VIEW_NAME, "overview": overview, "flags": []}

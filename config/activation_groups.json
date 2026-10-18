@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "note": "「状态互斥」规则表（T-43）：同一组模块里，游戏内同一时刻只能启用其一。引擎原生 max_group 只做**同组**计数（SDE group_id 相同才互斥），跨组互斥在 SDE 里没有任何可驱动字段（T-42 侦察报告 §3.3：disallow* 家族没有「A 组禁 B 组」），pyfa/eos 也只按 type 的 group 计数（max_group.py:96-99，实测 Panther 的 MWD+MJD 进 validate() 不报 max_group_active）→ 只能由这张人工表补。每条必须带来源与核实日期，不许编。label_short 只用于诊断文案（体积预算），label 是完整口径。",
+  "groups": [
+    {
+      "id": "propulsion",
+      "label": "推进类（区间引擎/微曲/跳刀/跳刀场）",
+      "label_short": "推进类",
+      "members": [46, 1189, 1533],
+      "limit": "active=1",
+      "source": "游戏内同一时刻只能启用一个推进类模块；玩家实测（任务 #139141897 Panther MWD+MJD 不能同时开）",
+      "verified_by": "Lead 转达玩家确认",
+      "verified_at": "2026-10-19",
+      "note": "引擎与 pyfa 均只做同组互斥，跨组需本表补充；SDE 无可驱动字段。group 46 = Propulsion Module、1189 = Micro Jump Drive、1533 = Micro Jump Field Generators（本地 SDE build 3607705 实测）。"
+    }
+  ]
+}
