@@ -1,6 +1,6 @@
 """SDE 索引库查询 API（L1 数据层）。
 
-严格实现 `evefit/contracts.py` 末尾的 `Index` 契约（方法名/参数/返回类型一字不改）：
+严格实现 `noobbaozi/contracts.py` 末尾的 `Index` 契约（方法名/参数/返回类型一字不改）：
 `open` / `search_types` / `get_type` / `types_in_group` / `modes_for_ship` /
 `attribute` / `stats` / `close`。
 
@@ -21,8 +21,8 @@
 5. **不猜**：歧义（同名多版本）由调用方决定怎么用，索引层只按
    `published` 优先、`meta_level` 次之的确定性顺序返回，不做语义判定。
 
-依赖约束（开发规范 §2）：只用标准库 `sqlite3` + `evefit.contracts`，外加**同层**的
-`evefit.sde.attribute_dict`（缩放系数由它提供，禁止 `sde` 反向依赖 `engine`）。
+依赖约束（开发规范 §2）：只用标准库 `sqlite3` + `noobbaozi.contracts`，外加**同层**的
+`noobbaozi.sde.attribute_dict`（缩放系数由它提供，禁止 `sde` 反向依赖 `engine`）。
 """
 
 from __future__ import annotations
@@ -32,8 +32,8 @@ import threading
 from pathlib import Path
 from typing import Final
 
-from evefit.contracts import AttributeRow, IndexStats, TypeRow
-from evefit.sde.attribute_dict import scale_of
+from noobbaozi.contracts import AttributeRow, IndexStats, TypeRow
+from noobbaozi.sde.attribute_dict import scale_of
 
 #: 未登记属性的兜底缩放系数，与 `sde/attribute_dict.scale_of()` 对未知属性的返回值
 #: 同义（原值）。真实缩放表归 `config/attributes.py` + `sde/attribute_dict.py`，
@@ -112,7 +112,7 @@ class Index:
         """打开索引库。
 
         Args:
-            path: `evefit/data/evefit-<build>.sqlite3`（用 `config.paths.db_path()` 取）。
+            path: `noobbaozi/data/noobbaozi-<build>.sqlite3`（用 `config.paths.db_path()` 取）。
 
         Raises:
             FileNotFoundError: 文件不存在（提示先跑 `sde.ingest.build_index()`）。
@@ -122,10 +122,10 @@ class Index:
         if not resolved.is_file():
             raise FileNotFoundError(
                 f"索引库不存在: {resolved}；请先运行 "
-                '`python -c "from evefit.sde.ingest import build_index; build_index()"`'
+                '`python -c "from noobbaozi.sde.ingest import build_index; build_index()"`'
             )
         index = cls(resolved)
-        # 立刻取一次连接 + 读一次 meta，尽早把"不是 evefit 索引库"暴露成异常。
+        # 立刻取一次连接 + 读一次 meta，尽早把"不是 noobbaozi 索引库"暴露成异常。
         index._connection().execute("SELECT COUNT(*) FROM meta").fetchone()
         return index
 

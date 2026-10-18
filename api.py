@@ -1,6 +1,6 @@
 """L5 接口层（P4）：MCP / CLI / Skill **共用的唯一逻辑层**。
 
-权威文档：`evefit/docs/输出分层与工具集-v1.md` §10（L5 接口层契约）。本模块只做
+权威文档：`noobbaozi/docs/输出分层与工具集-v1.md` §10（L5 接口层契约）。本模块只做
 「**参数 → 结果**」：不做 NL 理解、不做评分 / 排名 / 定性判词、**不二次换算任何数值**
 （红线 N5）、不调用 LLM、**不用默认值填补缺失值**（红线 N4 —— 「不确定」只能走
 `provenance` / `unknown_reasons` / `error` 出去）。
@@ -126,13 +126,13 @@ import urllib.request
 from collections import OrderedDict
 from typing import Callable
 
-from evefit.config import paths as _paths
-from evefit.engine import adapter, normalize
-from evefit.engine.assumptions import default_assumptions
-from evefit.project import render
-from evefit.project.views import ViewContext, available_views
-from evefit.project.views.base import SLOT_CARGO
-from evefit.sde.index import Index
+from noobbaozi.config import paths as _paths
+from noobbaozi.engine import adapter, normalize
+from noobbaozi.engine.assumptions import default_assumptions
+from noobbaozi.project import render
+from noobbaozi.project.views import ViewContext, available_views
+from noobbaozi.project.views.base import SLOT_CARGO
+from noobbaozi.sde.index import Index
 
 # =============================================================================
 # 一、常量（口径都在这里，别在函数里裸写）
@@ -166,7 +166,7 @@ STATE_POLICIES: tuple[str, ...] = (STATE_POLICY_ENGINE_DEFAULT,)
 CACHE_MAX_ENTRIES: int = 64
 """结果缓存的 LRU 容量（§10.6 要求 LRU；64 条覆盖一次战报的常见规模）。"""
 
-USER_AGENT: str = "evefit/1.0 (L5 interface layer; +https://github.com/evefit)"
+USER_AGENT: str = "noobbaozi/1.0 (L5 interface layer; +https://github.com/noobbaozi)"
 """联网请求的 `User-Agent`：**描述性**（谁在用、用来干什么），不是伪装浏览器。"""
 
 NETWORK_TIMEOUT_S: float = 20.0
@@ -185,7 +185,7 @@ ZKB_API_ROOT: str = "https://zkillboard.com/api"
 """zkillboard 的列表 API 根：`/api/<kills|losses>/<段名>/<值>/…/`（实测形态见第十三节）。"""
 
 ZKB_USER_AGENT: str = (
-    "evefit/1.0 (L5 interface layer; zkb kill list only; +https://github.com/evefit)"
+    "noobbaozi/1.0 (L5 interface layer; zkb kill list only; +https://github.com/noobbaozi)"
 )
 """zkb 请求的 `User-Agent`：**描述性**（zkb 按 UA 判断调用方，伪装浏览器没有好处）。"""
 
@@ -355,7 +355,7 @@ def get_index() -> Index:
                     "index_unavailable",
                     f"SDE 索引库不可用：{exc}",
                     hint=(
-                        "先建库：python -c \"from evefit.sde.ingest import build_index; "
+                        "先建库：python -c \"from noobbaozi.sde.ingest import build_index; "
                         "build_index()\""
                     ),
                 ) from exc

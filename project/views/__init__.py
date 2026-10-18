@@ -1,6 +1,6 @@
 """视角注册表（**只放注册与再导出，不放任何业务逻辑**）。
 
-六个视角各自一个模块，统一接口（见 `evefit/project/views/base.py`）：
+六个视角各自一个模块，统一接口（见 `noobbaozi/project/views/base.py`）：
 
 ```python
 def build(ctx: ViewContext) -> dict:
@@ -10,7 +10,7 @@ def build(ctx: ViewContext) -> dict:
 注册方式（在自己的模块里一行即可，不要改本文件）：
 
 ```python
-from evefit.project.views import register
+from noobbaozi.project.views import register
 
 @register("firepower")
 def build(ctx):
@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from evefit.project.views.base import (
+from noobbaozi.project.views.base import (
     BASE,
     OFFLINE,
     OVERLOAD,

@@ -1,4 +1,4 @@
-﻿import json
+import json
 import time
 
 import esf_dogma_engine as dogma
@@ -22,7 +22,7 @@ NEG = {
 print("SDE build:", build_number())
 dogma.load_sde_from_file(sde_path())
 
-km = json.load(open("evefit/spike/kill.json", encoding="utf-8"))[0]
+km = json.load(open("noobbaozi/spike/kill.json", encoding="utf-8"))[0]
 km.pop("zkb", None)
 
 fit = dogma.load_killmail(km)

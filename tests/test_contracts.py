@@ -1,11 +1,11 @@
-"""T2 契约测试：`evefit/contracts.py` 的字段口径冻结检查。
+"""T2 契约测试：`noobbaozi/contracts.py` 的字段口径冻结检查。
 
 覆盖：
 1. 版本常量；
 2. `Provenance` 三态齐全；
 3. 每个 TypedDict 的字段名与顺序（防止后续被误改）；
 4. `Meta` / `TypedValue` / `NormalizeError` 可构造；
-5. `import evefit.contracts` 无副作用。
+5. `import noobbaozi.contracts` 无副作用。
 
 约束：无网络、无外部 fixture 依赖（唯一读取的是被测模块自身源码，用于 AST 结构检查）。
 """
@@ -18,7 +18,7 @@ import sys
 import typing
 from pathlib import Path
 
-import evefit.contracts as contracts
+import noobbaozi.contracts as contracts
 
 # ---- 期望值：与 docs/配装理解-字段规格-v1.md、contracts.py 逐字对齐 ----
 
@@ -254,10 +254,10 @@ def test_contracts_module_level_has_no_calls() -> None:
 
 def test_import_is_idempotent_and_creates_no_extra_modules() -> None:
     before = set(sys.modules)
-    first = importlib.import_module("evefit.contracts")
-    second = importlib.import_module("evefit.contracts")
+    first = importlib.import_module("noobbaozi.contracts")
+    second = importlib.import_module("noobbaozi.contracts")
     assert first is second is contracts
-    assert sys.modules["evefit.contracts"] is contracts
+    assert sys.modules["noobbaozi.contracts"] is contracts
     added = set(sys.modules) - before
     assert added == set(), f"重复 import 产生了新的模块条目: {sorted(added)}"
 

@@ -1,6 +1,6 @@
 """三态 provenance 判定（L3）—— **表由实测生成，不得手改**。
 
-> 本表由 `evefit/tools/derive_provenance.py` 的**多样本 × 三轴敏感性实验**实测生成，
+> 本表由 `noobbaozi/tools/derive_provenance.py` 的**多样本 × 三轴敏感性实验**实测生成，
 > 并由该脚本**重写**这三张 frozenset。不要手改表内容；SDE / 引擎 / 样本变更后重跑
 > 该脚本（它会同时重写本模块并落证据 `tools/provenance_report.json`）。
 > 生成日期与样本见 `DERIVED_AT` / `DERIVED_SAMPLES`（`audit()` 会回显）。
@@ -90,10 +90,10 @@ T-14 修掉的两个**静默退化**（后来者不要再犯）
 
 from __future__ import annotations
 
-from evefit import contracts
-from evefit.config import attributes as _a
-from evefit.project import units as _units
-from evefit.sde import attribute_dict as _dict
+from noobbaozi import contracts
+from noobbaozi.config import attributes as _a
+from noobbaozi.project import units as _units
+from noobbaozi.sde import attribute_dict as _dict
 
 Provenance = contracts.Provenance
 

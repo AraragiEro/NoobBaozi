@@ -24,8 +24,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # 只为类型标注，运行时不产生 import 依赖
-    from evefit import contracts
-    from evefit.engine.adapter import Engine
+    from noobbaozi import contracts
+    from noobbaozi.engine.adapter import Engine
 
 ALL_KEY = "all"
 KEEP = "keep"

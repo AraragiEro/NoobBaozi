@@ -65,11 +65,11 @@ from __future__ import annotations
 
 import math
 
-from evefit.config import attributes as A
-from evefit.config.attributes import ATTR_DRONE_BANDWIDTH_USED, ATTR_MAX_SUBSYSTEMS
-from evefit.project import units
-from evefit.project.views import register
-from evefit.project.views.base import BASE, SLOT_CARGO, ViewContext, ship_attributes
+from noobbaozi.config import attributes as A
+from noobbaozi.config.attributes import ATTR_DRONE_BANDWIDTH_USED, ATTR_MAX_SUBSYSTEMS
+from noobbaozi.project import units
+from noobbaozi.project.views import register
+from noobbaozi.project.views.base import BASE, SLOT_CARGO, ViewContext, ship_attributes
 
 # =============================================================================
 # 槽位与上限

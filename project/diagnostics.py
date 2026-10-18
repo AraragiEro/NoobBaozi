@@ -43,7 +43,7 @@ pyfa/eos 都不报，SDE 里也没有可驱动字段，见 T-42 报告 §3）。
 
 倍数常量集中在本文件顶部，全部注明「相对量，非绝对门槛」，并且**只用于判断"明显"**，
 不用于给出「够快 / 够硬 / 够用」这类判词。规则开关与文案在
-`evefit/config/diagnostics.json`（只存 id / view / enabled / message，判定逻辑全在这里）。
+`noobbaozi/config/diagnostics.json`（只存 id / view / enabled / message，判定逻辑全在这里）。
 
 每条命中输出：
 
@@ -66,11 +66,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
-from evefit.config import attributes as _a
-from evefit.config import paths as _paths
-from evefit.project import units
-from evefit.project.views import shared as _shared
-from evefit.project.views.base import SLOT_CARGO, ViewContext, ship_attributes
+from noobbaozi.config import attributes as _a
+from noobbaozi.config import paths as _paths
+from noobbaozi.project import units
+from noobbaozi.project.views import shared as _shared
+from noobbaozi.project.views.base import SLOT_CARGO, ViewContext, ship_attributes
 
 RULES_PATH: Path = _paths.PROJECT_ROOT / "config" / "diagnostics.json"
 """规则表路径（走 `config/paths.py`，不写死绝对路径）。"""

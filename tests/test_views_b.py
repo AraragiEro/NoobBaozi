@@ -1,6 +1,6 @@
 """T2/T3 测试：六视角里的 **资源 / 约束 / 不稳定** 三个（T-10）。
 
-样本：`evefit/spike/kill.json`（killmail 139246907，Hecate + 全 4 + 补最低技能档）。
+样本：`noobbaozi/spike/kill.json`（killmail 139246907，Hecate + 全 4 + 补最低技能档）。
 覆盖任务书要求的断言：
 
 1. 三个视角都返回 `{view, overview, flags}` 且 `flags == []`（诊断统一在渲染层算一次）；
@@ -27,23 +27,23 @@ from pathlib import Path
 import esf_dogma_engine as dogma
 import pytest
 
-from evefit.config import attributes as A
-from evefit.config.paths import db_path
-from evefit.engine.adapter import Engine
-from evefit.engine.assumptions import default_assumptions, derive_skill_tier
-from evefit.project import diagnostics as D
-from evefit.project import units
-from evefit.project.views import build_view
-from evefit.project.views.base import BASE, ViewContext
-from evefit.sde.index import Index
+from noobbaozi.config import attributes as A
+from noobbaozi.config.paths import db_path
+from noobbaozi.engine.adapter import Engine
+from noobbaozi.engine.assumptions import default_assumptions, derive_skill_tier
+from noobbaozi.project import diagnostics as D
+from noobbaozi.project import units
+from noobbaozi.project.views import build_view
+from noobbaozi.project.views.base import BASE, ViewContext
+from noobbaozi.sde.index import Index
 
 # 三个视角模块必须显式 import 才会注册（注册表刻意不 import 它们，见 views/__init__.py）
-import evefit.project.views.constraints  # noqa: F401  （导入即注册）
-import evefit.project.views.resources  # noqa: F401
-import evefit.project.views.stability  # noqa: F401
+import noobbaozi.project.views.constraints  # noqa: F401  （导入即注册）
+import noobbaozi.project.views.resources  # noqa: F401
+import noobbaozi.project.views.stability  # noqa: F401
 
-EVEFIT_ROOT = Path(__file__).resolve().parents[1]
-KILL_PATH = EVEFIT_ROOT / "spike" / "kill.json"
+NOOBBAOZI_ROOT = Path(__file__).resolve().parents[1]
+KILL_PATH = NOOBBAOZI_ROOT / "spike" / "kill.json"
 
 VIEW_NAMES = ("resources", "constraints", "stability")
 FORBIDDEN_WORDS = ("非法", "不合规", "不合法")
@@ -79,7 +79,7 @@ def index():
     try:
         path = db_path()
     except FileNotFoundError:
-        pytest.skip("索引库未构建：先跑 evefit.sde.ingest.build_index()")
+        pytest.skip("索引库未构建：先跑 noobbaozi.sde.ingest.build_index()")
     opened = Index.open(path)
     yield opened
     opened.close()
@@ -163,7 +163,7 @@ def _field_sources(module) -> dict[str, int | None]:
 
 
 def test_three_views_registered_and_called() -> None:
-    from evefit.project.views import available_views
+    from noobbaozi.project.views import available_views
 
     names = set(available_views())
     assert set(VIEW_NAMES) <= names, f"三个视角必须已注册，实际：{sorted(names)}"
@@ -192,9 +192,9 @@ def test_field_sources_reachable_and_registered(views: dict[str, dict]) -> None:
        视角模块里以具名常量 + 「待登记」注释声明。这里只放行**模块里显式登记的那几个值**，
        裸写数字照样抓得住。
     """
-    import evefit.project.views.constraints as C
-    import evefit.project.views.resources as R
-    import evefit.project.views.stability as S
+    import noobbaozi.project.views.constraints as C
+    import noobbaozi.project.views.resources as R
+    import noobbaozi.project.views.stability as S
 
     for module, name in ((R, "resources"), (C, "constraints"), (S, "stability")):
         overview = views[name]["overview"]
@@ -496,7 +496,7 @@ def test_paste_consumer_requires_paste_charge(ctx: ViewContext) -> None:
     T-13 起 `73` 已在 `SCALE_BY_ATTR`（毫秒缩放），`_cycle_s` 的入参是**物理秒**，
     所以这里的 stub 也必须给投影后的 4.8（曾按原始毫秒 4800 喂，属测试夹具未跟上 T-13）。
     """
-    import evefit.project.views.stability as S
+    import noobbaozi.project.views.stability as S
 
     blaster = {
         "type_id": 3178,
@@ -625,7 +625,7 @@ def test_no_index_still_builds_three_views(engine: Engine, sample_fit: dict) -> 
 # 七、真实样本对照（T-20：D5 / D6 / X2）
 # =============================================================================
 
-ACCEPTANCE_FIXTURES = EVEFIT_ROOT / "acceptance" / "fixtures"
+ACCEPTANCE_FIXTURES = NOOBBAOZI_ROOT / "acceptance" / "fixtures"
 """验收样本（**只读**：`acceptance/` 不在本任务写入范围内）。"""
 
 T3C_SAMPLE = "f4-non-hecate.json"
@@ -679,7 +679,7 @@ def test_depletes_in_s_normalizer_covers_three_cases() -> None:
     2. 引擎给负数（任何负数都是「不耗尽」哨兵，不只 -1.0）→ `None`；
     3. 否则照实给秒数（过 `units.fmt`，3 位小数）。
     """
-    from evefit.project.views import shared as views_shared
+    from noobbaozi.project.views import shared as views_shared
 
     # 1) 稳定：f4 实测 stable 60.969 / 引擎 -7 = -1.0
     assert views_shared.depletes_in_s(60.9688, -1.0) is None
@@ -736,7 +736,7 @@ def test_resources_subsystem_slots_only_on_t3c(views: dict[str, dict], real_ctx)
       且三个条件字段在 overview 里**可达**（`FIELD_SOURCES` 有映射）；
     - f1（Hecate，T3D）/ f5（Drake）：键集合仍是四类，`empty_slots` 同步不多一类。
     """
-    import evefit.project.views.resources as R
+    import noobbaozi.project.views.resources as R
 
     f4 = build_view("resources", real_ctx(T3C_SAMPLE))["overview"]
     assert "subsystem" in f4["slots"], "T3C 必须体现子系统槽"
@@ -757,7 +757,7 @@ def test_resources_subsystem_slots_only_on_t3c(views: dict[str, dict], real_ctx)
 
 def test_t3c_subsystem_total_comes_from_ship_attribute(real_ctx) -> None:
     """总量来自船体 `maxSubSystems(1367)`，不是常量或按已装数量反推。"""
-    import evefit.project.views.resources as R
+    import noobbaozi.project.views.resources as R
 
     ctx = real_ctx(T3C_SAMPLE)
     total = ctx.attrs(BASE)[R.ATTR_MAX_SUBSYSTEMS]
@@ -1107,7 +1107,7 @@ def test_mjfg_cap_load_is_period_average_not_instantaneous(real_ctx) -> None:
 #    模块同时启用计算（不可达状态）」，**全文不得出现判词**（`FORBIDDEN_WORDS`）；
 # 3. 判据与数值一个字都不许动：引擎不降级、我们也不降级（那是求解，不在本期）。
 
-import evefit.project.views.mobility  # noqa: F401  （导入即注册）
+import noobbaozi.project.views.mobility  # noqa: F401  （导入即注册）
 
 STATE_EXCLUSIVE_FLAG = "state_exclusive"
 """T-43 后的唯一 id（同组 + 跨组，一个规则族一条输出）。"""
@@ -1272,7 +1272,7 @@ def test_f67_group_ids_lose_mjfg_when_table_drops_the_group(
     1. `members` 收成只剩 `{46}` → flag 仍在（引擎那条 46 的冲突），但 `group_ids == [46]`；
     2. `members` **整个清空** → 配置表不再驱动任何东西，flag 整体消失（`group_ids` 自然也没有 1533）。
     """
-    from evefit.project.views import shared as views_shared
+    from noobbaozi.project.views import shared as views_shared
 
     def with_members(groups: tuple, members: frozenset[int]) -> tuple:
         """把每条登记组的 members 换掉（其余字段原样，label/limit 不影响判定）。
@@ -1337,7 +1337,7 @@ def test_cross_group_sample_is_reported_through_the_config_source(real_ctx) -> N
 
     只测 `engine` 方向的话，配置表哪天读不到（空规则）也不会有测试变红。
     """
-    from evefit.project import render as R
+    from noobbaozi.project import render as R
 
     rendered = R.render_overview(real_ctx("f48-random-gnosis.json"))
     mobility_flags = [
@@ -1360,7 +1360,7 @@ def test_rendered_overview_carries_the_renamed_flag_in_mobility(real_ctx) -> Non
     `flags` 归位失败会掉进顶层 `flags` 兜底桶（不丢但不归位），所以两条都断言：
     机动视角里有它，顶层兜底桶里没有它。
     """
-    from evefit.project import render as R
+    from noobbaozi.project import render as R
 
     overview_output = R.render_overview(real_ctx(F67_SPOTCHECK))
     mobility_flags = {flag["id"]: flag for flag in overview_output["views"]["mobility"]["flags"]}

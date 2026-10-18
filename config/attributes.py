@@ -1,14 +1,14 @@
-"""evefit 属性常量表 + 单位/缩放表（全项目唯一允许出现属性数字 ID 的地方）。
+"""noobbaozi 属性常量表 + 单位/缩放表（全项目唯一允许出现属性数字 ID 的地方）。
 
 为什么必须集中（开发规范 §4.2，红线 N12）：
 属性 ID 是纯数字魔法数，散落在业务代码里既无法审查，也必然写错——
 例如 `requiredSkill4` 不是 185（185 是 `attributePoints`），而是 1285。
-其它模块一律 `from evefit.config.attributes import ATTR_XXX`，禁止裸写数字。
+其它模块一律 `from noobbaozi.config.attributes import ATTR_XXX`，禁止裸写数字。
 
 来源标记（每一行 ID 都有下列之一作证，注释里标了具体哪一个）：
 - `esi`   ESI `/dogma/attributes/{id}/` 实测返回的 name / unit_id / default_value
           （2026-10-18，SDE build 3607705）
-- `spike` 本项目 `evefit/spike/*.py` 的实测脚本（见注释里的脚本名）
+- `spike` 本项目 `noobbaozi/spike/*.py` 的实测脚本（见注释里的脚本名）
 - `spec`  `docs/配装理解-字段规格-v1.md`、`PROGRESS.md` §3 的实测硬结论
 - `task`  本任务规格给定但未独立复测（派生负 ID 无法从 ESI 反查，只能由
           引擎输出侧确认"有值"，语义来自 `spec`/`task`）
@@ -22,7 +22,7 @@
 毫秒"，后者说"数值被放大了"。`attribute_dict.to_physical` 按语义分支，不按
 数值猜测。
 
-本模块与 `evefit/sde/attribute_dict.py` 都是**纯声明**：无 IO、无网络、无随机。
+本模块与 `noobbaozi/sde/attribute_dict.py` 都是**纯声明**：无 IO、无网络、无随机。
 """
 
 from __future__ import annotations

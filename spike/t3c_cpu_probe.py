@@ -5,13 +5,13 @@
 
 复跑（仓库根目录）：
 
-    $env:UV_CACHE_DIR = "$PWD\\evefit\\spike\\uvcache"
+    $env:UV_CACHE_DIR = "$PWD\\noobbaozi\\spike\\uvcache"
     uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" `
-        python evefit/spike/t3c_cpu_probe.py
+        python noobbaozi/spike/t3c_cpu_probe.py
 
 样本说明（重要）：
-    任务书写的是 `evefit/acceptance/fixtures/f4-loki-t3c.json`，**这个文件不存在**。
-    真实样本是 `evefit/acceptance/fixtures/f4-non-hecate.json`（README「真实 KB 样本」表里
+    任务书写的是 `noobbaozi/acceptance/fixtures/f4-loki-t3c.json`，**这个文件不存在**。
+    真实样本是 `noobbaozi/acceptance/fixtures/f4-non-hecate.json`（README「真实 KB 样本」表里
     f4 就是 Loki / Strategic Cruiser），killmail 139254056。本脚本只读后者。
 
 脚本输出 11 段（S0–S10），对应任务书要求的 6 项证据：
@@ -40,16 +40,16 @@ from pathlib import Path
 import esf_dogma_engine as dogma
 from eveshipfit_sde import sde_path
 
-# 直接 `python evefit/spike/t3c_cpu_probe.py` 时 sys.path[0] 是 script 目录，
-# 先把仓库根塞进来，才能 `import evefit`（uv 的 --no-project 不吃 pyproject）。
+# 直接 `python noobbaozi/spike/t3c_cpu_probe.py` 时 sys.path[0] 是 script 目录，
+# 先把仓库根塞进来，才能 `import noobbaozi`（uv 的 --no-project 不吃 pyproject）。
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from evefit.config import paths
-from evefit.engine.adapter import Engine
-from evefit.engine import assumptions as assumption_engine
-from evefit.sde.index import Index
+from noobbaozi.config import paths
+from noobbaozi.engine.adapter import Engine
+from noobbaozi.engine import assumptions as assumption_engine
+from noobbaozi.sde.index import Index
 
 # ---------------------------------------------------------------- 常量（都用实测值，改了就重跑）
 
@@ -58,7 +58,7 @@ SAMPLE = Path(__file__).resolve().parents[1] / "acceptance" / "fixtures" / "f4-n
 
 MISSING_SAMPLE = Path(__file__).resolve().parents[1] / "acceptance" / "fixtures" / "f4-loki-t3c.json"
 
-# 属性 ID（SDE canon 名，见 evefit/config/attributes.py）
+# 属性 ID（SDE canon 名，见 noobbaozi/config/attributes.py）
 A_CPU_OUTPUT = 48   # cpuOutput（船）
 A_CPU_LOAD = 49     # cpuLoad（船，派生 = Σ item 50）
 A_CPU_FREE = -9     # cpuFree（船，派生）

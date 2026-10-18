@@ -30,7 +30,7 @@ from pathlib import Path
 import esf_dogma_engine as dogma
 import eveshipfit_sde
 
-from evefit import contracts
+from noobbaozi import contracts
 
 CACHE_MAX_ENTRIES = 256
 """`Engine` 实例的 LRU 容量。单次计算 0.33 ms（实测），256 条足以覆盖六视角变体。"""

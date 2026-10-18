@@ -3,8 +3,8 @@ r"""T-38 一次性探针：`budget.chars` 的字符构成分解 + 三种压缩�
 **只读探针**，不改任何产品代码；跑法（仓库根目录）：
 
 ```powershell
-$env:UV_CACHE_DIR = "$PWD\evefit\spike\uvcache"
-uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python evefit/spike/budget_breakdown.py
+$env:UV_CACHE_DIR = "$PWD\noobbaozi\spike\uvcache"
+uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python noobbaozi/spike/budget_breakdown.py
 ```
 
 它回答三个问题：
@@ -27,20 +27,20 @@ import sys
 from pathlib import Path
 from typing import Any
 
-EVEFIT_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = EVEFIT_ROOT.parent
-for _path in (str(REPO_ROOT), str(EVEFIT_ROOT)):
+NOOBBAOZI_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = NOOBBAOZI_ROOT.parent
+for _path in (str(REPO_ROOT), str(NOOBBAOZI_ROOT)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
 import esf_dogma_engine as dogma  # noqa: E402
 
-from evefit.config.paths import db_path  # noqa: E402
-from evefit.engine.adapter import Engine  # noqa: E402
-from evefit.engine.assumptions import default_assumptions, derive_skill_tier  # noqa: E402
-from evefit.project import render as R  # noqa: E402
-from evefit.project.views.base import ViewContext  # noqa: E402
-from evefit.sde.index import Index  # noqa: E402
+from noobbaozi.config.paths import db_path  # noqa: E402
+from noobbaozi.engine.adapter import Engine  # noqa: E402
+from noobbaozi.engine.assumptions import default_assumptions, derive_skill_tier  # noqa: E402
+from noobbaozi.project import render as R  # noqa: E402
+from noobbaozi.project.views.base import ViewContext  # noqa: E402
+from noobbaozi.sde.index import Index  # noqa: E402
 
 # 三个最大的样本（任务书指定）：f47 / f67 是两个贴近预算的，f12 是最大的非战斗船样本。
 SAMPLES = (
@@ -48,7 +48,7 @@ SAMPLES = (
     "f67-spotcheck-139255942.json",
     "f12-logistics-oneiros.json",
 )
-FIXTURES = EVEFIT_ROOT / "acceptance" / "fixtures"
+FIXTURES = NOOBBAOZI_ROOT / "acceptance" / "fixtures"
 
 NEXT_FIELD_COST = (250, 350)
 """下一次要加的 `propulsion_states.single` 的预计开销（任务书给的区间）。

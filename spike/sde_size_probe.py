@@ -1,7 +1,7 @@
 import json
 import urllib.request
 
-UA = {"User-Agent": "evefit/0.1 (index build probe)"}
+UA = {"User-Agent": "noobbaozi/0.1 (index build probe)"}
 
 
 def head(url):

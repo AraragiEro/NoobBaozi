@@ -33,8 +33,8 @@ from __future__ import annotations
 import json
 import re
 
-from evefit import contracts
-from evefit.engine import adapter
+from noobbaozi import contracts
+from noobbaozi.engine import adapter
 
 STATE_WARNING = "module states are inferred by import rules"
 """成功导入时的固定提示：state 由引擎导入规则推定，不是输入里给出的。"""
@@ -78,7 +78,7 @@ def set_index(index: object) -> None:
     """注入索引，用于给失败行补名称候选。
 
     Args:
-        index: `evefit.sde.index.Index` 实例，或任何具备
+        index: `noobbaozi.sde.index.Index` 实例，或任何具备
             `search_types(query, limit=...)` 方法的对象（便于测试替身）。
 
     Raises:

@@ -1,13 +1,13 @@
-"""L5 传输形态之一：`evefit/cli.py` 的契约测试（文档 §10.5「人工验证的基线」）。
+"""L5 传输形态之一：`noobbaozi/cli.py` 的契约测试（文档 §10.5「人工验证的基线」）。
 
 钉住四件事：
 
 1. **退出码三档**：`ok:true` → `0`、`ok:false` → `1`、参数 / IO 错误 → `2`
    （配装内容有问题**不是**参数错误，走 `1` + 结构化错误）；
-2. **`--json` 可以被 `json.loads`**，且内容就是 `evefit.api` 返回值的原样
+2. **`--json` 可以被 `json.loads`**，且内容就是 `noobbaozi.api` 返回值的原样
    （CLI 与 MCP 共用同一个函数层：这里顺手与 `api.fit_get` 对数）；
 3. **人话输出不换算**：打印出来的数字与 `json.dumps(api 的值)` 逐字符相同；
-4. **`python -m evefit.cli` 真的能跑**（子进程，含 `--fit-file -` 从 stdin 读）。
+4. **`python -m noobbaozi.cli` 真的能跑**（子进程，含 `--fit-file -` 从 stdin 读）。
 
 绝大多数断言用**进程内** `cli.main([...])`（快、能 `capsys` 抓输出）；
 另留两条**子进程**测试，专门验 `python -m` 这个入口本身（argv / stdin / 退出码）。
@@ -22,12 +22,12 @@ from pathlib import Path
 
 import pytest
 
-from evefit import api, cli
+from noobbaozi import api, cli
 
-EVEFIT_ROOT = Path(__file__).resolve().parents[1]
-WORKSPACE_ROOT = EVEFIT_ROOT.parent
-EFT_PATH = EVEFIT_ROOT / "acceptance" / "fixtures" / "f1-hecate-killmail.eft"
-KILL_PATH = EVEFIT_ROOT / "spike" / "kill.json"
+NOOBBAOZI_ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = NOOBBAOZI_ROOT.parent
+EFT_PATH = NOOBBAOZI_ROOT / "acceptance" / "fixtures" / "f1-hecate-killmail.eft"
+KILL_PATH = NOOBBAOZI_ROOT / "spike" / "kill.json"
 
 
 # =============================================================================
@@ -58,9 +58,9 @@ def _run_cli(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, 
 
 
 def _subprocess_cli(argv: list[str], *, stdin: str | None = None) -> subprocess.CompletedProcess:
-    """子进程跑 `python -m evefit.cli`（工作目录 = 仓库根，`-m` 靠 cwd 找到 evefit 包）。"""
+    """子进程跑 `python -m noobbaozi.cli`（工作目录 = 仓库根，`-m` 靠 cwd 找到 noobbaozi 包）。"""
     return subprocess.run(
-        [sys.executable, "-m", "evefit.cli", *argv],
+        [sys.executable, "-m", "noobbaozi.cli", *argv],
         cwd=str(WORKSPACE_ROOT),
         input=stdin,
         capture_output=True,
@@ -248,12 +248,12 @@ def test_non_utf8_file_message(monkeypatch: pytest.MonkeyPatch,
 
 
 # =============================================================================
-# 四、`python -m evefit.cli` 入口本身（子进程）
+# 四、`python -m noobbaozi.cli` 入口本身（子进程）
 # =============================================================================
 
 
 def test_module_entry_point_json() -> None:
-    """真起一个子进程跑 `python -m evefit.cli index --json`（退出码 + 可解析）。"""
+    """真起一个子进程跑 `python -m noobbaozi.cli index --json`（退出码 + 可解析）。"""
     completed = _subprocess_cli(
         ["index", "--fit-file", str(EFT_PATH), "--json"]
     )
@@ -285,10 +285,10 @@ def test_module_entry_point_argument_error_exit_code() -> None:
 # 六、`killmail` 子命令（T-49：战报上下文）
 # =============================================================================
 #
-# 样本：`evefit/tests/fixtures/killmail/139239127-zkb.json`（zkillboard 的真实响应原文）。
+# 样本：`noobbaozi/tests/fixtures/killmail/139239127-zkb.json`（zkillboard 的真实响应原文）。
 # 星系名 / 安全等级一律打桩，不联网。
 
-KILLMAIL_DIR = EVEFIT_ROOT / "tests" / "fixtures" / "killmail"
+KILLMAIL_DIR = NOOBBAOZI_ROOT / "tests" / "fixtures" / "killmail"
 KILLMAIL_ZKB_PATH = KILLMAIL_DIR / "139239127-zkb.json"
 AMAMAKE = {
     "name": "Amamake",
@@ -415,7 +415,7 @@ def test_killmail_rejects_a_fit_without_a_battle(
 # 目标是钉住 **CLI 的接线**（选项名 → api 的关键字参数），不是重测 api 的逻辑：
 # 因此只把 api 的请求器换成 fixture（不联网），其余元件都是真的。
 
-ZKB_FIXTURES = EVEFIT_ROOT / "tests" / "fixtures" / "zkb"
+ZKB_FIXTURES = NOOBBAOZI_ROOT / "tests" / "fixtures" / "zkb"
 LOSSES_URL = "https://zkillboard.com/api/losses/shipTypeID/22444/pastSeconds/604800/"
 KILLS_URL = "https://zkillboard.com/api/kills/shipTypeID/22444/pastSeconds/604800/"
 
@@ -538,7 +538,7 @@ def test_search_human_failure_goes_to_stderr(
 
 
 def test_module_entry_point_knows_search() -> None:
-    """真起子进程：`python -m evefit.cli search --help` 里能看到这一组选项。"""
+    """真起子进程：`python -m noobbaozi.cli search --help` 里能看到这一组选项。"""
     completed = _subprocess_cli(["search", "--help"])
     assert completed.returncode == 0, completed.stderr
     for token in (

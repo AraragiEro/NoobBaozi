@@ -1,6 +1,6 @@
 """T-39/T-40 测试：输出分层第一阶段（L0 摘要 / L1 单视角 / 按路径取数）。
 
-权威文档：`evefit/docs/输出分层与工具集-v1.md`。被测入口三个：
+权威文档：`noobbaozi/docs/输出分层与工具集-v1.md`。被测入口三个：
 
 ```python
 render.render_index(ctx)             # L0 摘要
@@ -63,13 +63,13 @@ from pathlib import Path
 import esf_dogma_engine as dogma
 import pytest
 
-from evefit.config.paths import db_path
-from evefit.engine.adapter import Engine
-from evefit.engine.assumptions import default_assumptions, derive_skill_tier
-from evefit.project import render, summary
-from evefit.project.views import available_views, build_view
-from evefit.project.views.base import ViewContext
-from evefit.sde.index import Index
+from noobbaozi.config.paths import db_path
+from noobbaozi.engine.adapter import Engine
+from noobbaozi.engine.assumptions import default_assumptions, derive_skill_tier
+from noobbaozi.project import render, summary
+from noobbaozi.project.views import available_views, build_view
+from noobbaozi.project.views.base import ViewContext
+from noobbaozi.sde.index import Index
 
 EVE_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES_DIR = EVE_ROOT / "acceptance" / "fixtures"
@@ -161,7 +161,7 @@ def index():
     try:
         path = db_path()
     except FileNotFoundError:  # 索引库是构建产物，没建就跳过
-        pytest.skip("索引库未构建：先跑 evefit.sde.index.build_index()")
+        pytest.skip("索引库未构建：先跑 noobbaozi.sde.index.build_index()")
     opened = Index.open(path)
     yield opened
     opened.close()

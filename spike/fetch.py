@@ -1,4 +1,4 @@
-﻿import json
+import json
 import urllib.request
 
 URL = "https://zkillboard.com/api/killID/139246907/"
@@ -9,7 +9,7 @@ with urllib.request.urlopen(req, timeout=30) as resp:
     raw = resp.read()
 
 data = json.loads(raw)
-with open("evefit/spike/kill.json", "w", encoding="utf-8") as f:
+with open("noobbaozi/spike/kill.json", "w", encoding="utf-8") as f:
     json.dump(data, f, ensure_ascii=False)
 
 k = data[0]

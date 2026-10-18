@@ -1,4 +1,4 @@
-"""evefit 六视角验收 runner（QA 自持，不依赖投影层实现细节）。
+"""noobbaozi 六视角验收 runner（QA 自持，不依赖投影层实现细节）。
 
 设计原则
 --------
@@ -6,25 +6,25 @@
 2. **实现无关**：六视角结构通过三种途径取得，优先顺序如下
      a. `--views-json`：外部（主人 / 开发代理 / PM）提供的六视角 JSON；
      b. `--entry pkg.mod:func`：指定投影层入口，runner 负责调用；
-     c. 自动探测若干常见入口名（`evefit.project.render:render_overview` 等）。
+     c. 自动探测若干常见入口名（`noobbaozi.project.render:render_overview` 等）。
    三者都没有 → 判定 `blocked`（投影层未就绪），不得误判成"通过"。
 3. **缺陷分类计数**：字段缺失 / 口径错误 / 单位错误 / provenance 错误 / 不变式失败。
 4. **不联网、不写产品代码、不使用 pytest `tmp_path`**（沙箱 `WinError 5`）。
 
 用法
 ----
-    $env:UV_CACHE_DIR = (Join-Path $PWD "evefit/spike/uvcache")
+    $env:UV_CACHE_DIR = (Join-Path $PWD "noobbaozi/spike/uvcache")
     uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" `
-      python evefit/acceptance/run_acceptance.py --label 基线
+      python noobbaozi/acceptance/run_acceptance.py --label 基线
 
     # 只验某个外部产出的六视角 JSON
-    python evefit/acceptance/run_acceptance.py --views-json out/views.json --label P2
+    python noobbaozi/acceptance/run_acceptance.py --views-json out/views.json --label P2
 
     # 只对某个样本（主人后续给的 killmail / EFT）
-    python evefit/acceptance/run_acceptance.py --eft path/to/x.eft
+    python noobbaozi/acceptance/run_acceptance.py --eft path/to/x.eft
 
     # 打印字段勾选表（用于重生成验收计划里的表格）
-    python evefit/acceptance/run_acceptance.py --emit-field-table
+    python noobbaozi/acceptance/run_acceptance.py --emit-field-table
 
 退出码：0 = 无缺陷（pass）；1 = 有缺陷（fail）；2 = 阻塞（投影层未就绪 / 环境不可用）。
 """
@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent                      # evefit/
+ROOT = HERE.parent                      # noobbaozi/
 WORKSPACE = ROOT.parent
 sys.path.insert(0, str(WORKSPACE))
 
@@ -72,11 +72,11 @@ INVARIANT_ABS_TOL = 1e-6
 
 #: 自动探测的投影层入口（按顺序尝试）
 ENTRY_CANDIDATES = (
-    ("evefit.project.render", "render_overview"),
-    ("evefit.project.render", "render"),
-    ("evefit.project", "understand"),
-    ("evefit.project.pipeline", "understand_fit"),
-    ("evefit.project.views", "extract_views"),
+    ("noobbaozi.project.render", "render_overview"),
+    ("noobbaozi.project.render", "render"),
+    ("noobbaozi.project", "understand"),
+    ("noobbaozi.project.pipeline", "understand_fit"),
+    ("noobbaozi.project.views", "extract_views"),
 )
 
 #: I4 往返无损的 8 项指标
@@ -272,9 +272,9 @@ class EngineFacts:
     """
 
     def __init__(self) -> None:
-        from evefit.config import paths as paths_mod
-        from evefit.engine import adapter
-        from evefit.sde.index import Index
+        from noobbaozi.config import paths as paths_mod
+        from noobbaozi.engine import adapter
+        from noobbaozi.sde.index import Index
 
         self.adapter = adapter
         self.engine = adapter.Engine()
@@ -287,8 +287,8 @@ class EngineFacts:
             pass
 
     def build(self, name: str, eft_text: str, eft_path: Path | None) -> CaseFacts:
-        from evefit.engine.assumptions import default_assumptions
-        from evefit.engine.normalize import normalize_fit
+        from noobbaozi.engine.assumptions import default_assumptions
+        from noobbaozi.engine.normalize import normalize_fit
 
         normalized = normalize_fit(eft_text)
         if normalized["fit"] is None:
@@ -455,7 +455,7 @@ def check_invariants(facts: CaseFacts, eng: EngineFacts) -> list[Defect]:
     # ---- I4: EFT 往返无损 ----
     try:
         eft_back = eng.engine.save_eft(facts.fit)
-        from evefit.engine.normalize import normalize_fit
+        from noobbaozi.engine.normalize import normalize_fit
 
         again = normalize_fit(eft_back)
         if again["fit"] is None:
@@ -572,7 +572,7 @@ I7_SAMPLES: tuple[tuple[str, str], ...] = (
 
 def check_error_structure() -> list[Defect]:
     """I7：解析失败必须返回可修复结构。"""
-    from evefit.engine.normalize import normalize_fit
+    from noobbaozi.engine.normalize import normalize_fit
 
     defects: list[Defect] = []
     for label, text in I7_SAMPLES:
@@ -621,7 +621,7 @@ def check_empty_slot_markers() -> list[Defect]:
       / `[Empty Subsystem slot]` 通过；`[Empty Medium Slot]` / `[Empty Cargo Slot]` 被引擎
       以 `invalid empty slot` 拒绝。错误结构里 `line=None`，用户无法定位到行。
     """
-    from evefit.engine.normalize import normalize_fit
+    from noobbaozi.engine.normalize import normalize_fit
 
     defects: list[Defect] = []
     cases = (
@@ -811,13 +811,13 @@ def walk_numeric(overview: object, table: dict | None = None
 class ProvenanceOracle:
     """provenance 权威表的读取器（Lead 裁决：权威在投影层，不在字段规格）。
 
-    优先 `evefit/project/provenance.py` 的 `tag(attr_id)`；`tag` 不存在时退化为
+    优先 `noobbaozi/project/provenance.py` 的 `tag(attr_id)`；`tag` 不存在时退化为
     读模块里的映射表（`TAG_BY_ATTR` / `TAGS` / `PROVENANCE_BY_ATTR`）。
     都拿不到 → `available=False`，runner 退化为**只做结构校验**（三态合法性 + 全字段覆盖），
     绝不硬编码期望值——这样 T-08 用实测重推该表后 runner 自动跟随。
     """
 
-    MODULE = "evefit.project.provenance"
+    MODULE = "noobbaozi.project.provenance"
 
     def __init__(self) -> None:
         self.available = False
@@ -885,7 +885,7 @@ def check_render_meta(case: str, payload: dict, facts: CaseFacts) -> list[Defect
 
 
 class ConfidenceOracle:
-    """可信度权威表的读取器（`evefit/project/confidence.py`）。
+    """可信度权威表的读取器（`noobbaozi/project/confidence.py`）。
 
     **稀疏约定（Lead 裁决 2026-10-18）**：
     - `<view>.confidence` 只输出**非 `"A"`** 的叶子路径；缺省 = `"A"`；空表输出 `{}`；
@@ -895,7 +895,7 @@ class ConfidenceOracle:
     得到非 A 的，**输出表里必须出现**；得到 A 的，输出表里不该出现（稀疏约定）。
     """
 
-    MODULE = "evefit.project.confidence"
+    MODULE = "noobbaozi.project.confidence"
 
     def __init__(self) -> None:
         self.available = False
@@ -1860,7 +1860,7 @@ def check_view_structure(case: str, payload: dict, spec: dict,
                                           f"元素含 {item_key}",
                                           f"元素={json.dumps(value[0], ensure_ascii=False)[:120]}"))
         # provenance：只校验三态合法性；**不**用字段规格的列去断言期望值
-        # （Lead 裁决：权威是 evefit/project/provenance.py）
+        # （Lead 裁决：权威是 noobbaozi/project/provenance.py）
         declared = None
         if isinstance(value, dict) and isinstance(value.get("provenance"), str):
             declared = value["provenance"]
@@ -1869,7 +1869,7 @@ def check_view_structure(case: str, payload: dict, spec: dict,
                                   f"{view_name}.{name}.provenance",
                                   f"∈ {PROVENANCE_VALUES}", declared))
         # confidence 不在这里逐字段判：稀疏表的权威是
-        # `evefit/project/confidence.py` 的 confidence_of()，在 I6 段按叶子统一校验
+        # `noobbaozi/project/confidence.py` 的 confidence_of()，在 I6 段按叶子统一校验
         # （见 check_confidence：反查「非 A 必须出现」+ 键空间 ⊆ provenance）。
 
     # ---- I6：**每个叶子**（数值／字符串／布尔／None）都必须有 provenance ----
@@ -2199,7 +2199,7 @@ def build_view_context(facts: CaseFacts, eng: "EngineFacts") -> object:
     `tests/test_render.py` 的 `sample_fit` 完全一致。漏了这步，渲染层会按
     **零技能**算，于是每个数都对不上（这是验收器自己的错，不是实现的错）。
     """
-    from evefit.project.views import base as views_base
+    from noobbaozi.project.views import base as views_base
 
     fit = dict(facts.fit)
     fit["character"] = {"skills": dict(facts.skills)}
@@ -2275,11 +2275,11 @@ def render_report(payload: dict, spec: dict) -> str:
     status = payload["status"]
     lines: list[str] = []
     title = payload.get("label") or "验收"
-    lines.append(f"# evefit 六视角验收报告 · {title}")
+    lines.append(f"# noobbaozi 六视角验收报告 · {title}")
     lines.append("")
     lines.append(f"- 生成时间：{payload['generated_at']}")
-    lines.append(f"- runner：`evefit/acceptance/run_acceptance.py`（v1）")
-    lines.append(f"- 字段清单：`evefit/acceptance/field_spec.json`（{payload['field_total']} 个 overview 字段）")
+    lines.append(f"- runner：`noobbaozi/acceptance/run_acceptance.py`（v1）")
+    lines.append(f"- 字段清单：`noobbaozi/acceptance/field_spec.json`（{payload['field_total']} 个 overview 字段）")
     lines.append("")
 
     verdict = {"blocked": "阻塞（投影层未就绪）", "pass": "通过", "fail": "不通过"}[status]
@@ -2406,7 +2406,7 @@ def default_fixtures() -> list[Path]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="evefit 六视角验收 runner")
+    parser = argparse.ArgumentParser(description="noobbaozi 六视角验收 runner")
     parser.add_argument("--eft", action="append", help="EFT 文本文件或目录（可多次）")
     parser.add_argument("--views-json", action="append",
                         help="外部提供的六视角 JSON（可多次，按样本名匹配）")

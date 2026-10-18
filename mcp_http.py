@@ -6,7 +6,7 @@
 stdio 传输按「一个客户端一个子进程」用，**跨不了机器边界**：它没有监听套接字，别的
 主机/容器根本连不上。要「跑在容器里被局域网访问」，先得有一个监听 TCP 的传输层 ——
 本模块就是那一层，只搬字节，**不碰业务**：每条消息最后还是交给
-`evefit.mcp_server.dispatch()`（同一个函数、同一套错误码、同一个信封），所以 stdio 与
+`noobbaozi.mcp_server.dispatch()`（同一个函数、同一套错误码、同一个信封），所以 stdio 与
 http 两种传输在协议层是**逐字节同构**的，差别只在「消息怎么过线」。
 
 零第三方依赖
@@ -68,7 +68,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
-from evefit import mcp_server as core
+from noobbaozi import mcp_server as core
 
 # =============================================================================
 # 一、常量（端点 / 限额 / 头名集中在这里）
@@ -84,7 +84,7 @@ MCP_SESSION_HEADER: str = "Mcp-Session-Id"
 """会话头：`initialize` 成功时在**响应头**返回，客户端后续请求带回来复用会话。"""
 
 TRANSPORT_NAME: str = "http"
-"""`/health` 里的 `transport` 字段（与 `evefit/cli.py` 的 `local` 不是一回事）。"""
+"""`/health` 里的 `transport` 字段（与 `noobbaozi/cli.py` 的 `local` 不是一回事）。"""
 
 MAX_BODY_BYTES: int = 1024 * 1024
 """单请求 body 上限（**1 MiB**）。超过 → `413`，且在 `json.loads` 之前就拦住。"""
@@ -251,7 +251,7 @@ def health_payload(store: SessionStore) -> dict:
     | 字段 | 值 |
     |---|---|
     | `ok` | 恒 `True`（能回这个就说明进程活着） |
-    | `server` | `evefit` |
+    | `server` | `noobbaozi` |
     | `version` | `mcp_server.SERVER_VERSION` |
     | `transport` | `http` |
     | `tools` | 工具条数（5） |
@@ -806,7 +806,7 @@ def run_http(
     warmup: bool = True,
     poll_interval: float = 0.25,
 ) -> int:
-    """起 HTTP 服务并阻塞（`python -m evefit.mcp_server --transport http`）。
+    """起 HTTP 服务并阻塞（`python -m noobbaozi.mcp_server --transport http`）。
 
     Returns:
         进程退出码：`0` = 正常停止；`1` = 端口 / 地址绑不上；`2` = 参数不合法。

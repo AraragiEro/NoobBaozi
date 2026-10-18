@@ -3,11 +3,11 @@
 
 本脚本回答三个问题，每个 stage 可单独跑：
 
-    python evefit/spike/pyfa_probe.py q1     # pyfa 的 eos 能否当库用（PyPI / 子包 / 数据依赖）
-    python evefit/spike/pyfa_probe.py q2     # pyfa 的数据模型里有没有「激活互斥」规则
-    python evefit/spike/pyfa_probe.py q3     # 数值对拍（需要 eos 能跑起来）
+    python noobbaozi/spike/pyfa_probe.py q1     # pyfa 的 eos 能否当库用（PyPI / 子包 / 数据依赖）
+    python noobbaozi/spike/pyfa_probe.py q2     # pyfa 的数据模型里有没有「激活互斥」规则
+    python noobbaozi/spike/pyfa_probe.py q3     # 数值对拍（需要 eos 能跑起来）
 
-    python evefit/spike/pyfa_probe.py all    # 三个都跑
+    python noobbaozi/spike/pyfa_probe.py all    # 三个都跑
 
 依赖与产物：
 
@@ -39,15 +39,15 @@ import traceback
 import urllib.request
 import zipfile
 
-HERE = pathlib.Path(__file__).resolve().parent          # evefit/spike
-EVEFIT = HERE.parent                                    # evefit
-ROOT = EVEFIT.parent                                    # 工作区根
+HERE = pathlib.Path(__file__).resolve().parent          # noobbaozi/spike
+NOOBBAOZI = HERE.parent                                    # noobbaozi
+ROOT = NOOBBAOZI.parent                                    # 工作区根
 SCRATCH = HERE / "pyfa_scratch"
 EOS_SRC = SCRATCH / "eos_src"
-SDE_ZIP = EVEFIT / "data" / "eve-online-static-data-3607705-jsonl.zip"
-FIXTURES = EVEFIT / "acceptance" / "fixtures"
+SDE_ZIP = NOOBBAOZI / "data" / "eve-online-static-data-3607705-jsonl.zip"
+FIXTURES = NOOBBAOZI / "acceptance" / "fixtures"
 
-UA = "evefit-spike-probe/0.1 (T-42 pyfa/eos reconnaissance; local research)"
+UA = "noobbaozi-spike-probe/0.1 (T-42 pyfa/eos reconnaissance; local research)"
 
 EOS_REPO = "pyfa-org/eos"
 PYFA_REPO = "pyfa-org/Pyfa"
@@ -343,7 +343,7 @@ def stage_q2() -> dict:
     _p("[5] 本引擎在同样的两个配装上怎么报（同一 SDE，13.6.0）")
     try:
         sys.path.insert(0, str(ROOT))
-        from evefit.engine import adapter  # noqa: PLC0415
+        from noobbaozi.engine import adapter  # noqa: PLC0415
 
         eng = adapter.Engine()
 
@@ -432,7 +432,7 @@ def _eos_fit_for_validate(fit: dict):
 def adapter_eft(eft: str) -> dict:
     """用本项目的适配层把 EFT 文本变成 `fit` dict（只读，不改产品代码）。"""
     sys.path.insert(0, str(ROOT))
-    from evefit.engine import adapter  # noqa: PLC0415
+    from noobbaozi.engine import adapter  # noqa: PLC0415
 
     return adapter.load_eft(eft)
 
@@ -964,7 +964,7 @@ def stage_q3(limit: int | None = None, only: list[str] | None = None) -> dict:
     """Q3：同一配装，两边各算一遍，逐指标比。"""
     _head("Q3 · 数值对拍（本引擎 13.6.0 vs pyfa/eos master）")
     sys.path.insert(0, str(ROOT))
-    from evefit.engine import adapter  # noqa: PLC0415
+    from noobbaozi.engine import adapter  # noqa: PLC0415
 
     eng = adapter.Engine()
     source, cache, sde = build_eos_source()

@@ -1,6 +1,6 @@
 {
  "spec_version": "v1.1",
- "source_doc": "evefit/docs/配装理解-字段规格-v1.md",
+ "source_doc": "noobbaozi/docs/配装理解-字段规格-v1.md",
  "note": "六视角 overview 字段的机器可读副本。runner 与验收计划共用此文件，避免两份口径漂移。",
  "revision_2026_10_18": {
   "by": "Lead 裁决（team-message-469e9b5c）",
@@ -8,7 +8,7 @@
   "change": [
    "provenance 改按「是否依赖假设」重新定义：measured=输入直接决定且不随技能/状态/模式/剖面变化；assumed=依赖上述假设之一；unknown=引擎未提供",
    "新增 confidence 列（A–E）承接原「可信度」维度",
-   "权威来源：provenance 以 evefit/project/provenance.py 的 tag(attr_id) 为准，本文件只作文档与兜底",
+   "权威来源：provenance 以 noobbaozi/project/provenance.py 的 tag(attr_id) 为准，本文件只作文档与兜底",
    "校验逻辑不得硬编码期望 provenance：T-08 正在用三轴敏感性重推该表，落地后 runner 自动跟随"
   ],
   "t23": "新增 resources.feasible / over_budget{cpu,powergrid}；slots.subsystem 与 empty_slots.subsystem 标为条件字段（仅带子系统槽的船出现，缺失不算字段缺失）"
@@ -17,13 +17,13 @@
   "measured": "输入直接决定，且不随技能档 / 模块状态 / 模式 / 伤害剖面变化",
   "assumed": "依赖技能档、模块状态、模式或伤害剖面之一",
   "unknown": "引擎未提供（如 -70 maxTargets 恒 0）",
-  "authority": "evefit/project/provenance.py 的 tag(attr_id)；本文件的 provenance 列仅为文档，runner 不据此断言"
+  "authority": "noobbaozi/project/provenance.py 的 tag(attr_id)；本文件的 provenance 列仅为文档，runner 不据此断言"
  },
  "confidence_legend": {
   "A": "口径已实测对拍：输入直接决定，或已与外部基线/不变式严格对上 —— 输出可直接当结论用",
   "C": "不可用：引擎不给值（如 -70 maxTargets 恒 0），看到 C 就不要拿它做结论",
   "E": "未建模：视角只给参数、不给结论（应用层命中率/爆炸半径），agent 需自行建模",
-  "note": "输出层只产生 A / C / E 三档（Lead 裁决 2026-10-18）：B（需换算）已被投影层 units.physical() 吃掉；D（需对拍/属推断）已收敛为 A（抗性 12/12 已对拍）。权威登记表 = evefit/project/confidence.py 的 CONFIDENCE；输出为**稀疏表**：只输出非 A 的叶子路径，缺省 = A，空表输出 {}。"
+  "note": "输出层只产生 A / C / E 三档（Lead 裁决 2026-10-18）：B（需换算）已被投影层 units.physical() 吃掉；D（需对拍/属推断）已收敛为 A（抗性 12/12 已对拍）。权威登记表 = noobbaozi/project/confidence.py 的 CONFIDENCE；输出为**稀疏表**：只输出非 A 的叶子路径，缺省 = A，空表输出 {}。"
  },
  "tier": "overview",
  "views": {
@@ -991,7 +991,7 @@
    "since": "T-27 裁决"
   },
   "value_present": {
-   "rule": "值存在时按 evefit/project/provenance.py 的 tag(attr_id) 比对"
+   "rule": "值存在时按 noobbaozi/project/provenance.py 的 tag(attr_id) 比对"
   }
  },
  "unknown_reasons": {

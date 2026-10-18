@@ -1,4 +1,4 @@
-# evefit · 配装理解工具
+# noobbaozi · 配装理解工具
 
 给 agent 用的 EVE Online 配装「读取 + 理解」工具套件。
 **产出结构化事实与诊断；判断与叙事交给调用方 agent。**
@@ -13,7 +13,7 @@
 | 输入 | EFT / DNA / killmail（原始 KB JSON） |
 | 输出 | 六视角事实 + 三态 provenance + 未知原因 + 诊断 flag |
 | 验收 | **36 条真实 KB × 43 字段 = 1548/1548**；产品缺陷 0（medium+） |
-| 测试 | `pytest -q evefit/tests` 全绿（含变异自检） |
+| 测试 | `pytest -q noobbaozi/tests` 全绿（含变异自检） |
 | 回归 | 快照 `enforced`，22 行 + 四模式 **0 DIFF** |
 
 ---
@@ -21,8 +21,8 @@
 ## 一条命令判断项目健康
 
 ```powershell
-$env:UV_CACHE_DIR = "$PWD\evefit\spike\uvcache"
-uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m evefit.tools.regress
+$env:UV_CACHE_DIR = "$PWD\noobbaozi\spike\uvcache"
+uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m noobbaozi.tools.regress
 ```
 
 | 门禁 | 内容 |
@@ -39,7 +39,7 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 ## 目录
 
 ```
-evefit/
+noobbaozi/
 ├── README.md                  本文件
 ├── PROGRESS.md                工作台账（状态 / 硬结论 / 欠账 / 踩坑）
 ├── contracts.py               契约：TypedDict + SPEC_VERSION

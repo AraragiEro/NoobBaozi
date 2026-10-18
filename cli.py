@@ -1,13 +1,13 @@
 """L5 传输形态之一：**CLI**（开发期与人工验证的基线，文档 §10.5）。
 
 ```
-python -m evefit.cli parse    --fit-file x.eft [--json]
-python -m evefit.cli killmail --fit-file killmail.json [--json]
-python -m evefit.cli index    --fit-file x.eft [--killmail k.json] [--eft "…"] [--skill-tier all5] [--json]
-python -m evefit.cli view     --fit-file x.eft --view mobility
-python -m evefit.cli get      --fit-file x.eft --path mobility.speed_mps
-python -m evefit.cli detail   --fit-file x.eft [--view stability]
-python -m evefit.cli search   --character NAME --ship SHIP --past-seconds 604800 [--json]
+python -m noobbaozi.cli parse    --fit-file x.eft [--json]
+python -m noobbaozi.cli killmail --fit-file killmail.json [--json]
+python -m noobbaozi.cli index    --fit-file x.eft [--killmail k.json] [--eft "…"] [--skill-tier all5] [--json]
+python -m noobbaozi.cli view     --fit-file x.eft --view mobility
+python -m noobbaozi.cli get      --fit-file x.eft --path mobility.speed_mps
+python -m noobbaozi.cli detail   --fit-file x.eft [--view stability]
+python -m noobbaozi.cli search   --character NAME --ship SHIP --past-seconds 604800 [--json]
 ```
 
 `killmail` 是唯一**只接受战报**的子命令（`api.fit_killmail`）：给 EFT / DNA 时它按契约
@@ -22,7 +22,7 @@ python -m evefit.cli search   --character NAME --ship SHIP --past-seconds 604800
 
 三条纪律（每一条都对应 §10.7 的红线）：
 
-1. **本文件不实现任何逻辑**：每个子命令都是一次 `evefit.api.<入口>()` 调用，`--json`
+1. **本文件不实现任何逻辑**：每个子命令都是一次 `noobbaozi.api.<入口>()` 调用，`--json`
    就是 `json.dumps(api 返回值)` 原样输出。CLI 与 MCP **共用同一个 Python 函数层**，
    不许各自实现一遍（§10.5）。
 2. **人话输出不做换算、不做判词**：数值一律 `json.dumps` 原样打印（最短可逆表示），
@@ -53,7 +53,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from evefit import api
+from noobbaozi import api
 
 STDIN_PATH: str = "-"
 """`--fit-file -` 表示从标准输入读（文档 §10.5 的人工验证基线会用到）。"""
@@ -565,8 +565,8 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     """命令行定义（配装类子命令 + `search`）。"""
     parser = argparse.ArgumentParser(
-        prog="python -m evefit.cli",
-        description="evefit L5 接口层的 CLI 基线（与 MCP 共用 evefit/api.py 的逻辑）",
+        prog="python -m noobbaozi.cli",
+        description="noobbaozi L5 接口层的 CLI 基线（与 MCP 共用 noobbaozi/api.py 的逻辑）",
     )
     subparsers = parser.add_subparsers(dest="command", required=True, metavar="<命令>")
 
@@ -640,7 +640,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _dispatch(args: argparse.Namespace, fit: object) -> dict:
-    """子命令 → 一次 `evefit.api` 调用（**本文件不做任何逻辑**）。"""
+    """子命令 → 一次 `noobbaozi.api` 调用（**本文件不做任何逻辑**）。"""
     params = {
         "skill_tier": args.skill_tier,
         "damage_profile": args.damage_profile,
@@ -712,7 +712,7 @@ def main(argv: list[str] | None = None) -> int:
 
     Returns:
         退出码。**不抛异常**：`argparse` 的 `SystemExit` 也在这里收成退出码，
-        这样 `python -m evefit.cli` 与进程内调用行为一致。
+        这样 `python -m noobbaozi.cli` 与进程内调用行为一致。
     """
     _configure_streams()
     parser = build_parser()

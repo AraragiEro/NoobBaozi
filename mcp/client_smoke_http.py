@@ -1,8 +1,8 @@
 """**真实 HTTP MCP 客户端**冒烟：走 `POST /mcp` 的完整流程，不 mock 任何东西。
 
 ```
-python -m evefit.mcp.client_smoke_http                        # 连 http://127.0.0.1:8080
-python -m evefit.mcp.client_smoke_http --base-url http://127.0.0.1:18080
+python -m noobbaozi.mcp.client_smoke_http                        # 连 http://127.0.0.1:8080
+python -m noobbaozi.mcp.client_smoke_http --base-url http://127.0.0.1:18080
 ```
 
 为什么客户端用标准库
@@ -39,7 +39,7 @@ import sys
 import time
 from urllib.parse import urlsplit
 
-from evefit.mcp import client_smoke
+from noobbaozi.mcp import client_smoke
 
 DEFAULT_BASE_URL: str = "http://127.0.0.1:8080"
 """默认连本机回环的 8080（服务端按容器约定绑 `0.0.0.0:8080` 时同样连得上）。"""
@@ -51,7 +51,7 @@ MCP_PATH: str = "/mcp"
 HEALTH_PATH: str = "/health"
 SESSION_HEADER: str = "Mcp-Session-Id"
 
-CLIENT_NAME: str = "evefit-client-smoke-http"
+CLIENT_NAME: str = "noobbaozi-client-smoke-http"
 CLIENT_VERSION: str = "1.0.0"
 
 JSON_ACCEPT: str = "application/json"
@@ -291,7 +291,7 @@ def expected_tool_names() -> tuple[str, ...]:
     调用方会退化成「清单非空且包含用例里的工具」这种较弱但仍有意义的断言。
     """
     try:
-        from evefit.mcp_server import TOOL_NAMES
+        from noobbaozi.mcp_server import TOOL_NAMES
     except Exception:  # noqa: BLE001 - 客户端不该因为「本仓库代码导入失败」而崩
         return ()
     return tuple(TOOL_NAMES)
@@ -310,7 +310,7 @@ def check_health(payload: dict, *, expected_tools: int | None = None) -> None:
     _require(not missing, f"/health 缺字段 {missing}（实际 {sorted(payload)}）")
     _require(payload["ok"] is True, f"/health ok 应为 true，实际 {payload['ok']!r}")
     _require(
-        payload["server"] == "evefit", f"/health server 应为 'evefit'，实际 {payload['server']!r}"
+        payload["server"] == "noobbaozi", f"/health server 应为 'noobbaozi'，实际 {payload['server']!r}"
     )
     _require(
         isinstance(payload["version"], str) and payload["version"],
@@ -440,7 +440,7 @@ def run(
         )
         _require(result.get("instructions"), "initialize 应带 instructions")
         server = result.get("serverInfo") or {}
-        _require(server.get("name") == "evefit", f"serverInfo.name 应为 evefit，实际 {server.get('name')!r}")
+        _require(server.get("name") == "noobbaozi", f"serverInfo.name 应为 noobbaozi，实际 {server.get('name')!r}")
     except Exception as exc:  # noqa: BLE001 - 握手失败就没有后续步骤
         if echo:
             print(f"[client_smoke_http] 握手失败：{type(exc).__name__}: {exc}")
@@ -584,7 +584,7 @@ def run(
 # =============================================================================
 
 _USAGE: str = (
-    "用法：python -m evefit.mcp.client_smoke_http [--base-url URL] [--timeout 秒]\n"
+    "用法：python -m noobbaozi.mcp.client_smoke_http [--base-url URL] [--timeout 秒]\n"
     f"  --base-url  默认 {DEFAULT_BASE_URL}（服务端绑 0.0.0.0:8080 时用 127.0.0.1 连）\n"
     f"  --timeout   单请求超时，默认 {DEFAULT_TIMEOUT_S:.0f} 秒\n"
     "  退出码：0 = PASS，1 = FAIL，2 = 参数错误"

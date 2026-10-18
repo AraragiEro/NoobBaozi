@@ -28,7 +28,7 @@ C. **常量表自洽（硬失败）**：`ATTR_*` 常量 ↔ `ATTRIBUTES` 元数�
 否则它可能一直在空转（本项目 `FIELD_SOURCES` 覆盖率测试就是这么假绿过一轮的，
 见 `test_render.py` 的实例级覆盖一节）。
 
-写入范围：本文件 + `evefit/tools/check_attr_coverage.py`。`project/**` 的问题只登记、
+写入范围：本文件 + `noobbaozi/tools/check_attr_coverage.py`。`project/**` 的问题只登记、
 不在这里修（红线：本任务禁改视角与渲染层）。
 """
 
@@ -38,16 +38,16 @@ import json
 
 import pytest
 
-from evefit.config import attributes
-from evefit.project.views.loader import VIEW_MODULES
-from evefit.tools import check_attr_coverage as CHK
+from noobbaozi.config import attributes
+from noobbaozi.project.views.loader import VIEW_MODULES
+from noobbaozi.tools import check_attr_coverage as CHK
 
 # =============================================================================
 # 白名单 / 债务台账（每条都必须写理由）
 # =============================================================================
 
 ALLOWED_BARE_IDS: dict[str, str] = {}
-"""`evefit/project/views/*.py` + `render.py` 里**允许**的裸属性 ID（键 = `suspect_key`）。
+"""`noobbaozi/project/views/*.py` + `render.py` 里**允许**的裸属性 ID（键 = `suspect_key`）。
 
 键形态：`<相对仓库根的路径>::<常量名或角色>::<数值>`（不含行号——行号会随无关改动漂移）。
 **T-32 起为空表**：原先登记的三条债务（`render.py` 的 `MODE_EHP_ATTR = -43` /
@@ -156,12 +156,12 @@ def test_b_bare_ids_in_views_and_render_are_all_whitelisted() -> None:
 
     # 非空转前置：真扫了 10 个视角文件 + render.py
     assert report["file_count"] >= 10, f"只扫到 {report['file_count']} 个文件：{report['files']}"
-    assert "evefit/project/render.py" in report["files"]
+    assert "noobbaozi/project/render.py" in report["files"]
 
     unlisted = sorted(_keys(report["suspects"]) - set(ALLOWED_BARE_IDS))
     assert unlisted == [], (
         "出现白名单之外的裸属性 ID（红线 N12：属性 ID 必须用常量名引用）。\n"
-        "要么改成 `from evefit.config.attributes import ATTR_*`，要么在 ALLOWED_BARE_IDS 里"
+        "要么改成 `from noobbaozi.config.attributes import ATTR_*`，要么在 ALLOWED_BARE_IDS 里"
         "写清为什么它不能改：\n" + "\n".join(f"  {key}" for key in unlisted)
     )
 
@@ -331,7 +331,7 @@ def test_c_detects_a_duplicate_constant_value(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_tool_runs_clean_and_emits_json(capsys: pytest.CaptureFixture[str]) -> None:
-    """`python -m evefit.tools.check_attr_coverage` 的两种输出都可读、可解析、退出码 0。"""
+    """`python -m noobbaozi.tools.check_attr_coverage` 的两种输出都可读、可解析、退出码 0。"""
     assert CHK.main([]) == 0
     text = capsys.readouterr().out
     assert "硬门结论（A + C）: 通过" in text

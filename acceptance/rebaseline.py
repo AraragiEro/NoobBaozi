@@ -15,11 +15,11 @@
 技能数 < `EXPECTED_MIN_SKILLS` 时直接罢工，除非显式 `--force`。
 
 用法：
-    $env:UV_CACHE_DIR = (Join-Path $PWD "evefit/spike/uvcache")
+    $env:UV_CACHE_DIR = (Join-Path $PWD "noobbaozi/spike/uvcache")
     $PY = 'uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python'
 
-    Invoke-Expression "$PY evefit/acceptance/rebaseline.py"                    # 自检后罢工/出表
-    Invoke-Expression "$PY evefit/acceptance/rebaseline.py --rewrite-fixtures" # 同时重写 fixtures
+    Invoke-Expression "$PY noobbaozi/acceptance/rebaseline.py"                    # 自检后罢工/出表
+    Invoke-Expression "$PY noobbaozi/acceptance/rebaseline.py --rewrite-fixtures" # 同时重写 fixtures
 """
 from __future__ import annotations
 
@@ -110,11 +110,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--label", default="T-12")
     args = parser.parse_args(argv)
 
-    from evefit.config import paths as paths_mod
-    from evefit.engine import adapter
-    from evefit.engine.assumptions import default_assumptions
-    from evefit.engine.normalize import normalize_fit
-    from evefit.sde.index import Index
+    from noobbaozi.config import paths as paths_mod
+    from noobbaozi.engine import adapter
+    from noobbaozi.engine.assumptions import default_assumptions
+    from noobbaozi.engine.normalize import normalize_fit
+    from noobbaozi.sde.index import Index
 
     engine = adapter.Engine()
     meta = engine.meta()

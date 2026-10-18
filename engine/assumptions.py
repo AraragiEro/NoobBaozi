@@ -35,11 +35,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from evefit import contracts
+from noobbaozi import contracts
 
 if TYPE_CHECKING:  # 只为类型标注，运行时不产生 import 依赖
-    from evefit.engine.adapter import Engine
-    from evefit.sde.index import Index
+    from noobbaozi.engine.adapter import Engine
+    from noobbaozi.sde.index import Index
 
 DEFAULT_SKILL_LEVEL = 4
 """全员技能 4 级（玩家最经济的挂法）。"""

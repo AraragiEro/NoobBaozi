@@ -4,9 +4,9 @@
 这不是产品代码，只在验收时用。
 
 用法：
-    $env:UV_CACHE_DIR = (Join-Path $PWD "evefit/spike/uvcache")
+    $env:UV_CACHE_DIR = (Join-Path $PWD "noobbaozi/spike/uvcache")
     uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" `
-      python evefit/acceptance/dump_real_views.py
+      python noobbaozi/acceptance/dump_real_views.py
 """
 from __future__ import annotations
 
@@ -20,13 +20,13 @@ sys.path.insert(0, str(ROOT.parent))
 
 
 def main() -> int:
-    from evefit.config import paths as paths_mod
-    from evefit.engine import adapter
-    from evefit.engine.assumptions import default_assumptions
-    from evefit.engine.normalize import normalize_fit
-    from evefit.project.render import render_overview
-    from evefit.project.views import base as views_base
-    from evefit.sde.index import Index
+    from noobbaozi.config import paths as paths_mod
+    from noobbaozi.engine import adapter
+    from noobbaozi.engine.assumptions import default_assumptions
+    from noobbaozi.engine.normalize import normalize_fit
+    from noobbaozi.project.render import render_overview
+    from noobbaozi.project.views import base as views_base
+    from noobbaozi.sde.index import Index
 
     engine = adapter.Engine()
     index = Index.open(paths_mod.db_path())

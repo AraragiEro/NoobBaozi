@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "note": "可疑点规则开关与文案。判定逻辑在 evefit/project/diagnostics.py，按 id 索引；本文件只允许出现 id / view / enabled / message，不得出现任何阈值（主人明确要求不设绝对阈值）。message 里的 {xxx} 由 evidence 同名字段填充。",
+  "note": "可疑点规则开关与文案。判定逻辑在 noobbaozi/project/diagnostics.py，按 id 索引；本文件只允许出现 id / view / enabled / message，不得出现任何阈值（主人明确要求不设绝对阈值）。message 里的 {xxx} 由 evidence 同名字段填充。",
   "rules": [
     {
       "id": "resource_overflow",

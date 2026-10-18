@@ -2,7 +2,7 @@
 
 入口只有 `build_index()`：
 
-    from evefit.sde.ingest import build_index
+    from noobbaozi.sde.ingest import build_index
     build_index()                 # 取最新 build；已有同 build 的库则直接复用
     build_index(build=3607705)    # 指定 build
     build_index(force=True)       # 强制重建（zip 走本地缓存，不重新下载）
@@ -33,8 +33,8 @@ JSONL 实际结构（**先 dump 前两行确认过，勿凭猜**）：
 - 字段**部分记录缺省**，缺省处理：`metaLevel`→0、`volume`→0.0、`published`→false、
   `display_name`→回退 `name`。
 
-产物：`evefit/data/evefit-<build>.sqlite3`（gitignore；索引库是构建产物，见设计文档 §7.1）。
-下载的 zip 保留在 `evefit/data/` 作缓存，`force=True` 重建时不必重新下载 95 MiB。
+产物：`noobbaozi/data/noobbaozi-<build>.sqlite3`（gitignore；索引库是构建产物，见设计文档 §7.1）。
+下载的 zip 保留在 `noobbaozi/data/` 作缓存，`force=True` 重建时不必重新下载 95 MiB。
 
 依赖约束（开发规范 §2）：只依赖标准库（`sqlite3` / `urllib` / `zipfile` / `json`）。
 """
@@ -53,8 +53,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Final
 
-from evefit.config.paths import SDE_SCHEMA_PATH, db_path, zip_path
-from evefit.sde.modes import write_modes
+from noobbaozi.config.paths import SDE_SCHEMA_PATH, db_path, zip_path
+from noobbaozi.sde.modes import write_modes
 
 #: 取最新 build 号的元数据文件（JSON object，字段 buildNumber）。
 LATEST_BUILD_URL: Final[str] = (
@@ -80,7 +80,7 @@ REQUIRED_MEMBERS: Final[tuple[str, ...]] = (
 BUILD_INFO_MEMBER: Final[str] = "_sde.jsonl"
 
 _USER_AGENT: Final[str] = (
-    "evefit/0.1 (SDE index builder; python-urllib; +local research tool)"
+    "noobbaozi/0.1 (SDE index builder; python-urllib; +local research tool)"
 )
 _HEADERS: Final[dict[str, str]] = {
     "User-Agent": _USER_AGENT,
@@ -404,7 +404,7 @@ def _populate(
         "schema_version": "1",
         "source_url": source_url,
         "source_zip": archive.name,
-        "builder": "evefit.sde.ingest",
+        "builder": "noobbaozi.sde.ingest",
     }
     conn.executemany(
         "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", sorted(meta.items())
@@ -515,8 +515,8 @@ def inspect(archive: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="python -m evefit.sde.ingest",
-        description="构建 evefit SDE 索引库（下载 → 解析 → SQLite）",
+        prog="python -m noobbaozi.sde.ingest",
+        description="构建 noobbaozi SDE 索引库（下载 → 解析 → SQLite）",
     )
     parser.add_argument("--build", type=int, default=None, help="目标 SDE build 号，默认取最新")
     parser.add_argument("--force", action="store_true", help="同 build 也重建（zip 用缓存）")

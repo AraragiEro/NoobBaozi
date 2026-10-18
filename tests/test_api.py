@@ -1,4 +1,4 @@
-"""L5 接口层（`evefit/api.py`）的契约测试 —— 只测**契约**，不重算任何数值。
+"""L5 接口层（`noobbaozi/api.py`）的契约测试 —— 只测**契约**，不重算任何数值。
 
 钉住的六件事（对应任务书与文档 §10）：
 
@@ -26,12 +26,12 @@ from pathlib import Path
 
 import pytest
 
-from evefit import api
+from noobbaozi import api
 
-EVEFIT_ROOT = Path(__file__).resolve().parents[1]
-FIXTURES_DIR = EVEFIT_ROOT / "acceptance" / "fixtures"
+NOOBBAOZI_ROOT = Path(__file__).resolve().parents[1]
+FIXTURES_DIR = NOOBBAOZI_ROOT / "acceptance" / "fixtures"
 EFT_PATH = FIXTURES_DIR / "f1-hecate-killmail.eft"
-KILL_PATH = EVEFIT_ROOT / "spike" / "kill.json"
+KILL_PATH = NOOBBAOZI_ROOT / "spike" / "kill.json"
 EMPTY_FIT_PATH = FIXTURES_DIR / "f58-empty-fit.eft"
 """0 模块的样本：`stability.cap_depletes_in_s` 在它上面**合法地**是 `None`。"""
 
@@ -575,7 +575,7 @@ def test_json_envelope_is_serialisable(eft_text: str) -> None:
 # 星系名 / 安全等级在测试里**一律打桩**（`_offline_system`），值取自真实 ESI：
 # 30002537 = Amamake，security_status = 0.43876123428344727，security_class = "E"。
 
-KILLMAIL_FIXTURES = EVEFIT_ROOT / "tests" / "fixtures" / "killmail"
+KILLMAIL_FIXTURES = NOOBBAOZI_ROOT / "tests" / "fixtures" / "killmail"
 KILLMAIL_ZKB_PATH = KILLMAIL_FIXTURES / "139239127-zkb.json"
 KILLMAIL_ESI_PATH = KILLMAIL_FIXTURES / "139239127-esi.json"
 KILLMAIL_MISMATCH_PATH = KILLMAIL_FIXTURES / "139239127-esi-mismatch.json"
@@ -1034,7 +1034,7 @@ def test_fit_killmail_cache_is_keyed_by_entry_name(monkeypatch: pytest.MonkeyPat
 #
 # 三类断言缺一不可：名字**是非空真名**、请求**只发一次**、缓存与缺项都**不编**。
 
-NAMES_FIXTURE = EVEFIT_ROOT / "tests" / "fixtures" / "zkb" / "esi-universe-names.json"
+NAMES_FIXTURE = NOOBBAOZI_ROOT / "tests" / "fixtures" / "zkb" / "esi-universe-names.json"
 """真实 `POST /universe/names/` 响应（裁剪版：只留这两份样本要的 id，字段一个没造）。"""
 
 VICTIM_CHARACTER = 2123771141
@@ -1239,7 +1239,7 @@ def test_universe_names_batches_respect_the_min_interval(
 # 样本是**真实响应**（见 `tests/fixtures/zkb/README.md`）：170 条的列表裁成 12 条、
 # 9 条的裁成 6 条，字段一个没造。所有请求都走注入的 `requester`，测试**不联网**。
 
-ZKB_FIXTURES = EVEFIT_ROOT / "tests" / "fixtures" / "zkb"
+ZKB_FIXTURES = NOOBBAOZI_ROOT / "tests" / "fixtures" / "zkb"
 LOSSES_FIXTURE = ZKB_FIXTURES / "losses-shipTypeID-22444-pastSeconds-604800.json"
 IDS_FIXTURE = ZKB_FIXTURES / "esi-ids-sleipnir-hecate.json"
 

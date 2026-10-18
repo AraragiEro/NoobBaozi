@@ -165,15 +165,15 @@ import copy
 import json
 from typing import AbstractSet, Callable, Mapping
 
-from evefit.config import attributes as _a
-from evefit.engine import scenarios
-from evefit.project import confidence as _confidence
-from evefit.project import diagnostics as _diagnostics
-from evefit.project import provenance as _provenance
-from evefit.project import reasons as _reasons
-from evefit.project.views import ViewContext, available_views, build_view
-from evefit.project.views.base import BASE, ship_attributes
-from evefit.project.views.loader import VIEW_MODULES, load_views
+from noobbaozi.config import attributes as _a
+from noobbaozi.engine import scenarios
+from noobbaozi.project import confidence as _confidence
+from noobbaozi.project import diagnostics as _diagnostics
+from noobbaozi.project import provenance as _provenance
+from noobbaozi.project import reasons as _reasons
+from noobbaozi.project.views import ViewContext, available_views, build_view
+from noobbaozi.project.views.base import BASE, ship_attributes
+from noobbaozi.project.views.loader import VIEW_MODULES, load_views
 
 BUDGET_CHARS: int = 19000
 """overview 的字符预算（`len(json.dumps(views)) + len(json.dumps(modes))`）。
@@ -1121,8 +1121,8 @@ def render_detail(
 def render_index(ctx: ViewContext) -> dict:
     """L0 摘要（实测 1,884–1,965 字符）：六视角各 3–5 个数 + 精简 flag + provenance 计数。
 
-    契约与字段清单见 `evefit/docs/输出分层与工具集-v1.md` §3，实现见
-    `evefit.project.summary.render_index`。**不含** `evidence` / 逐叶子三张平行表 /
+    契约与字段清单见 `noobbaozi/docs/输出分层与工具集-v1.md` §3，实现见
+    `noobbaozi.project.summary.render_index`。**不含** `evidence` / 逐叶子三张平行表 /
     逐模块列表 / 512 条技能明细；`meta` 压缩成 `{sde_build, engine_version,
     spec_version, skill_tier, module_states, damage_profile, mode}`（`skill_tier` 只给
     `{name, count, hash}`）。模式对比（`modes`）不在 L0，走 `render_overview()["modes"]`。
@@ -1133,7 +1133,7 @@ def render_index(ctx: ViewContext) -> dict:
     Returns:
         `{"ship", "meta", "<六视角>", "flags", "provenance_counts", "budget"}`。
     """
-    from evefit.project.summary import render_index as _impl
+    from noobbaozi.project.summary import render_index as _impl
 
     return _impl(ctx)
 
@@ -1143,12 +1143,12 @@ def render_view(ctx: ViewContext, view_name: str) -> dict:
 
     **只构建被请求的那一个视角**，不重算六视角再丢弃；返回值与
     `render_overview(ctx)["views"][view_name]` 逐字节相同（overview 未降级时）。
-    实现见 `evefit.project.summary.render_view`。
+    实现见 `noobbaozi.project.summary.render_view`。
 
     Raises:
         ValueError: 视角名未注册（消息里列出可用视角）。
     """
-    from evefit.project.summary import render_view as _impl
+    from noobbaozi.project.summary import render_view as _impl
 
     return _impl(ctx, view_name)
 
@@ -1159,9 +1159,9 @@ def get_path(ctx: ViewContext, path: str) -> dict:
     路径表达式在 L0/L1 里一致（`mobility.speed_mps` / `firepower.weapons[].name` /
     `constraints.tier_violations[0].kind`）；先按 L0 语义、再落回 L1；
     **路径不存在返回 `value=None` + `hint`**（不抛异常）。实现见
-    `evefit.project.summary.get_path`。
+    `noobbaozi.project.summary.get_path`。
     """
-    from evefit.project.summary import get_path as _impl
+    from noobbaozi.project.summary import get_path as _impl
 
     return _impl(ctx, path)
 

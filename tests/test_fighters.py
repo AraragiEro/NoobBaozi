@@ -33,7 +33,7 @@
 - 唯一的数值区间 `100 < -58 < 10000` 是**量级护栏**（防「逐机值当合计」「毫秒当秒」
   「×1000 缩放写错」这类单位级错误），**不是精确值**，不要据此调参。
 
-依赖：只读 `evefit.sde.index` / `evefit.config.paths` / `evefit.engine.*`；无网络、无随机（红线 N1）。
+依赖：只读 `noobbaozi.sde.index` / `noobbaozi.config.paths` / `noobbaozi.engine.*`；无网络、无随机（红线 N1）。
 
 技能档：T-12 起 `derive_skill_tier` 要传索引（全 4 档）。实测新增的那批技能**不影响**
 `-55/-56/-58`（战斗机技能原本就已被 requiredSkill 补到 4），所以本文件的语义断言与
@@ -48,11 +48,11 @@ from pathlib import Path
 
 import pytest
 
-from evefit.config.attributes import ATTR_DAMAGE_DPS, ATTR_DRONE_DPS, ATTR_FIGHTER_DPS
-from evefit.config.paths import db_path
-from evefit.engine.adapter import Engine
-from evefit.engine.assumptions import derive_skill_tier
-from evefit.sde.index import Index
+from noobbaozi.config.attributes import ATTR_DAMAGE_DPS, ATTR_DRONE_DPS, ATTR_FIGHTER_DPS
+from noobbaozi.config.paths import db_path
+from noobbaozi.engine.adapter import Engine
+from noobbaozi.engine.assumptions import derive_skill_tier
+from noobbaozi.sde.index import Index
 
 # ---- 派生属性 ID（引擎 pass 4 输出）-----------------------------------------
 # `-58` 已在 `config/attributes.py` 登记为 `ATTR_FIGHTER_DPS`，故直接 import。

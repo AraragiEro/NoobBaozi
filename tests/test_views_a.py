@@ -1,6 +1,6 @@
 """T2/T3 测试：六视角的前三个 —— 火力 / 生存 / 机动（`views/{firepower,survivability,mobility}.py`）。
 
-样本：`evefit/spike/kill.json`（killmail 139246907，Hecate，17 个已装模块 + 5 门
+样本：`noobbaozi/spike/kill.json`（killmail 139246907，Hecate，17 个已装模块 + 5 门
 Light Neutron Blaster II 装 Void S），技能档走 `engine.assumptions.derive_skill_tier`
 并传入 SDE 索引（**T-12 技能档修正后重标**：全部已发布技能 4 级 + 补最低要求 = 512 个）。
 
@@ -34,14 +34,14 @@ from pathlib import Path
 import esf_dogma_engine as dogma
 import pytest
 
-from evefit.config import attributes as A
-from evefit.config.paths import db_path
-from evefit.engine.adapter import Engine
-from evefit.engine.assumptions import default_assumptions, derive_skill_tier
-from evefit.project import diagnostics as D
-from evefit.project import provenance as P
-from evefit.project import render as R
-from evefit.project.views import (
+from noobbaozi.config import attributes as A
+from noobbaozi.config.paths import db_path
+from noobbaozi.engine.adapter import Engine
+from noobbaozi.engine.assumptions import default_assumptions, derive_skill_tier
+from noobbaozi.project import diagnostics as D
+from noobbaozi.project import provenance as P
+from noobbaozi.project import render as R
+from noobbaozi.project.views import (
     available_views,
     build_view,
     firepower,
@@ -50,8 +50,8 @@ from evefit.project.views import (
     stability,  # noqa: F401  （导入即注册：D5 的跨视角断言要读 stability）
     survivability,
 )
-from evefit.project.views.base import BASE, OVERLOAD, ViewContext, ship_attributes
-from evefit.sde.index import Index
+from noobbaozi.project.views.base import BASE, OVERLOAD, ViewContext, ship_attributes
+from noobbaozi.sde.index import Index
 
 EVE_ROOT = Path(__file__).resolve().parents[1]
 KILL_PATH = EVE_ROOT / "spike" / "kill.json"
@@ -123,7 +123,7 @@ def index():
     try:
         path = db_path()
     except FileNotFoundError:  # 索引库是构建产物，没建就跳过投影层集成测试
-        pytest.skip("索引库未构建：先跑 evefit.sde.ingest.build_index()")
+        pytest.skip("索引库未构建：先跑 noobbaozi.sde.ingest.build_index()")
     opened = Index.open(path)
     yield opened
     opened.close()

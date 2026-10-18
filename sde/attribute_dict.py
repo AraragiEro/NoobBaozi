@@ -7,7 +7,7 @@
 
 硬约束（开发规范 §2 / §8）：
 - **纯函数**：无 IO、无网络、无随机、无全局可变状态，可在任意进程直接调用；
-- 只依赖 `evefit/config/attributes.py` 这一张纯常量表，**不 import 引擎、不读 SDE**；
+- 只依赖 `noobbaozi/config/attributes.py` 这一张纯常量表，**不 import 引擎、不读 SDE**；
 - 缩放只允许出现在这里与投影层入口（§4.1：业务代码内部一律物理单位）；
 - 未知属性 ID **不抛异常**（`name_of` 回 `attr_<id>`），因为引擎会返回大量
   未登记的派生属性，抛异常等于让整个视角失败。
@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import math
 
-from evefit.config import attributes as _attrs
+from noobbaozi.config import attributes as _attrs
 
 # 缩放系数的比较容差。系数只有 0.001 / 1.0 / 1000.0 三档，取相对误差 1e-9
 # 已远离任何浮点抖动（红线 N11 要求用 isclose 而非 ==）。

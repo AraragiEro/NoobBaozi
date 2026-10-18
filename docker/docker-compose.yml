@@ -1,41 +1,41 @@
-# evefit MCP 服务（HTTP 传输）· docker compose
+# noobbaozi MCP 服务（HTTP 传输）· docker compose
 # =============================================================================
 # 用法（在任意目录执行都行，-f 给的是本文件路径）：
-#   docker compose -f evefit/docker/docker-compose.yml up -d --build
-#   docker compose -f evefit/docker/docker-compose.yml logs -f
-#   docker compose -f evefit/docker/docker-compose.yml down
+#   docker compose -f noobbaozi/docker/docker-compose.yml up -d --build
+#   docker compose -f noobbaozi/docker/docker-compose.yml logs -f
+#   docker compose -f noobbaozi/docker/docker-compose.yml down
 #
-# context: .. → 构建上下文是 evefit/（Dockerfile 里 COPY 的路径都相对 evefit/）
-# volumes ../data → 相对**本文件所在目录**，即 evefit/data；不要改成宿主机绝对路径。
+# context: .. → 构建上下文是 noobbaozi/（Dockerfile 里 COPY 的路径都相对 noobbaozi/）
+# volumes ../data → 相对**本文件所在目录**，即 noobbaozi/data；不要改成宿主机绝对路径。
 # =============================================================================
 
-name: evefit
+name: noobbaozi
 
 services:
-  evefit-mcp:
+  noobbaozi-mcp:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: evefit-mcp:1.0.0
-    container_name: evefit-mcp
+    image: noobbaozi-mcp:1.0.0
+    container_name: noobbaozi-mcp
 
     # 局域网访问：宿主机 8080 → 容器 8080。改成 "127.0.0.1:8080:8080" 就只给本机用。
     ports: ["8080:8080"]
 
     volumes:
       # 读写挂载（不是 :ro）：data/ 里要能写 sqlite —— 首次建库、以及 SDE 升 build 新库都要写。
-      # 挂载会**覆盖**镜像里那个空的 /app/evefit/data 占位目录。
-      - ../data:/app/evefit/data
+      # 挂载会**覆盖**镜像里那个空的 /app/noobbaozi/data 占位目录。
+      - ../data:/app/noobbaozi/data
 
     environment:
-      EVEFIT_HOST: "0.0.0.0"        # 监听所有网卡，容器外才连得上
-      EVEFIT_PORT: "8080"
+      NOOBBAOZI_HOST: "0.0.0.0"        # 监听所有网卡，容器外才连得上
+      NOOBBAOZI_PORT: "8080"
       PYTHONIOENCODING: "utf-8"     # 中文日志 / stderr 不乱码
       PYTHONUNBUFFERED: "1"         # docker logs 立刻看得见，不攒缓冲区
       # 数据卷里既没有 sqlite 也没有 zip 时才需要（首次会拉 ~95 MiB 官方 SDE）：
-      # EVEFIT_SDE_FETCH: "1"
+      # NOOBBAOZI_SDE_FETCH: "1"
       # 只打印将要执行的命令、不启动服务（排查 entrypoint 分支用）：
-      # EVEFIT_DRY_RUN: "1"
+      # NOOBBAOZI_DRY_RUN: "1"
 
     # 与 Dockerfile 里的 HEALTHCHECK 一致（这里显式写一份，方便单独调阈值）。
     # 不依赖 curl：slim 镜像里没有 curl。
@@ -46,7 +46,7 @@ services:
         - -c
         - >-
           import json,os,sys,urllib.request;
-          port=os.environ.get('EVEFIT_PORT','8080');
+          port=os.environ.get('NOOBBAOZI_PORT','8080');
           data=json.load(urllib.request.urlopen('http://127.0.0.1:'+port+'/health', timeout=4));
           sys.exit(0 if data.get('ok') is True else 1)
       interval: 30s

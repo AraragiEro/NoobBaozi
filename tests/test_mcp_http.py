@@ -1,4 +1,4 @@
-"""`evefit/mcp_http.py` 的传输契约测试（T-47：MCP over Streamable HTTP）。
+"""`noobbaozi/mcp_http.py` 的传输契约测试（T-47：MCP over Streamable HTTP）。
 
 钉住八件事：
 
@@ -38,12 +38,12 @@ from pathlib import Path
 
 import pytest
 
-from evefit import api, mcp_http, mcp_server
-from evefit.mcp import client_smoke, client_smoke_http
+from noobbaozi import api, mcp_http, mcp_server
+from noobbaozi.mcp import client_smoke, client_smoke_http
 
-EVEFIT_ROOT = Path(__file__).resolve().parents[1]
-WORKSPACE_ROOT = EVEFIT_ROOT.parent
-EFT_PATH = EVEFIT_ROOT / "acceptance" / "fixtures" / "f1-hecate-killmail.eft"
+NOOBBAOZI_ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = NOOBBAOZI_ROOT.parent
+EFT_PATH = NOOBBAOZI_ROOT / "acceptance" / "fixtures" / "f1-hecate-killmail.eft"
 
 TOOL_NAMES = mcp_server.TOOL_NAMES
 """工具清单**从 `mcp_server.TOOL_NAMES` 派生**（本文件不写任何工具名 / 条数字面量）。
@@ -691,7 +691,7 @@ def test_http_transport_cli_serves_health_via_loopback() -> None:
         [
             sys.executable,
             "-m",
-            "evefit.mcp_server",
+            "noobbaozi.mcp_server",
             "--transport",
             "http",
             "--host",
@@ -730,14 +730,14 @@ def test_http_transport_cli_serves_health_via_loopback() -> None:
         process.kill()
         out, err = process.communicate(timeout=60)
     assert out == b"", f"http 模式下 stdout 必须是空的，实际 {out[:300]!r}"
-    assert b"[evefit-mcp]" in err, f"服务日志应写在 stderr，实际 {err[:300]!r}"
+    assert b"[noobbaozi-mcp]" in err, f"服务日志应写在 stderr，实际 {err[:300]!r}"
 
 
 def test_help_and_version_stay_on_stderr() -> None:
     """`--help` / `--version` 仍然只写 stderr，且 `--help` 里能看到新开关。"""
     for flag in ("--version", "--help"):
         completed = subprocess.run(
-            [sys.executable, "-m", "evefit.mcp_server", flag],
+            [sys.executable, "-m", "noobbaozi.mcp_server", flag],
             cwd=str(WORKSPACE_ROOT),
             env=client_smoke._server_env(),
             capture_output=True,
@@ -749,7 +749,7 @@ def test_help_and_version_stay_on_stderr() -> None:
         assert completed.returncode == 0, completed.stderr
         assert completed.stdout == "", f"{flag} 的 stdout 必须为空，实际 {completed.stdout!r}"
     completed = subprocess.run(
-        [sys.executable, "-m", "evefit.mcp_server", "--help"],
+        [sys.executable, "-m", "noobbaozi.mcp_server", "--help"],
         cwd=str(WORKSPACE_ROOT),
         env=client_smoke._server_env(),
         capture_output=True,
@@ -771,7 +771,7 @@ def test_transport_uses_only_stdlib() -> None:
     """http 传输只 import 标准库 + 本包（**不许**出现 `mcp` SDK 或其它第三方包）。"""
     import ast
 
-    source = (EVEFIT_ROOT / "mcp_http.py").read_text(encoding="utf-8")
+    source = (NOOBBAOZI_ROOT / "mcp_http.py").read_text(encoding="utf-8")
     modules: set[str] = set()
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
@@ -786,7 +786,7 @@ def test_transport_uses_only_stdlib() -> None:
         and name
         not in {
             "__future__",
-            "evefit",
+            "noobbaozi",
         }
     }
     assert not third_party, f"mcp_http 引入了第三方依赖：{sorted(third_party)}"

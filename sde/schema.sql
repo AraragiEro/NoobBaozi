@@ -1,6 +1,6 @@
--- evefit SDE 索引库 schema（SQLite）
+-- noobbaozi SDE 索引库 schema（SQLite）
 --
--- 由 evefit/sde/ingest.py 用 executescript() 执行；不要手工改已建好的库结构，
+-- 由 noobbaozi/sde/ingest.py 用 executescript() 执行；不要手工改已建好的库结构，
 -- 改这里之后用 build_index(force=True) 重建。
 --
 -- 设计依据：docs/配装理解-软件设计-v1.md §7.1（存储选型 = SQLite，五万行级、查询简单）

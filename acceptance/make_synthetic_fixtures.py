@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-FIXTURES = Path("evefit/acceptance/fixtures")
+FIXTURES = Path("noobbaozi/acceptance/fixtures")
 
 
 def module_pool() -> list[str]:

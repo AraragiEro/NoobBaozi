@@ -1,11 +1,11 @@
-"""**真实 MCP 客户端**冒烟：起 `python -m evefit.mcp_server` 子进程，走完整 stdio 流程。
+"""**真实 MCP 客户端**冒烟：起 `python -m noobbaozi.mcp_server` 子进程，走完整 stdio 流程。
 
 这是 T-46 的**验收关键**：不是「有代码」，而是「有客户端真的连上、逐个调通」。
 
 ```
-python -m evefit.mcp.client_smoke          # auto：装了官方 SDK 就用它，否则用手写客户端
-python -m evefit.mcp.client_smoke --sdk    # 强制官方 SDK（mcp 包）
-python -m evefit.mcp.client_smoke --stdio  # 强制手写 stdlib 客户端（零第三方依赖）
+python -m noobbaozi.mcp.client_smoke          # auto：装了官方 SDK 就用它，否则用手写客户端
+python -m noobbaozi.mcp.client_smoke --sdk    # 强制官方 SDK（mcp 包）
+python -m noobbaozi.mcp.client_smoke --stdio  # 强制手写 stdlib 客户端（零第三方依赖）
 ```
 
 为什么要两种客户端
@@ -43,7 +43,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-CLIENT_NAME: str = "evefit-client-smoke"
+CLIENT_NAME: str = "noobbaozi-client-smoke"
 CLIENT_VERSION: str = "1.0.0"
 
 PROTOCOL_VERSION: str = "2025-06-18"
@@ -58,13 +58,13 @@ PROTOCOL_VERSION: str = "2025-06-18"
 DEFAULT_TIMEOUT_S: float = 300.0
 """单条响应 / 单次工具调用的超时（首次调用要开 SDE 索引，实测 100–300ms；300s 极宽松）。"""
 
-EVEFIT_ROOT: Path = Path(__file__).resolve().parents[1]
-"""`evefit/` 包目录（`evefit/mcp/client_smoke.py` 往上两级）。"""
+NOOBBAOZI_ROOT: Path = Path(__file__).resolve().parents[1]
+"""`noobbaozi/` 包目录（`noobbaozi/mcp/client_smoke.py` 往上两级）。"""
 
-WORKSPACE_ROOT: Path = EVEFIT_ROOT.parent
-"""仓库根：`python -m evefit.mcp_server` 的 cwd（`-m` 靠 cwd 找到 `evefit` 包）。"""
+WORKSPACE_ROOT: Path = NOOBBAOZI_ROOT.parent
+"""仓库根：`python -m noobbaozi.mcp_server` 的 cwd（`-m` 靠 cwd 找到 `noobbaozi` 包）。"""
 
-EFT_PATH: Path = EVEFIT_ROOT / "acceptance" / "fixtures" / "f1-hecate-killmail.eft"
+EFT_PATH: Path = NOOBBAOZI_ROOT / "acceptance" / "fixtures" / "f1-hecate-killmail.eft"
 """验收固定样本：Hecate killmail 的 EFT 文本（api / cli 测试同源）。"""
 
 TYPO_EFT: str = "[Hecate, typo]\nDamage Controll II\n"
@@ -346,7 +346,7 @@ class StdioClient:
         cwd: Path | None = None,
         timeout: float = DEFAULT_TIMEOUT_S,
     ) -> None:
-        self.command = command or [sys.executable, "-m", "evefit.mcp_server"]
+        self.command = command or [sys.executable, "-m", "noobbaozi.mcp_server"]
         self.cwd = Path(cwd or WORKSPACE_ROOT)
         self.timeout = timeout
         self._process: subprocess.Popen | None = None
@@ -594,14 +594,14 @@ def _collect_sdk(cases: tuple[dict, ...]) -> tuple[SessionInfo, list[CallRecord]
     try:  # SDK v1（mcp 1.x）与 v2（mcp 2.x）的字段集合不同，尽量都给
         parameters = StdioServerParameters(
             command=sys.executable,
-            args=["-m", "evefit.mcp_server"],
+            args=["-m", "noobbaozi.mcp_server"],
             env=_server_env(),
             cwd=str(WORKSPACE_ROOT),
         )
     except TypeError:  # pragma: no cover - 老版本没有 cwd 字段
         parameters = StdioServerParameters(
             command=sys.executable,
-            args=["-m", "evefit.mcp_server"],
+            args=["-m", "noobbaozi.mcp_server"],
             env=_server_env(),
         )
 

@@ -9,7 +9,7 @@
 
 用法：
     uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" `
-      python evefit/acceptance/check_mcp.py
+      python noobbaozi/acceptance/check_mcp.py
 
 坑（都已固化在本文件里）：
 - **不要用 asyncio.create_subprocess_exec**：本机报 `WinError 5`；只用 `subprocess`。
@@ -49,7 +49,7 @@ class Client:
         # 仅供调试：默认不打开（打开会往 stderr 写，不影响 stdout 纯净性断言）
         self.name = name
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "evefit.mcp_server"],
+            [sys.executable, "-m", "noobbaozi.mcp_server"],
             cwd=str(ROOT.parent), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, env=env,
         )
@@ -130,7 +130,7 @@ class Client:
         return self.request("initialize", {
             "protocolVersion": version,
             "capabilities": {},
-            "clientInfo": {"name": "evefit-acceptance-client", "version": "1.0"},
+            "clientInfo": {"name": "noobbaozi-acceptance-client", "version": "1.0"},
         })
 
     def call_tool(self, name: str, arguments: dict, timeout: float = 120.0) -> dict:

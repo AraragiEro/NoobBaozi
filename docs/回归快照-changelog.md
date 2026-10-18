@@ -11,7 +11,7 @@
 - **SDE build**：3607705
 - **引擎**：`eveshipfit-dogma-engine` 13.6.0
 - **技能档**：`all4+min_required` = **512 个技能**（510×4 + 2×5）
-- **样本**：`evefit/spike/kill.json`（killmail 139246907，Hecate）
+- **样本**：`noobbaozi/spike/kill.json`（killmail 139246907，Hecate）
 
 ### 变更原因（不是笔误，是实现缺陷）
 
@@ -75,5 +75,5 @@ hull   HP 1000 → 1200 (+200) ⇒ +298.507 (200/0.67)
 
 ### 复核方式
 
-- 逐值可用 `evefit/tools/baseline_after_tierfix.json` 的 `ablation` 消融表核对；
-- `evefit/acceptance/check_snapshot.py --enforce` 应 22 行 0 DIFF、四模式 0 DIFF。
+- 逐值可用 `noobbaozi/tools/baseline_after_tierfix.json` 的 `ablation` 消融表核对；
+- `noobbaozi/acceptance/check_snapshot.py --enforce` 应 22 行 0 DIFF、四模式 0 DIFF。

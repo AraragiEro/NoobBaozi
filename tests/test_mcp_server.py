@@ -1,4 +1,4 @@
-"""`evefit/mcp_server.py` 的契约测试（文档 §10.5「MCP (stdio)」）。
+"""`noobbaozi/mcp_server.py` 的契约测试（文档 §10.5「MCP (stdio)」）。
 
 钉住六件事：
 
@@ -21,7 +21,7 @@
 `test_smoke_goes_red_when_tool_name_is_wrong`。改一次就能证明这些断言真的在断言
 （PROGRESS 第 180 / 196 条的教训：空转的断言比没有断言更危险）。
 
-绝大多数断言用**进程内 `dispatch()`**（快、能精确看响应体）；只有「`python -m evefit.mcp_server`
+绝大多数断言用**进程内 `dispatch()`**（快、能精确看响应体）；只有「`python -m noobbaozi.mcp_server`
 这个入口本身」与「stdout 是否被污染」必须起子进程。
 """
 
@@ -35,13 +35,13 @@ from pathlib import Path
 
 import pytest
 
-from evefit import api, mcp_server
-from evefit.mcp import client_smoke
+from noobbaozi import api, mcp_server
+from noobbaozi.mcp import client_smoke
 
-EVEFIT_ROOT = Path(__file__).resolve().parents[1]
-WORKSPACE_ROOT = EVEFIT_ROOT.parent
-EFT_PATH = EVEFIT_ROOT / "acceptance" / "fixtures" / "f1-hecate-killmail.eft"
-KILLMAIL_ZKB_PATH = EVEFIT_ROOT / "tests" / "fixtures" / "killmail" / "139239127-zkb.json"
+NOOBBAOZI_ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = NOOBBAOZI_ROOT.parent
+EFT_PATH = NOOBBAOZI_ROOT / "acceptance" / "fixtures" / "f1-hecate-killmail.eft"
+KILLMAIL_ZKB_PATH = NOOBBAOZI_ROOT / "tests" / "fixtures" / "killmail" / "139239127-zkb.json"
 """`fit_killmail` 的真实样本（zkillboard 原始响应：79 attackers + zkb 价值块）。"""
 
 SIX_VIEWS = ("firepower", "survivability", "mobility", "resources", "constraints", "stability")
@@ -132,7 +132,7 @@ def _tool_spec(name: str) -> dict:
 
 
 def _run_script(argv: list[str], *, timeout: float = 300.0) -> subprocess.CompletedProcess:
-    """子进程跑一个 `evefit.*` 模块（cwd = 仓库根，utf-8，环境与客户端一致）。"""
+    """子进程跑一个 `noobbaozi.*` 模块（cwd = 仓库根，utf-8，环境与客户端一致）。"""
     return subprocess.run(
         [sys.executable, *argv],
         cwd=str(WORKSPACE_ROOT),
@@ -206,7 +206,7 @@ def test_common_parameters_declare_defaults_from_api() -> None:
 
 def test_fit_view_requires_view_enum_of_six() -> None:
     """`fit_view` 的 `view` 必填，`enum` 就是六个视角名（且**与注册表一致**）。"""
-    from evefit.project.views import available_views
+    from noobbaozi.project.views import available_views
 
     schema = _tool_spec("fit_view")["inputSchema"]
     assert schema["required"] == ["fit", "view"]
@@ -583,8 +583,8 @@ def test_stdio_client_round_trip_and_stdout_purity(eft_text: str) -> None:
 
     # stderr：是**另一个**通道，服务的日志在这里（不在 stdout 里）
     assert stderr_text, "服务应把启动日志写到 stderr"
-    assert any("[evefit-mcp]" in line for line in stderr_text.splitlines())
-    assert all("[evefit-mcp]" not in line for line in raw_lines)
+    assert any("[noobbaozi-mcp]" in line for line in stderr_text.splitlines())
+    assert all("[noobbaozi-mcp]" not in line for line in raw_lines)
 
     # 五个工具确实各自算出了东西（不是同一个信封被复用）
     assert records["fit_parse"]["result"]["ship"]["name"] == "Hecate"
@@ -595,8 +595,8 @@ def test_stdio_client_round_trip_and_stdout_purity(eft_text: str) -> None:
 
 
 def test_smoke_script_exits_zero() -> None:
-    """`python -m evefit.mcp.client_smoke --stdio` 真的 PASS 并退出 `0`。"""
-    completed = _run_script(["-m", "evefit.mcp.client_smoke", "--stdio"])
+    """`python -m noobbaozi.mcp.client_smoke --stdio` 真的 PASS 并退出 `0`。"""
+    completed = _run_script(["-m", "noobbaozi.mcp.client_smoke", "--stdio"])
     assert completed.returncode == 0, f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
     assert "PASS  7/7" in completed.stdout
     for tool in TOOL_NAMES:
@@ -620,7 +620,7 @@ def test_smoke_goes_red_when_tool_name_is_wrong() -> None:
 
 def test_server_version_flag_writes_only_to_stderr() -> None:
     """`--version` 只写 stderr：stdout 一个字节都没有（协议通道不许被误用）。"""
-    completed = _run_script(["-m", "evefit.mcp_server", "--version"])
+    completed = _run_script(["-m", "noobbaozi.mcp_server", "--version"])
     assert completed.returncode == 0
     assert completed.stdout == "", f"stdout 必须是空的，实际 {completed.stdout!r}"
     assert mcp_server.SERVER_NAME in completed.stderr
@@ -629,7 +629,7 @@ def test_server_version_flag_writes_only_to_stderr() -> None:
 def test_server_survives_garbage_input() -> None:
     """往服务嘴里灌垃圾：不崩、退出码 0、回的都是 JSON-RPC 错误。"""
     completed = subprocess.run(
-        [sys.executable, "-m", "evefit.mcp_server"],
+        [sys.executable, "-m", "noobbaozi.mcp_server"],
         cwd=str(WORKSPACE_ROOT),
         env=client_smoke._server_env(),
         input='not json\n{"jsonrpc":"2.0","id":1,"method":"nope"}\n[]\n{"id":2}\n',
@@ -751,7 +751,7 @@ def test_fit_killmail_on_a_fit_is_a_business_error() -> None:
 # 七、`zkb_search`（T-50：战报列表检索）
 # =============================================================================
 
-ZKB_FIXTURES = EVEFIT_ROOT / "tests" / "fixtures" / "zkb"
+ZKB_FIXTURES = NOOBBAOZI_ROOT / "tests" / "fixtures" / "zkb"
 """离线样本（**真实响应**：`losses/shipTypeID/22444/pastSeconds/604800` 与
 ESI `/universe/ids/`，裁剪说明见 `tests/fixtures/zkb/README.md`）。"""
 
@@ -906,7 +906,7 @@ INSTRUCTIONS_MAX_CHARS = 800
 DESCRIPTION_MAX_CHARS = 600
 """单条工具描述的长度上限：防止某条描述又膨胀成一份小文档。"""
 
-SKILL_PATH = EVEFIT_ROOT / "skill" / "evefit" / "SKILL.md"
+SKILL_PATH = NOOBBAOZI_ROOT / "skill" / "noobbaozi" / "SKILL.md"
 """Skill 载体（**整份文件都受守卫约束**：它只能是个薄壳）。"""
 
 SKILL_MAX_LINES = 60
@@ -1030,7 +1030,7 @@ def test_skill_md_is_a_thin_shell() -> None:
         "工具清单 / 字段表 / 调用顺序细节都属于 MCP 描述，不能复制过来"
     )
     assert "mcp/README.md" in text, "SKILL.md 必须指向 mcp/README.md（客户端配置在那里）"
-    assert "python -m evefit.mcp_server --transport http" in text, "怎么连必须一行写清"
+    assert "python -m noobbaozi.mcp_server --transport http" in text, "怎么连必须一行写清"
     assert "不生成配装" in text, "必须写明「不该用它做什么」"
     for anchor in (
         "unknown_reasons",  # 纪律①

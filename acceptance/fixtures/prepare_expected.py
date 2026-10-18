@@ -14,9 +14,9 @@
 重新标定后必须在报告里逐字段 diff 并说明原因，**不得为了让测试通过而改期望值**。
 
 用法：
-    $env:UV_CACHE_DIR = (Join-Path $PWD "evefit/spike/uvcache")
+    $env:UV_CACHE_DIR = (Join-Path $PWD "noobbaozi/spike/uvcache")
     uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" `
-      python evefit/acceptance/fixtures/prepare_expected.py
+      python noobbaozi/acceptance/fixtures/prepare_expected.py
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ACCEPTANCE = HERE.parent
-ROOT = ACCEPTANCE.parent                       # evefit/
+ROOT = ACCEPTANCE.parent                       # noobbaozi/
 WORKSPACE = ROOT.parent
 sys.path.insert(0, str(WORKSPACE))
 
@@ -88,11 +88,11 @@ SNAPSHOT_FIELDS: dict[str, tuple[int, str]] = {
 
 
 def main() -> int:
-    from evefit.engine import adapter
-    from evefit.engine.assumptions import default_assumptions
-    from evefit.engine.normalize import normalize_fit
-    from evefit.sde.index import Index
-    from evefit.config import paths as paths_mod
+    from noobbaozi.engine import adapter
+    from noobbaozi.engine.assumptions import default_assumptions
+    from noobbaozi.engine.normalize import normalize_fit
+    from noobbaozi.sde.index import Index
+    from noobbaozi.config import paths as paths_mod
 
     engine = adapter.Engine()
     meta = engine.meta()

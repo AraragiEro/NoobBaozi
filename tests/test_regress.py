@@ -14,7 +14,7 @@ r"""T-33 守护测试：门禁**编排逻辑**（不真跑门禁）。
 把输出灌到 100 行，尾巴必须只有 30 行；依赖门失败时，`acceptance` 的执行器
 **一次都不该被调用**（跳过 ≠ 通过 ≠ 跑了但没测）。
 
-写入范围：本文件 + `evefit/tools/regress.py`。不修改被门禁检查的任何模块。
+写入范围：本文件 + `noobbaozi/tools/regress.py`。不修改被门禁检查的任何模块。
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import json
 
 import pytest
 
-from evefit.tools import regress as REG
+from noobbaozi.tools import regress as REG
 
 # =============================================================================
 # 假执行器
@@ -103,13 +103,13 @@ def test_every_gate_is_well_formed():
 def test_gate_commands_are_the_documented_ones():
     """命令必须就是文档里那几条（尤其 snapshot 必须带 --enforce，不能是软检查）。"""
     pytest_gate = gate("pytest")
-    assert "evefit/tests" in pytest_gate.command
+    assert "noobbaozi/tests" in pytest_gate.command
     assert "pytest" in pytest_gate.command
     assert "no:cacheprovider" in pytest_gate.command
 
-    assert gate("attr-coverage").command[-1] == "evefit.tools.check_attr_coverage"
-    assert gate("snapshot").command[-2:] == ("evefit/acceptance/check_snapshot.py", "--enforce")
-    assert "evefit/acceptance/run_acceptance.py" in gate("acceptance").command
+    assert gate("attr-coverage").command[-1] == "noobbaozi.tools.check_attr_coverage"
+    assert gate("snapshot").command[-2:] == ("noobbaozi/acceptance/check_snapshot.py", "--enforce")
+    assert "noobbaozi/acceptance/run_acceptance.py" in gate("acceptance").command
 
 
 def test_snapshot_gate_is_enforced_not_soft():
@@ -367,7 +367,7 @@ def test_json_payload_has_the_documented_shape(capsys):
     captured = capsys.readouterr()
 
     payload = json.loads(captured.out)   # stdout 必须只有 JSON（能整体解析）
-    assert payload["tool"] == "evefit.tools.regress"
+    assert payload["tool"] == "noobbaozi.tools.regress"
     assert payload["full"] is False
     assert payload["selected"] == ["snapshot"]
     assert payload["exit_code"] == REG.EXIT_FAIL == code

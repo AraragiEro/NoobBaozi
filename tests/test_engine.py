@@ -12,7 +12,7 @@
 7. `run_variants` 单 spec 返回 dict 且含 `"ship"`，第二次命中缓存（命中计数断言）：
 8. 红线相关的反例：不支持的 `states` 键必须 `ValueError`，不再发明近似语义。
 
-约束：**无网络、无随机性**（红线 N1）；样本来自 `evefit/spike/kill.json`（只读，不修改）。
+约束：**无网络、无随机性**（红线 N1）；样本来自 `noobbaozi/spike/kill.json`（只读，不修改）。
 本文件只读契约与样本，不改任何被冻结的结构。
 """
 
@@ -28,11 +28,11 @@ import esf_dogma_engine as dogma
 import eveshipfit_sde
 import pytest
 
-from evefit import contracts
-from evefit.config.paths import db_path
-from evefit.engine import adapter
-from evefit.engine.adapter import CACHE_MAX_ENTRIES, Engine
-from evefit.engine.assumptions import (
+from noobbaozi import contracts
+from noobbaozi.config.paths import db_path
+from noobbaozi.engine import adapter
+from noobbaozi.engine.adapter import CACHE_MAX_ENTRIES, Engine
+from noobbaozi.engine.assumptions import (
     DEFAULT_DAMAGE_PROFILE,
     DEFAULT_SKILL_LEVEL,
     MODULE_STATE_SOURCE,
@@ -41,9 +41,9 @@ from evefit.engine.assumptions import (
     default_assumptions,
     derive_skill_tier,
 )
-from evefit.engine.normalize import STATE_WARNING, normalize_fit
-from evefit.engine.scenarios import build_variant, run_variants
-from evefit.sde.index import Index
+from noobbaozi.engine.normalize import STATE_WARNING, normalize_fit
+from noobbaozi.engine.scenarios import build_variant, run_variants
+from noobbaozi.sde.index import Index
 
 # ---- 样本与常量 ----
 
@@ -589,7 +589,7 @@ def test_run_variants_rejects_duplicate_names(engine: Engine, sample_fit: dict) 
 # 契约：`NormalizeError.candidates` 是**可修复建议**，不是自动替换结果（红线 N2）。
 # 未注入索引 → 恒空列表；注入后只对"模块名"失败行给候选；船名行 / 格式行不给。
 
-from evefit.engine import normalize  # noqa: E402
+from noobbaozi.engine import normalize  # noqa: E402
 
 #: 截断式写错（少一个 e）：真实类型名见 TYPO_MODULE_REAL。
 TYPO_MODULE_TEXT = "5MN Quad LiF Restrained Microwarpdriv"
@@ -717,8 +717,8 @@ def test_clear_index_is_idempotent(no_index: None) -> None:
 
 def test_candidates_end_to_end_with_real_index(no_index: None) -> None:
     """真实索引接线（契约 `Index.search_types`）：截断的模块名应给出唯一候选。"""
-    from evefit.config.paths import db_path
-    from evefit.sde.index import Index
+    from noobbaozi.config.paths import db_path
+    from noobbaozi.sde.index import Index
 
     try:
         index = Index.open(db_path())

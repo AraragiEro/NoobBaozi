@@ -1,6 +1,6 @@
 # KB 样本验收报告 · 第 1 轮（f7–f16 · 船体结构覆盖）
 
-- 执行：`evefit-tester`（独立验收，不改产品代码）
+- 执行：`noobbaozi-tester`（独立验收，不改产品代码）
 - 时间：2026-10-18
 - 环境：SDE **3607705** · 引擎 **13.6.0** · 技能档 **`all4+min_required` / 512**
 - 累计样本：**16 条**（f1–f3 自造 EFT + f4–f6 真实 KB + f7–f16 本轮真实 KB）
@@ -120,16 +120,16 @@
 ## 7. 复现命令
 
 ```powershell
-$env:UV_CACHE_DIR = "$PWD\evefit\spike\uvcache"
+$env:UV_CACHE_DIR = "$PWD\noobbaozi\spike\uvcache"
 $E = '--with "eveshipfit-dogma-engine[sde]==13.6.0"'
 $PY = "uv run --python 3.13 --no-project $E python"
 
 # 抓第 1 轮样本（幂等：已存在的会按去重跳过）
-Invoke-Expression "$PY evefit/acceptance/fetch_fixtures.py --round 1"
+Invoke-Expression "$PY noobbaozi/acceptance/fetch_fixtures.py --round 1"
 # 生成期望值（含新样本）
-Invoke-Expression "$PY evefit/acceptance/fixtures/prepare_expected.py"
+Invoke-Expression "$PY noobbaozi/acceptance/fixtures/prepare_expected.py"
 # 全量验收
-Invoke-Expression "$PY evefit/acceptance/run_acceptance.py --entry evefit.project.render:render_overview --label R1"
+Invoke-Expression "$PY noobbaozi/acceptance/run_acceptance.py --entry noobbaozi.project.render:render_overview --label R1"
 # 快照门禁
-Invoke-Expression "$PY evefit/acceptance/check_snapshot.py --enforce"
+Invoke-Expression "$PY noobbaozi/acceptance/check_snapshot.py --enforce"
 ```

@@ -1,15 +1,15 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Docker 不可用时，在本机原生启动 evefit MCP 服务（HTTP 传输）。
+    Docker 不可用时，在本机原生启动 noobbaozi MCP 服务（HTTP 传输）。
 
 .DESCRIPTION
     等价于 docker/entrypoint.sh 最后那一步：
 
-        python -m evefit.mcp_server --transport http --host <HOST> --port <PORT>
+        python -m noobbaozi.mcp_server --transport http --host <HOST> --port <PORT>
 
     用 uv 现场拉依赖（eveshipfit-dogma-engine[sde]==13.6.0），并把 UV_CACHE_DIR 指到
-    项目内的 evefit/spike/uvcache —— 与 evefit/README.md、evefit/mcp/README.md 的复跑
+    项目内的 noobbaozi/spike/uvcache —— 与 noobbaozi/README.md、noobbaozi/mcp/README.md 的复跑
     命令共用同一份缓存，避免重复下载 ~100 MB。
 
     启动后会打印一批可访问的局域网 URL；按 Ctrl+C 停止（这是前台服务）。
@@ -23,16 +23,16 @@
 
 .PARAMETER DryRun
     只做预检 + 打印将要执行的命令 + 打印将要访问的 URL，不真的启动服务。
-    等价于 entrypoint.sh 的 EVEFIT_DRY_RUN=1。
+    等价于 entrypoint.sh 的 NOOBBAOZI_DRY_RUN=1。
 
 .EXAMPLE
-    .\evefit\docker\run-native.ps1
+    .\noobbaozi\docker\run-native.ps1
 
 .EXAMPLE
-    .\evefit\docker\run-native.ps1 -Port 8081 -Host 127.0.0.1
+    .\noobbaozi\docker\run-native.ps1 -Port 8081 -Host 127.0.0.1
 
 .EXAMPLE
-    .\evefit\docker\run-native.ps1 -DryRun
+    .\noobbaozi\docker\run-native.ps1 -DryRun
 #>
 [CmdletBinding()]
 param(
@@ -54,17 +54,17 @@ function Write-Fail([string]$Message) { Write-Host "[run-native] 错误: $Messag
 
 # ── 0. 路径事实（全部由本文件位置推导，不写死）──────────────────────────────
 $dockerDir = $PSScriptRoot
-$evefitDir = Split-Path -Parent $dockerDir          # …/evefit
-$workspaceRoot = Split-Path -Parent $evefitDir      # …/opencode_general_workspace（evefit 包的父目录）
-$dataDir = Join-Path $evefitDir 'data'
-$uvCacheDir = Join-Path $evefitDir 'spike\uvcache'
+$noobbaoziDir = Split-Path -Parent $dockerDir          # …/noobbaozi
+$workspaceRoot = Split-Path -Parent $noobbaoziDir      # …/opencode_general_workspace（noobbaozi 包的父目录）
+$dataDir = Join-Path $noobbaoziDir 'data'
+$uvCacheDir = Join-Path $noobbaoziDir 'spike\uvcache'
 $engineSpec = 'eveshipfit-dogma-engine[sde]==13.6.0'
 
-if ($env:EVEFIT_DRY_RUN -eq '1') { $DryRun = $true }
+if ($env:NOOBBAOZI_DRY_RUN -eq '1') { $DryRun = $true }
 $dry = [bool]$DryRun
 
 Write-Step "workspace=$workspaceRoot"
-Write-Step "evefit=$evefitDir  data=$dataDir"
+Write-Step "noobbaozi=$noobbaoziDir  data=$dataDir"
 Write-Step "listen=${ListenHost}:$Port  dry_run=$dry"
 
 # ── 1. 工具链 ───────────────────────────────────────────────────────────────
@@ -86,7 +86,7 @@ if (Test-Path -LiteralPath $uvCacheDir) {
 $dbFiles = @()
 $zipFiles = @()
 if (Test-Path -LiteralPath $dataDir) {
-    $dbFiles = @(Get-ChildItem -LiteralPath $dataDir -Filter 'evefit-*.sqlite3' -File -ErrorAction SilentlyContinue)
+    $dbFiles = @(Get-ChildItem -LiteralPath $dataDir -Filter 'noobbaozi-*.sqlite3' -File -ErrorAction SilentlyContinue)
     $zipFiles = @(Get-ChildItem -LiteralPath $dataDir -Filter '*.zip' -File -ErrorAction SilentlyContinue)
 }
 
@@ -100,18 +100,18 @@ if ($dbFiles.Count -gt 0) {
     $buildFromName = $null
     if ($zipFiles[0].Name -match '^eve-online-static-data-(\d+)-jsonl\.zip$') { $buildFromName = $Matches[1] }
     if ($buildFromName) {
-        Write-Note ('  uv run --python 3.13 --no-project --with "{0}" python -m evefit.sde.ingest --build {1}' -f $engineSpec, $buildFromName)
+        Write-Note ('  uv run --python 3.13 --no-project --with "{0}" python -m noobbaozi.sde.ingest --build {1}' -f $engineSpec, $buildFromName)
         Write-Note ('  （build {0} 从 zip 文件名取到 → 建库不需要联网）' -f $buildFromName)
     } else {
-        Write-Note ('  uv run --python 3.13 --no-project --with "{0}" python -m evefit.sde.ingest' -f $engineSpec)
+        Write-Note ('  uv run --python 3.13 --no-project --with "{0}" python -m noobbaozi.sde.ingest' -f $engineSpec)
         Write-Note '  （zip 文件名不是 eve-online-static-data-<build>-jsonl.zip 形态 → 不传 --build，ingest 会联网取最新 build）'
     }
 } else {
     $preflightFailed = $true
-    Write-Fail "在 $dataDir 下既没有 evefit-*.sqlite3 也没有 *.zip。"
+    Write-Fail "在 $dataDir 下既没有 noobbaozi-*.sqlite3 也没有 *.zip。"
     Write-Note '服务本身不依赖网络，但没有索引库 → 每个工具调用都会返回 index_unavailable。'
-    Write-Note '先准备数据：把 eve-online-static-data-<build>-jsonl.zip 放进 evefit/data/，再跑 python -m evefit.sde.ingest 建库。'
-    Write-Note '（容器那条路可以用 EVEFIT_SDE_FETCH=1 让 entrypoint 自己下载。）'
+    Write-Note '先准备数据：把 eve-online-static-data-<build>-jsonl.zip 放进 noobbaozi/data/，再跑 python -m noobbaozi.sde.ingest 建库。'
+    Write-Note '（容器那条路可以用 NOOBBAOZI_SDE_FETCH=1 让 entrypoint 自己下载。）'
     if (-not $dry) {
         Write-Fail '退出码 2（数据卷缺失）。先补数据；只想看计划就加 -DryRun。'
         exit 2
@@ -122,7 +122,7 @@ if ($dbFiles.Count -gt 0) {
 $uvArgs = @(
     'run', '--python', '3.13', '--no-project',
     '--with', $engineSpec,
-    'python', '-m', 'evefit.mcp_server',
+    'python', '-m', 'noobbaozi.mcp_server',
     '--transport', 'http',
     '--host', $ListenHost,
     '--port', "$Port"
@@ -130,7 +130,7 @@ $uvArgs = @(
 
 $joined = ($uvArgs | ForEach-Object { if ($_ -match '[\s\[\]]') { '"' + $_ + '"' } else { $_ } }) -join ' '
 Write-Step "将执行: uv $joined"
-Write-Step "工作目录: $workspaceRoot（python -m evefit.mcp_server 靠 cwd 找 evefit 包）"
+Write-Step "工作目录: $workspaceRoot（python -m noobbaozi.mcp_server 靠 cwd 找 noobbaozi 包）"
 
 # ── 4. 可访问的 URL（局域网）─────────────────────────────────────────────────
 $lanIps = @()
@@ -163,7 +163,7 @@ foreach ($ip in $lanIps) {
     Write-Host ("    MCP    : http://{0}:{1}/mcp" -f $ip, $Port)
 }
 Write-Note 'windows 防火墙默认拦入站 TCP：局域网连不上时按需放行（管理员 PowerShell）：'
-Write-Note ("  New-NetFirewallRule -DisplayName 'evefit MCP {0}' -Direction Inbound -Action Allow -Protocol TCP -LocalPort {0}" -f $Port)
+Write-Note ("  New-NetFirewallRule -DisplayName 'noobbaozi MCP {0}' -Direction Inbound -Action Allow -Protocol TCP -LocalPort {0}" -f $Port)
 
 if ($preflightFailed) {
     Write-Warn '预检失败（没有索引库）：服务能起来，但工具调用会全部返回 index_unavailable。'
@@ -187,6 +187,6 @@ try {
 if ($code -ne 0) {
     Write-Fail "uv 退出码 $code"
     Write-Note '若报 unknown/unrecognized argument --transport，说明 T-47（HTTP 传输）还没合到本工作区。'
-    Write-Note '若报 ModuleNotFoundError: evefit，检查 cwd 是否是 evefit 包的父目录。'
+    Write-Note '若报 ModuleNotFoundError: noobbaozi，检查 cwd 是否是 noobbaozi 包的父目录。'
 }
 exit $code

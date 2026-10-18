@@ -12,7 +12,7 @@
   （Confessor / Svipul / Jackdaw / Hecate / Skua / Anhinga），每艘 3 个模式；
   其中 Anhinga 的三态命名为 `Primary` / `Secondary` / `Tertiary`（不叫 Defense 等）。
 
-本模块只负责**解析与写表**；查询 API（`modes_for_ship`）在 `evefit/sde/index.py`。
+本模块只负责**解析与写表**；查询 API（`modes_for_ship`）在 `noobbaozi/sde/index.py`。
 依赖约束：只依赖标准库（§2 数据层）。
 """
 

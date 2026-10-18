@@ -34,10 +34,10 @@ provenance 归属（`FIELD_SOURCES`，T-34 补齐）
 
 from __future__ import annotations
 
-from evefit.config import attributes as A
-from evefit.project import units
-from evefit.project.views import register
-from evefit.project.views.base import BASE, SLOT_CARGO, ViewContext
+from noobbaozi.config import attributes as A
+from noobbaozi.project import units
+from noobbaozi.project.views import register
+from noobbaozi.project.views.base import BASE, SLOT_CARGO, ViewContext
 
 # =============================================================================
 # 规则分类

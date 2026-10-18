@@ -39,7 +39,7 @@
    `-51` 恒 ≈ 3.047 hp/s），所以 `shield_passive.has_source` 在几乎所有舰船上都是
    `True`——这是事实，不是噪声。
 6. **provenance 不强行改判**：这些 `0.0` 仍按 `FIELD_SOURCES` 的属性级实测量表
-   （`evefit/project/provenance.py`）打标：`-45/-48/-49/-50/-51/-52` → `assumed`；
+   （`noobbaozi/project/provenance.py`）打标：`-45/-48/-49/-50/-51/-52` → `assumed`；
    `-46/-47` 在实测表里是 `unknown`（本样本没有结构修/盾修模块，引擎不输出该派生值，
    表里逐条记了原因）。本视角**不手工塞 `measured`**：属性级表只能表达「这个值由哪个
    属性决定」，**无法表达「因为没装模块所以是 0」**；真正的解法是两级模型（属性级类 +
@@ -56,10 +56,10 @@ from __future__ import annotations
 
 import math
 
-from evefit.config import attributes as _a
-from evefit.project import units
-from evefit.project.views import register
-from evefit.project.views.base import BASE, OVERLOAD, ViewContext
+from noobbaozi.config import attributes as _a
+from noobbaozi.project import units
+from noobbaozi.project.views import register
+from noobbaozi.project.views.base import BASE, OVERLOAD, ViewContext
 
 VIEW_NAME = "survivability"
 

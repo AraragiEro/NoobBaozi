@@ -1,4 +1,4 @@
-﻿import json
+import json
 import os
 import time
 import urllib.request
@@ -7,7 +7,7 @@ import esf_dogma_engine as dogma
 from eveshipfit_sde import sde_path
 
 UA = {"User-Agent": "dsh-eve-smoke/0.1 (feasibility test)"}
-CACHE = "evefit/spike/attr_names.json"
+CACHE = "noobbaozi/spike/attr_names.json"
 
 
 def get(url):

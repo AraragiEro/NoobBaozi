@@ -1,19 +1,19 @@
-# evefit MCP 镜像 · 构建上下文排除清单
+# noobbaozi MCP 镜像 · 构建上下文排除清单
 # =============================================================================
 # ⚠ 重要：Docker **只读取「构建上下文根」下的 .dockerignore**。
-#   当前 compose 的 context 是 evefit/，所以真正生效的文件必须是 evefit/.dockerignore。
-#   本文件在 evefit/docker/ 下 → Docker 不会自动读它。
+#   当前 compose 的 context 是 noobbaozi/，所以真正生效的文件必须是 noobbaozi/.dockerignore。
+#   本文件在 noobbaozi/docker/ 下 → Docker 不会自动读它。
 #
 #   两个现实约束：
-#   1) 本任务只被授权在 evefit/docker/ 内写文件，不能新增 evefit/.dockerignore；
+#   1) 本任务只被授权在 noobbaozi/docker/ 内写文件，不能新增 noobbaozi/.dockerignore；
 #   2) 所以 Dockerfile **没有用 `COPY . /app`**，而是逐条白名单 COPY
 #      （api.py / contracts.py / cli.py / mcp_server.py / __init__.py + config/ engine/ project/ sde/ + docker/）。
 #      也就是说：即使这份排除清单没生效，data/ 的 94 MiB zip 与 14 MiB sqlite
 #      **也不可能**被烤进镜像 —— 这是结构上的保证，不依赖任何 ignore 机制。
 #
 #   想真正启用本清单（推荐，能在以后有人改回 COPY . 时兜住）：
-#     Copy-Item evefit\docker\.dockerignore evefit\.dockerignore
-#   （这会在 evefit/ 根落一个文件 —— 属于本任务写入范围外，需另行确认。）
+#     Copy-Item noobbaozi\docker\.dockerignore noobbaozi\.dockerignore
+#   （这会在 noobbaozi/ 根落一个文件 —— 属于本任务写入范围外，需另行确认。）
 # =============================================================================
 
 # 数据：SDE zip / 索引库 / 验收产物 —— 运行时卷，绝不入镜像

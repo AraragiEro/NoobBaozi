@@ -108,10 +108,10 @@ T-16 起 `tests/test_views_a.py` 的 walker 已支持 `[]` 段，于是换回元
 
 from __future__ import annotations
 
-from evefit.config import attributes as _a
-from evefit.project import units
-from evefit.project.views import register, shared
-from evefit.project.views.base import BASE, OVERLOAD, ViewContext
+from noobbaozi.config import attributes as _a
+from noobbaozi.project import units
+from noobbaozi.project.views import register, shared
+from noobbaozi.project.views.base import BASE, OVERLOAD, ViewContext
 
 VIEW_NAME = "firepower"
 

@@ -7,9 +7,9 @@
 
 复跑（仓库根目录）：
 
-    $env:UV_CACHE_DIR = "$PWD\\evefit\\spike\\uvcache"
+    $env:UV_CACHE_DIR = "$PWD\\noobbaozi\\spike\\uvcache"
     uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" `
-        python evefit/spike/carrier_fighter_probe.py
+        python noobbaozi/spike/carrier_fighter_probe.py
 
 输出 7 段（S0–S6）：
 
@@ -41,14 +41,14 @@ from pathlib import Path
 import esf_dogma_engine as dogma
 from eveshipfit_sde import build_number, sde_path
 
-# 直接 `python evefit/spike/carrier_fighter_probe.py` 时 sys.path[0] 是 script 目录，
-# 先把仓库根塞进来，才能 `import evefit`（uv 的 --no-project 不吃 pyproject）。
+# 直接 `python noobbaozi/spike/carrier_fighter_probe.py` 时 sys.path[0] 是 script 目录，
+# 先把仓库根塞进来，才能 `import noobbaozi`（uv 的 --no-project 不吃 pyproject）。
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from evefit.config import paths  # noqa: E402
-from evefit.sde.index import Index  # noqa: E402
+from noobbaozi.config import paths  # noqa: E402
+from noobbaozi.sde.index import Index  # noqa: E402
 
 FIXTURE = (
     Path(__file__).resolve().parents[1] / "acceptance" / "fixtures" / "f26-carrier-fighter.json"
@@ -79,7 +79,7 @@ FLAG_NAMES: dict[int, str] = {
 FIGHTER_FLAGS: tuple[int, ...] = (158, 159, 160, 161, 162, 163)
 """载机可能出现的 flag：158 = 机库，159–163 = 发射管 0–4。"""
 
-# 属性 ID（见 evefit/config/attributes.py）
+# 属性 ID（见 noobbaozi/config/attributes.py）
 ATTR_FIGHTER_ABILITY_ATTACK_DPS = -55   # fighterAbilityAttackMissileDamagePerSecond
 ATTR_FIGHTER_ABILITY_MISSILES_DPS = -56  # fighterAbilityMissilesDamagePerSecond
 ATTR_FIGHTER_BAY_USED = -57              # fighterCapacityLoad（机库占用 m3）

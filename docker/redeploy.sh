@@ -1,19 +1,19 @@
 #!/bin/sh
 # =============================================================================
-# evefit MCP · NAS 一键重部署
+# noobbaozi MCP · NAS 一键重部署
 #
 # 用法（必须 root）：
-#   sudo sh /volume1/docker/evefit-mcp/docker/redeploy.sh
+#   sudo sh /volume1/docker/noobbaozi-mcp/docker/redeploy.sh
 #
 # 做四件事：① git pull ② 重建镜像 ③ 重启容器 ④ 自检 /health
 # 失败即退出（set -e），并把关键输出留在 last-deploy.log 里。
 # =============================================================================
 set -eu
 
-REPO_DIR="${1:-/volume1/docker/evefit-mcp}"
+REPO_DIR="${1:-/volume1/docker/noobbaozi-mcp}"
 LOG="$REPO_DIR/last-deploy.log"
 COMPOSE="docker compose -f docker/docker-compose.yml"
-PORT="${EVEFIT_PORT:-8080}"
+PORT="${NOOBBAOZI_PORT:-8080}"
 
 cd "$REPO_DIR"
 : > "$LOG"

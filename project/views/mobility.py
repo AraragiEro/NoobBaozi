@@ -62,11 +62,11 @@
 
 from __future__ import annotations
 
-from evefit.config import attributes as _a
-from evefit.engine import scenarios
-from evefit.project import units
-from evefit.project.views import register, shared
-from evefit.project.views.base import BASE, OFFLINE, OVERLOAD, ViewContext, ship_attributes
+from noobbaozi.config import attributes as _a
+from noobbaozi.engine import scenarios
+from noobbaozi.project import units
+from noobbaozi.project.views import register, shared
+from noobbaozi.project.views.base import BASE, OFFLINE, OVERLOAD, ViewContext, ship_attributes
 
 VIEW_NAME = "mobility"
 

@@ -1,6 +1,6 @@
 """T2/T3 测试：分级渲染层（`project/render.py` + `views/loader.py`）。
 
-样本：`evefit/spike/kill.json`（killmail 139246907，Hecate），技能档走
+样本：`noobbaozi/spike/kill.json`（killmail 139246907，Hecate），技能档走
 `engine.assumptions.derive_skill_tier`（**必须传索引**：全部技能 4 级 = 512 个），
 与 `tests/test_projection_core.py` 同构。
 
@@ -81,19 +81,19 @@ from pathlib import Path
 import esf_dogma_engine as dogma
 import pytest
 
-from evefit import contracts
-from evefit.config import attributes as A
-from evefit.config.paths import db_path
-from evefit.engine.adapter import Engine
-from evefit.engine.assumptions import default_assumptions, derive_skill_tier
-from evefit.project import confidence as C
-from evefit.project import diagnostics as D
-from evefit.project import reasons as R
-from evefit.project import render
-from evefit.project.views import VIEW_ORDER, available_views, build_view
-from evefit.project.views.base import BASE, ViewContext
-from evefit.project.views.loader import VIEW_MODULES, load_views
-from evefit.sde.index import Index
+from noobbaozi import contracts
+from noobbaozi.config import attributes as A
+from noobbaozi.config.paths import db_path
+from noobbaozi.engine.adapter import Engine
+from noobbaozi.engine.assumptions import default_assumptions, derive_skill_tier
+from noobbaozi.project import confidence as C
+from noobbaozi.project import diagnostics as D
+from noobbaozi.project import reasons as R
+from noobbaozi.project import render
+from noobbaozi.project.views import VIEW_ORDER, available_views, build_view
+from noobbaozi.project.views.base import BASE, ViewContext
+from noobbaozi.project.views.loader import VIEW_MODULES, load_views
+from noobbaozi.sde.index import Index
 
 EVE_ROOT = Path(__file__).resolve().parents[1]
 KILL_PATH = EVE_ROOT / "spike" / "kill.json"
@@ -157,7 +157,7 @@ def index():
     try:
         path = db_path()
     except FileNotFoundError:  # 索引库是构建产物，没建就跳过
-        pytest.skip("索引库未构建：先跑 evefit.sde.index.build_index()")
+        pytest.skip("索引库未构建：先跑 noobbaozi.sde.index.build_index()")
     opened = Index.open(path)
     yield opened
     opened.close()
@@ -395,7 +395,7 @@ def test_view_modules_map_covers_ordered_views_and_declare_field_sources() -> No
     """`VIEW_MODULES` 与 `VIEW_ORDER` 一一对应，且每项都声明了 `FIELD_SOURCES`。"""
     assert tuple(VIEW_MODULES) == VIEW_ORDER
     for name, module in VIEW_MODULES.items():
-        assert module.__name__ == f"evefit.project.views.{name}"
+        assert module.__name__ == f"noobbaozi.project.views.{name}"
         sources = getattr(module, "FIELD_SOURCES", None)
         assert isinstance(sources, dict) and sources, f"{name} 没有 FIELD_SOURCES"
 
@@ -488,7 +488,7 @@ def test_provenance_follows_field_sources(overview: dict, view_name: str) -> Non
     见渲染层 docstring），避免把结构差异误判成标签错误。这条不是放宽：值存在的路径
     仍然要求与静态表**逐条相等**，值缺失的路径多了一条更严格的 `unknown` 要求。
     """
-    from evefit.project import provenance as P  # 局部 import：只为对拍三态
+    from noobbaozi.project import provenance as P  # 局部 import：只为对拍三态
 
     sources = VIEW_MODULES[view_name].FIELD_SOURCES
     states = overview["views"][view_name]["provenance"]
@@ -612,7 +612,7 @@ def test_dph_missing_value_is_unknown_and_present_value_keeps_the_table(
     - `f1-hecate-killmail` / `f5-no-mwd`：`dph` 是数值 → **保持原样**
       （仍等于 `provenance.tag(-11)`），本轮改动不得让它们漂移。
     """
-    from evefit.project import provenance as P
+    from noobbaozi.project import provenance as P
 
     attribute_id = VIEW_MODULES["firepower"].FIELD_SOURCES["dph"]
     static = P.tag(int(attribute_id))
@@ -698,7 +698,7 @@ def test_present_values_still_follow_the_static_table(
 
     这几条都是**有值**的叶子，所以实例级覆盖不该生效 —— 一变就说明本轮改过头了。
     """
-    from evefit.project import provenance as P
+    from noobbaozi.project import provenance as P
 
     entry = rendered_samples["f1-hecate-killmail"]["views"][view_name]
     occurrences = _leaf_values(entry["overview"])[path]  # KeyError = 结构变了，直接炸
@@ -840,7 +840,7 @@ def test_state_sensitive_field_is_assumed_only_where_the_value_moves(
 
     两个方向都验，才能同时排除「没接上」与「不分配装一律升格」。
     """
-    from evefit.project import provenance as P
+    from noobbaozi.project import provenance as P
 
     attribute_id = A.ATTR_SHIELD_EM_RESONANCE  # 271
     monkeypatch.setattr(P, "MEASURED_ATTRS", P.MEASURED_ATTRS | {attribute_id})
@@ -1026,7 +1026,7 @@ def test_render_module_has_no_unit_conversion_code() -> None:
     source = RENDER_PATH.read_text(encoding="utf-8")
 
     assert "project import units" not in source
-    assert "from evefit.project import units" not in source
+    assert "from noobbaozi.project import units" not in source
     for token in ("* 1000", "/ 1000", "ms_to_s", "s_to_ms"):
         assert token not in source, f"渲染层出现疑似单位换算：{token!r}"
 
@@ -1828,7 +1828,7 @@ def test_reason_tables_only_point_at_real_field_paths() -> None:
             assert path in VIEW_MODULES["firepower"].FIELD_SOURCES, path
 
     # 规则③：「引擎永不提供」的 ID 必须同时是常量表登记项与静态表的 unknown（三处同源）
-    from evefit.project import provenance as P
+    from noobbaozi.project import provenance as P
 
     for attribute_id in R.ENGINE_OMITS_ATTRS:
         assert attribute_id == A.ATTR_MAX_TARGETS

@@ -12,7 +12,7 @@
 
 前置：索引库必须**已经构建好**（建库是 `sde/ingest.py` 的职责）：
 
-    python -c "from evefit.sde.ingest import build_index; build_index()"
+    python -c "from noobbaozi.sde.ingest import build_index; build_index()"
 
 库不存在 → 整模块 `pytest.skip`。本测试**永不触网、永不重建索引**（T2 只吃固定产物）。
 """
@@ -26,9 +26,9 @@ from pathlib import Path
 
 import pytest
 
-from evefit.config import attributes as A
-from evefit.config.paths import db_path
-from evefit.sde.index import DEFAULT_SCALE, Index
+from noobbaozi.config import attributes as A
+from noobbaozi.config.paths import db_path
+from noobbaozi.sde.index import DEFAULT_SCALE, Index
 
 # ---- 实测基准（build 3607705，见 PROGRESS.md §3）----
 
@@ -117,7 +117,7 @@ def test_meta_table_carries_build_and_timestamp(raw_conn: sqlite3.Connection) ->
 
 def test_meta_build_matches_filename(raw_conn: sqlite3.Connection) -> None:
     build = int(dict(raw_conn.execute("SELECT key, value FROM meta"))["sde_build"])
-    assert f"evefit-{build}.sqlite3" in str(db_path(build))
+    assert f"noobbaozi-{build}.sqlite3" in str(db_path(build))
 
 
 # ---- 2. search_types：精确优先 + 前缀 + 包含，大小写不敏感 --------------------
@@ -426,7 +426,7 @@ def test_close_is_idempotent_and_blocks_further_queries() -> None:
 
 def test_open_missing_path_raises_file_not_found() -> None:
     # 不用 tmp_path：沙箱下 pytest 的临时目录不可扫描（WinError 5）。
-    missing = _resolve_db().with_name("evefit-does-not-exist.sqlite3")
+    missing = _resolve_db().with_name("noobbaozi-does-not-exist.sqlite3")
     assert not missing.exists()
     with pytest.raises(FileNotFoundError):
         Index.open(missing)
@@ -454,14 +454,14 @@ def test_same_query_is_deterministic(ix: Index) -> None:
 
 import math  # noqa: E402  （追加段落，保持原文件顶部不动）
 
-from evefit.config.attributes import (  # noqa: E402
+from noobbaozi.config.attributes import (  # noqa: E402
     ATTR_CYCLE_TIME,
     ATTR_TRACKING_SPEED,
     SCALE_KILO,
     SCALE_MILLI,
     SCALE_ONE,
 )
-from evefit.sde.attribute_dict import scale_of  # noqa: E402
+from noobbaozi.sde.attribute_dict import scale_of  # noqa: E402
 
 #: 未登记缩放的属性样本：552 signatureRadius（在常量表里但不在缩放表里）。
 ATTR_UNSCALED = ATTR_SIGNATURE_RADIUS

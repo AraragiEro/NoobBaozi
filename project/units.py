@@ -5,8 +5,8 @@
 - 这是投影层**唯一**允许出现「毫秒 / ×1000 缩放」语义的入口；业务代码只拿物理值
   （秒 / 米 / hp / GJ …），不得自行乘除 1000（红线 N5：对外不输出毫秒与 ×1000 原值）。
 - **缩放规则不在这里，也不允许在这里重写**：一律委托
-  `evefit.sde.attribute_dict.to_physical`。缩放表只有一份，手工维护在
-  `evefit/config/attributes.py`（`SCALE_BY_ATTR`，8 项 = 6 毫秒 + 2 ×1000）。
+  `noobbaozi.sde.attribute_dict.to_physical`。缩放表只有一份，手工维护在
+  `noobbaozi/config/attributes.py`（`SCALE_BY_ATTR`，8 项 = 6 毫秒 + 2 ×1000）。
   这是软件设计 §7.4 的明确要求，也是 P0-3 交付物的既有接口。
 - 全部纯函数：无 IO、无网络、无随机、无全局可变状态（红线 N1），可在任意进程直接调用。
 
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 
-from evefit.sde import attribute_dict as _dict
+from noobbaozi.sde import attribute_dict as _dict
 
 DEFAULT_DIGITS: int = 3
 """`fmt` 的默认小数位。字段规格 §0.1 的 overview 体量下 3 位足够，且能吃掉浮点噪声。"""

@@ -3,9 +3,9 @@ r"""T-24 探针：复核 f14（Damnation 指挥舰）整装装甲 HP 34,142 的�
 只读诊断：读 fixture、只读索引库（sqlite，`mode=ro`）、只读 SDE zip、调引擎。
 不写任何文件、不改产品代码。运行（仓库根目录）：
 
-    $env:UV_CACHE_DIR = "$PWD\evefit\spike\uvcache"
+    $env:UV_CACHE_DIR = "$PWD\noobbaozi\spike\uvcache"
     uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" \
-        python evefit/spike/armor_hp_probe.py
+        python noobbaozi/spike/armor_hp_probe.py
 
 回答的唯一问题：34,142 是对的还是错的，并给出可复算的分解。
 
@@ -30,10 +30,10 @@ EHP_MIXED = -43
 SHIELD_HP = 263
 
 ROOT = Path(__file__).resolve().parents[2]
-FIXTURE = ROOT / "evefit/acceptance/fixtures/f14-command-damnation.json"
-EXPECTED = ROOT / "evefit/acceptance/fixtures/f14-command-damnation.expected.json"
-DB = ROOT / "evefit/data/evefit-3607705.sqlite3"
-SDE_ZIP = ROOT / "evefit/data/eve-online-static-data-3607705-jsonl.zip"
+FIXTURE = ROOT / "noobbaozi/acceptance/fixtures/f14-command-damnation.json"
+EXPECTED = ROOT / "noobbaozi/acceptance/fixtures/f14-command-damnation.expected.json"
+DB = ROOT / "noobbaozi/data/noobbaozi-3607705.sqlite3"
+SDE_ZIP = ROOT / "noobbaozi/data/eve-online-static-data-3607705-jsonl.zip"
 
 SHIP = 22474            # Damnation
 PLATE_1600 = 31902      # Federation Navy 1600mm Steel Plates

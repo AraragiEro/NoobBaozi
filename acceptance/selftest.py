@@ -8,9 +8,9 @@
 2. 给实现方一份**可通过验收的最小形状样例**（`_good_payload()` 就是）。
 
 用法：
-    $env:UV_CACHE_DIR = (Join-Path $PWD "evefit/spike/uvcache")
+    $env:UV_CACHE_DIR = (Join-Path $PWD "noobbaozi/spike/uvcache")
     uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" `
-      python evefit/acceptance/selftest.py
+      python noobbaozi/acceptance/selftest.py
 """
 from __future__ import annotations
 

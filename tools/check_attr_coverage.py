@@ -16,7 +16,7 @@
 
 A. `FIELD_SOURCES` 覆盖 —— 六个视角的 `FIELD_SOURCES` 里的来源属性：
    - 值为 `None` → 跳过（明确登记为「合成值」，不是属性直读）；
-   - 值为 `int` → 必须在 `evefit/config/attributes.ATTRIBUTES` 里，否则报 `unregistered`；
+   - 值为 `int` → 必须在 `noobbaozi/config/attributes.ATTRIBUTES` 里，否则报 `unregistered`；
    - 值为其它类型（字符串、`bool` 等）→ 报 `invalid`（红线 N12 的另一种写法）。
 
 B. 裸属性 ID 扫描（AST，纯静态）——「看起来被当成属性 ID 用」的整数**字面量**：
@@ -26,13 +26,13 @@ B. 裸属性 ID 扫描（AST，纯静态）——「看起来被当成属性 ID 
    - `MODE_EHP_ATTR = -43` 这样名字里带 `ATTR` 的常量赋值；
    - `attrs.get(50)` / `ship_attributes(...)` 这类属性相关调用里的整数实参；
    - `if 50 in attrs` 这类「把数字当属性键去探测」的比较。
-   范围限定在 `evefit/project/views/*.py` + `evefit/project/render.py`（视角与渲染层是
+   范围限定在 `noobbaozi/project/views/*.py` + `noobbaozi/project/render.py`（视角与渲染层是
    属性 ID 的消费面）。**B 的结果是「疑似」而不是硬失败**：本检查器把疑似清单交出来，
    由 `tests/test_attr_coverage.py` 用显式白名单 `ALLOWED_BARE_IDS`（每条写理由）收口。
    为什么要这样分层：误报会让人直接关掉这条检查，而漏报会让这条检查变成安慰剂——
    所以「机器给疑似 + 人给理由」是唯一能长期活着的形式。
 
-B2（附注，不参与硬门）. `evefit/project/` 下**其它**模块（`provenance.py` 等）的裸属性 ID
+B2（附注，不参与硬门）. `noobbaozi/project/` 下**其它**模块（`provenance.py` 等）的裸属性 ID
    ——它们不在本任务的写入范围内，只能在报告里点名，不能因此让检查失败。
 
 C. 常量表自洽 —— `config/attributes.py` 里的三张表互相对齐：
@@ -43,9 +43,9 @@ C. 常量表自洽 —— `config/attributes.py` 里的三张表互相对齐：
 
 用法：
 
-    python -m evefit.tools.check_attr_coverage            # 可读报表，硬门失败时退出码 1
-    python -m evefit.tools.check_attr_coverage --json     # 机器可读（测试与 CI 用）
-    python -m evefit.tools.check_attr_coverage --strict-bare   # 把 B 的疑似也当硬门
+    python -m noobbaozi.tools.check_attr_coverage            # 可读报表，硬门失败时退出码 1
+    python -m noobbaozi.tools.check_attr_coverage --json     # 机器可读（测试与 CI 用）
+    python -m noobbaozi.tools.check_attr_coverage --strict-bare   # 把 B 的疑似也当硬门
 
 退出码：0 = 硬门（A + C，`--strict-bare` 时含 B）通过；1 = 有硬门缺口。
 
@@ -67,8 +67,13 @@ from typing import Any, Iterable, Mapping, Sequence
 # 路径与常量
 # =============================================================================
 
-EVE_ROOT: Path = Path(__file__).resolve().parents[1]
-"""`evefit/` 目录（本文件在 `evefit/tools/` 下）。"""
+EVE_ROOT: Path = Path(__file__).absolute().parents[1]
+"""`noobbaozi/` 目录（本文件在 `noobbaozi/tools/` 下）。
+
+用 `absolute()` 而不是 `resolve()`：报告里的路径应当反映**调用时的路径**。
+项目目录可能是指向别处的目录联接（junction/symlink），`resolve()` 会把它还原成
+物理路径，导致报告里的前缀与调用方看到的包名对不上（曾因此在改名后红过一条断言）。
+"""
 
 REPO_ROOT: Path = EVE_ROOT.parent
 """仓库根 —— 报告里的文件路径统一相对它显示，稳定且短。"""
@@ -121,11 +126,15 @@ ROLE_FIELD_SOURCE_VALUE: str = "field-sources-value"
 
 
 def rel_path(path: Path) -> str:
-    """绝对路径 → 相对仓库根的 posix 路径（报告与白名单键都用它，跨平台稳定）。"""
+    """绝对路径 → 相对仓库根的 posix 路径（报告与白名单键都用它，跨平台稳定）。
+
+    与 `EVE_ROOT` 同理：用 `absolute()`（不解析软链/联接），让报告里的前缀与
+    调用方看到的包名一致。
+    """
     try:
-        return path.resolve().relative_to(REPO_ROOT).as_posix()
+        return path.absolute().relative_to(REPO_ROOT).as_posix()
     except ValueError:  # 仓库外的临时文件（测试会用到）
-        return path.resolve().as_posix()
+        return path.absolute().as_posix()
 
 
 def _is_int_literal(node: ast.AST) -> bool:
@@ -258,12 +267,12 @@ def _line_snippet(source: str, lineno: int, width: int = 120) -> str:
 def load_view_modules() -> dict[str, ModuleType]:
     """六个视角模块：优先 `views/loader.VIEW_MODULES`（唯一 sanctioned import 点）。"""
     try:
-        from evefit.project.views.loader import VIEW_MODULES  # noqa: PLC0415 —— 避免顶层拉引擎
+        from noobbaozi.project.views.loader import VIEW_MODULES  # noqa: PLC0415 —— 避免顶层拉引擎
 
         return dict(VIEW_MODULES)
     except ImportError:  # loader 依赖引擎；缺依赖时仍要能检查（用固定名单）
         return {
-            name: importlib.import_module(f"evefit.project.views.{name}")
+            name: importlib.import_module(f"noobbaozi.project.views.{name}")
             for name in VIEW_MODULE_NAMES
         }
 
@@ -271,7 +280,7 @@ def load_view_modules() -> dict[str, ModuleType]:
 def known_attribute_ids(attributes: ModuleType | None = None) -> set[int]:
     """合法属性 ID 集合 = `config/attributes.ATTRIBUTES` 的键。"""
     if attributes is None:
-        from evefit.config import attributes as attributes_module  # noqa: PLC0415
+        from noobbaozi.config import attributes as attributes_module  # noqa: PLC0415
 
         attributes = attributes_module
     return set(attributes.ATTRIBUTES)
@@ -400,7 +409,7 @@ def suspect_key(suspect: Mapping[str, Any]) -> str:
     """疑似项 → **稳定**白名单键（不含行号：行号会随无关改动漂移）。
 
     形态：`<相对路径>::<常量名或角色>::<数值>`，例如
-    `evefit/project/render.py::MODE_EHP_ATTR::-43`。
+    `noobbaozi/project/render.py::MODE_EHP_ATTR::-43`。
     """
     name = suspect.get("name") or suspect["role"]
     return f"{suspect['file']}::{name}::{suspect['value']}"
@@ -448,11 +457,11 @@ def check_constant_table(attributes: ModuleType | None = None) -> dict[str, Any]
     常量、单位标签不一致等；本检查不重写它，只把它的 `consistent` 当硬门的一部分。
     """
     if attributes is None:
-        from evefit.config import attributes as attributes_module  # noqa: PLC0415
+        from noobbaozi.config import attributes as attributes_module  # noqa: PLC0415
 
         attributes = attributes_module
 
-    from evefit.sde import attribute_dict  # noqa: PLC0415 —— 只读纯函数，无 IO
+    from noobbaozi.sde import attribute_dict  # noqa: PLC0415 —— 只读纯函数，无 IO
 
     prefix = attributes.CONSTANT_PREFIX
     constants: dict[str, Any] = {
@@ -624,7 +633,7 @@ def render_text(report: Mapping[str, Any]) -> str:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="python -m evefit.tools.check_attr_coverage",
+        prog="python -m noobbaozi.tools.check_attr_coverage",
         description="T-31 属性 ID 覆盖检查（FIELD_SOURCES / 裸 ID / 常量表自洽）",
     )
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")

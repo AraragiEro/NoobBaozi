@@ -1,9 +1,9 @@
 """环境探针：确认 QA 对 P0/P1 接口与引擎输出结构的理解（非验收本体，仅侦察）。
 
 用法（PowerShell）：
-    $env:UV_CACHE_DIR = "$PWD" + "\\evefit\\spike\\uvcache"
+    $env:UV_CACHE_DIR = "$PWD" + "\\noobbaozi\\spike\\uvcache"
     uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" `
-      python evefit/acceptance/probe_env.py
+      python noobbaozi/acceptance/probe_env.py
 """
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ import json
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent          # evefit/
+ROOT = Path(__file__).resolve().parent.parent          # noobbaozi/
 WORKSPACE = ROOT.parent
 sys.path.insert(0, str(WORKSPACE))
 
-from evefit.config import paths as paths_mod          # noqa: E402
+from noobbaozi.config import paths as paths_mod          # noqa: E402
 
 
 def attr_map(node: dict) -> dict[int, object]:
@@ -27,10 +27,10 @@ def attr_map(node: dict) -> dict[int, object]:
 
 
 def main() -> int:
-    from evefit.engine import adapter
-    from evefit.engine.assumptions import default_assumptions
-    from evefit.engine.normalize import normalize_fit
-    from evefit.sde.index import Index
+    from noobbaozi.engine import adapter
+    from noobbaozi.engine.assumptions import default_assumptions
+    from noobbaozi.engine.normalize import normalize_fit
+    from noobbaozi.sde.index import Index
 
     print("=" * 70)
     print("1) 索引库")

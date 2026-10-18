@@ -17,11 +17,11 @@
 即恢复成真正的回归门禁（那时任何 DIFF = SDE 漂移或实现回归）。
 
 用法：
-    $env:UV_CACHE_DIR = (Join-Path $PWD "evefit/spike/uvcache")
+    $env:UV_CACHE_DIR = (Join-Path $PWD "noobbaozi/spike/uvcache")
     $PY = 'uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python'
 
-    Invoke-Expression "$PY evefit/acceptance/check_snapshot.py"            # 默认：skip 语义
-    Invoke-Expression "$PY evefit/acceptance/check_snapshot.py --enforce"  # 收口后：DIFF 即失败
+    Invoke-Expression "$PY noobbaozi/acceptance/check_snapshot.py"            # 默认：skip 语义
+    Invoke-Expression "$PY noobbaozi/acceptance/check_snapshot.py --enforce"  # 收口后：DIFF 即失败
 """
 from __future__ import annotations
 
@@ -171,11 +171,11 @@ def main(argv: list[str] | None = None) -> int:
 
     enforce = args.enforce or SNAPSHOT_STATUS == "enforced"
 
-    from evefit.config import paths as paths_mod
-    from evefit.engine import adapter
-    from evefit.engine.assumptions import default_assumptions
-    from evefit.engine.normalize import normalize_fit
-    from evefit.sde.index import Index
+    from noobbaozi.config import paths as paths_mod
+    from noobbaozi.engine import adapter
+    from noobbaozi.engine.assumptions import default_assumptions
+    from noobbaozi.engine.normalize import normalize_fit
+    from noobbaozi.sde.index import Index
 
     engine = adapter.Engine()
     meta = engine.meta()

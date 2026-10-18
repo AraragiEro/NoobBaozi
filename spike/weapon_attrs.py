@@ -1,4 +1,4 @@
-﻿import json
+import json
 import urllib.request
 
 import esf_dogma_engine as dogma
@@ -24,7 +24,7 @@ def name_of(aid):
 
 dogma.load_sde_from_file(sde_path())
 
-km = json.load(open("evefit/spike/kill.json", encoding="utf-8"))[0]
+km = json.load(open("noobbaozi/spike/kill.json", encoding="utf-8"))[0]
 km.pop("zkb", None)
 fit = dogma.load_killmail(km)
 

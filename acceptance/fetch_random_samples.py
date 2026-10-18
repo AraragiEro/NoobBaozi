@@ -14,10 +14,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(".").resolve()))
 
-UA = "evefit-acceptance-qa/1.0 (+https://github.com/evefit; QA random sampling)"
+UA = "noobbaozi-acceptance-qa/1.0 (+https://github.com/noobbaozi; QA random sampling)"
 HEADERS = {"User-Agent": UA, "Accept-Encoding": "gzip", "Accept": "application/json"}
 COUNT = 10
-FIXTURES = Path("evefit/acceptance/fixtures")
+FIXTURES = Path("noobbaozi/acceptance/fixtures")
 
 BLOCK_GROUPS = ("capsule", "structure", "drone", "fighter", "deployable",
                 "mobile", "starbase", "sentry", "orbital", "sovereignty")
@@ -33,9 +33,9 @@ def fetch(url: str):
 
 
 def main() -> int:
-    from evefit.config import paths as paths_mod
-    from evefit.engine.normalize import normalize_fit
-    from evefit.sde.index import Index
+    from noobbaozi.config import paths as paths_mod
+    from noobbaozi.engine.normalize import normalize_fit
+    from noobbaozi.sde.index import Index
 
     index = Index.open(paths_mod.db_path())
     random.seed(20261018)

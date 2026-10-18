@@ -1,4 +1,4 @@
-﻿import json
+import json
 
 import esf_dogma_engine as dogma
 from eveshipfit_sde import sde_path
@@ -31,7 +31,7 @@ print("\n=== 裸船对照 ===")
 show("无装备", {"ship": {"type_id": HECATE}, "items": []})
 
 print("\n=== 完整配装：MWD 分别 online / active（其余不变）===")
-km = json.load(open("evefit/spike/kill.json", encoding="utf-8"))[0]
+km = json.load(open("noobbaozi/spike/kill.json", encoding="utf-8"))[0]
 km.pop("zkb", None)
 fit = dogma.load_killmail(km)
 for s in ("online", "active"):

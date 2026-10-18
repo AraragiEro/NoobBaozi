@@ -1,10 +1,10 @@
 """L5 传输形态之二：**MCP over stdio**（文档 §10.5）。
 
 ```
-python -m evefit.mcp_server
+python -m noobbaozi.mcp_server
 ```
 
-本文件**只做传输层**：每个工具都是一次 `evefit.api.<入口>()` 调用，返回的
+本文件**只做传输层**：每个工具都是一次 `noobbaozi.api.<入口>()` 调用，返回的
 `content[0].text` 就是 api 的信封原样（`json.dumps` 的紧凑序列化），**不重写任何逻辑**
 （§10.5「三者共用同一个 Python 函数层」）。
 
@@ -15,7 +15,7 @@ python -m evefit.mcp_server
 
 ```
 uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" \
-    python -m evefit.mcp_server
+    python -m noobbaozi.mcp_server
 ```
 
 这条命令的临时环境里**只有** eveshipfit，`import mcp` 直接 `ModuleNotFoundError`
@@ -61,7 +61,7 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 
 `api` 的 `Engine` / `Index` 是**进程级单例**，这里直接复用（`_api()` 拿模块本身，
 不缓存任何结果）：同一份配装连续调多个工具，只有第一次付引擎 / 开库的成本。
-`evefit.api` 的 LRU 命中时一次引擎调用都不发生（见 `api.py` 模块 docstring）。
+`noobbaozi.api` 的 LRU 命中时一次引擎调用都不发生（见 `api.py` 模块 docstring）。
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ from typing import Any, Callable
 # 一、常量（协议 / 限额 / 顺序都集中在这里）
 # =============================================================================
 
-SERVER_NAME: str = "evefit"
+SERVER_NAME: str = "noobbaozi"
 """`serverInfo.name`：客户端列表里显示的名字。"""
 
 SERVER_VERSION: str = "1.0.0"
@@ -160,15 +160,15 @@ _TOOL_ORDER: tuple[str, ...] = TOOL_NAMES
 _COMMON_PARAMETERS: tuple[str, ...] = ("skill_tier", "damage_profile", "state_policy")
 """配装类工具共用的三个可选参数（§10.2）；`zkb_search` 不接受它们（传了会报错）。"""
 
-_DEBUG: bool = os.environ.get("EVEFIT_MCP_DEBUG", "").strip().lower() not in (
+_DEBUG: bool = os.environ.get("NOOBBAOZI_MCP_DEBUG", "").strip().lower() not in (
     "",
     "0",
     "false",
     "no",
 )
-"""`EVEFIT_MCP_DEBUG=1` 时把每个进来的请求也打到 stderr（排查客户端行为用）。"""
+"""`NOOBBAOZI_MCP_DEBUG=1` 时把每个进来的请求也打到 stderr（排查客户端行为用）。"""
 
-_LOG_PREFIX: str = "[evefit-mcp] "
+_LOG_PREFIX: str = "[noobbaozi-mcp] "
 
 TRANSPORTS: tuple[str, ...] = ("stdio", "http")
 """支持的传输形态（`--transport`）：`stdio` 是默认，`http` 是 Streamable HTTP。"""
@@ -233,7 +233,7 @@ def _log(message: str, *, level: str = "info") -> None:
 
 
 def _debug(message: str) -> None:
-    """请求级调试日志：`EVEFIT_MCP_DEBUG=1` **或** `--log-level debug` 时打开。"""
+    """请求级调试日志：`NOOBBAOZI_MCP_DEBUG=1` **或** `--log-level debug` 时打开。"""
     if _DEBUG:
         _write_log(message)  # 环境变量是硬开关：即使 --log-level error 也要看得到
         return
@@ -250,9 +250,9 @@ _VIEWS_CACHE: tuple[str, ...] | None = None
 
 
 def _api() -> Any:
-    """拿 `evefit.api` 模块（单例；导入失败时**抛原异常**，由调用方转内部错误）。
+    """拿 `noobbaozi.api` 模块（单例；导入失败时**抛原异常**，由调用方转内部错误）。
 
-    为什么不写在文件顶部的 `from evefit import api`：那样 `import evefit.mcp_server`
+    为什么不写在文件顶部的 `from noobbaozi import api`：那样 `import noobbaozi.mcp_server`
     就会连带加载引擎 / SDE 适配层，`tools/list` 之前的时间都花在导入上；更糟的是
     **导入期的裸 print 会落在 `_claim_stdout()` 之前**（stdout 还没被保护起来）。
     延迟到第一次真正需要时再导入，`_claim_stdout()` 就总是先手。
@@ -263,7 +263,7 @@ def _api() -> Any:
     if _API_IMPORT_ERROR is not None:
         raise _API_IMPORT_ERROR
     try:
-        from evefit import api as module
+        from noobbaozi import api as module
     except BaseException as exc:  # noqa: BLE001 - 导入失败要能被转成 internal_error
         _API_IMPORT_ERROR = exc
         raise
@@ -281,7 +281,7 @@ def _view_names() -> tuple[str, ...]:
     global _VIEWS_CACHE
     if _VIEWS_CACHE is None:
         _api()  # 导入 api 会连带导入 render → 六个视角完成注册
-        from evefit.project.views import VIEW_ORDER, available_views
+        from noobbaozi.project.views import VIEW_ORDER, available_views
 
         registered = tuple(available_views())
         _VIEWS_CACHE = registered or tuple(VIEW_ORDER)
@@ -811,7 +811,7 @@ def _build_tool_specs() -> tuple[dict, ...]:
 
 
 INSTRUCTIONS: str = (
-    "evefit 配装分析（EVE Online）。按这个顺序用：\n"
+    "noobbaozi 配装分析（EVE Online）。按这个顺序用：\n"
     "① fit_parse 先确认读懂了（船 / 模块件数 / warnings）；\n"
     "② fit_killmail 分析战报时拿上下文（价值 / 参战方 / 伤害）；\n"
     "③ fit_index 默认入口：六维度摘要，先看 flags；\n"
@@ -1263,8 +1263,8 @@ def serve(reader: Any = None, writer: Any = None) -> int:
 
 _USAGE: str = (
     "用法：\n"
-    "  python -m evefit.mcp_server                      # 默认：stdio（换行分隔 JSON-RPC 2.0）\n"
-    "  python -m evefit.mcp_server --transport http --host 0.0.0.0 --port 8080\n"
+    "  python -m noobbaozi.mcp_server                      # 默认：stdio（换行分隔 JSON-RPC 2.0）\n"
+    "  python -m noobbaozi.mcp_server --transport http --host 0.0.0.0 --port 8080\n"
     "\n"
     "选项：\n"
     f"  --transport stdio|http  传输形态，默认 {DEFAULT_TRANSPORT}\n"
@@ -1277,7 +1277,7 @@ _USAGE: str = (
     "  -h, --help              这份说明，写 stderr\n"
     "\n"
     "stdio 模式下 stdout 只写协议消息；日志一律 stderr（http 模式下 stdout 一个字节都没有）。\n"
-    "环境变量：EVEFIT_MCP_DEBUG=1 打开请求级调试日志。"
+    "环境变量：NOOBBAOZI_MCP_DEBUG=1 打开请求级调试日志。"
 )
 
 
@@ -1396,7 +1396,7 @@ def _redirect_stdout_to_stderr() -> None:
 
 
 def _run_http_transport(options: CliOptions) -> int:
-    """HTTP 传输入口（**延迟导入** `evefit.mcp_http`）。
+    """HTTP 传输入口（**延迟导入** `noobbaozi.mcp_http`）。
 
     延迟导入有两个理由：① stdio 路径不该为 HTTP 付导入成本；② `mcp_http` 反过来
     import 本模块（拿 `dispatch` / `_Session` / 日志），模块级互相 import 会成环。
@@ -1404,7 +1404,7 @@ def _run_http_transport(options: CliOptions) -> int:
     _configure_streams()
     _redirect_stdout_to_stderr()
     try:
-        from evefit.mcp_http import run_http
+        from noobbaozi.mcp_http import run_http
     except BaseException as exc:  # noqa: BLE001 - 导入失败要说清楚，不静默退化
         _log(f"HTTP 传输不可用：{type(exc).__name__}: {exc}", level="error")
         return 1
@@ -1421,7 +1421,7 @@ def _run_http_transport(options: CliOptions) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """`python -m evefit.mcp_server` 的入口：**默认 stdio**，`--transport http` 走 HTTP。
+    """`python -m noobbaozi.mcp_server` 的入口：**默认 stdio**，`--transport http` 走 HTTP。
 
     注意：`--help` / `--version` 也写 **stderr** —— stdio 模式下这个进程的 stdout 只有
     一个用途，即使被误用也不能破例（否则「`--help` 之后客户端解析崩」又是一次事故）。

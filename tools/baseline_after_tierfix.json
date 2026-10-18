@@ -4,7 +4,7 @@
   "sde_build": 3607705,
   "engine_version": "13.6.0",
   "spec_version": "v1",
-  "sample": "evefit/spike/kill.json",
+  "sample": "noobbaozi/spike/kill.json",
   "skill_tier": {
     "name": "all4+min_required",
     "count": 512,

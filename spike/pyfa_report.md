@@ -1,8 +1,8 @@
 # T-42 · pyfa/eos 独立对拍侦察报告
 
-> 角色：evefit 开发者（本任务只写探针与报告，**未改动任何产品代码**）
+> 角色：noobbaozi 开发者（本任务只写探针与报告，**未改动任何产品代码**）
 > 日期：2026-10-19 · SDE build 3607705 · 本引擎 `eveshipfit-dogma-engine 13.6.0`
-> 探针：`evefit/spike/pyfa_probe.py`（**唯一新增代码**）· 原始产物：`evefit/spike/pyfa_scratch/`
+> 探针：`noobbaozi/spike/pyfa_probe.py`（**唯一新增代码**）· 原始产物：`noobbaozi/spike/pyfa_scratch/`
 
 ---
 
@@ -20,16 +20,16 @@
 ## 1. 方法与可复现
 
 ```powershell
-$env:UV_CACHE_DIR = "$PWD\evefit\spike\uvcache"
+$env:UV_CACHE_DIR = "$PWD\noobbaozi\spike\uvcache"
 # 单跑某一问
 uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" `
-  python evefit\spike\pyfa_probe.py q2
+  python noobbaozi\spike\pyfa_probe.py q2
 # 三问全跑（Q3 默认取 16 条样本）
 uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" `
-  python evefit\spike\pyfa_probe.py all --limit 16
+  python noobbaozi\spike\pyfa_probe.py all --limit 16
 ```
 
-产物目录 `evefit/spike/pyfa_scratch/`（**说明：`spike/` 只 gitignore 了 `uvcache/`，这里的内容都是本任务新拉取的，未入库，可整目录删除**）：
+产物目录 `noobbaozi/spike/pyfa_scratch/`（**说明：`spike/` 只 gitignore 了 `uvcache/`，这里的内容都是本任务新拉取的，未入库，可整目录删除**）：
 
 | 路径 | 内容 |
 |---|---|
@@ -69,7 +69,7 @@ Resolved 2 packages in 3ms
       distutils.compilers.errors.PlatformError: Microsoft Visual C++ 14.0
           raise SystemExit(f"error: {msg}")
       SystemExit: error: Microsoft Visual C++ 14.0 or greater ...
-      PermissionError: [WinError 5] 拒绝访问。: '...\evefit\spike\uvcache\builds-v0\.tmp8LxMcZ\...'
+      PermissionError: [WinError 5] 拒绝访问。: '...\noobbaozi\spike\uvcache\builds-v0\.tmp8LxMcZ\...'
   help: `pyyaml` (v3.12) was included because `eos` (v0.0.0.dev8) depends on `pyyaml`
 ```
 
@@ -103,7 +103,7 @@ phobos/metadata.json            # 只用来取 client_build 做缓存指纹
 
 所以「是不是要额外下载 SDE」的答案是：**必须有 FSD 数据，但不必另行下载**——Pyfa 仓库自带 `staticdata/fsd_built/*.0.json`（分片，`types` 约 126 MB + `typedogma` 约 50 MB，合计约 180 MB）。我**没有**走这条路（本机到 `raw.githubusercontent.com` 的速率实测约 25 KB/s，且有中途断流，180 MB 不现实），而是：
 
-> **直接拿项目本地已有的 SDE jsonl（`evefit/data/eve-online-static-data-3607705-jsonl.zip`）实现一个等价 data_handler。**
+> **直接拿项目本地已有的 SDE jsonl（`noobbaozi/data/eve-online-static-data-3607705-jsonl.zip`）实现一个等价 data_handler。**
 > 可行的原因：eos 的 `ModInfoconverter` 吃的就是 **FSD 原生的 `modifierInfo` 格式**（`func`/`domain`/`operation`/`modifiedAttributeID`/`groupID`/`skillTypeID`），键名只差一层重命名（`_key → typeID/attributeID/effectID`、`effectCategoryID → effectCategory`）。
 
 实测构建：**5.1 秒**，`types=9803 / attrs=1698 / effects=2988 / buffs=42`（Cleaner 只保留船/模块/弹药/无人机/舰载机/植入体/技能/子系统，故少于全量 5.3 万 type）。
@@ -206,7 +206,7 @@ Bifrost：max_group 违规 2 条 → {"type":"max_group","group_id":46,"limit":"
 | 对齐 | `-1` | eos **不直接给对齐时间**，按 `ln4 × mass × agility / 1e6` 换算 | 换算后可 |
 | CPU/PG | 逐件 `49` / `15` 求和 | `stats.cpu.used` / `stats.powergrid.used`（**2 位四舍五入**） | 可比 |
 
-样本：`evefit/acceptance/fixtures/` 共 **65 条**（52 个 `*.json` killmail + 13 个 `*.eft`，各带 `*.expected.json`）。本次取按名排序的 **16 条**（`--limit 16`），覆盖：T3D / T3C / 后勤 / 指挥 / 战列 / HAC / 激光 / 弹道 / 导弹 HAC / 无人机 / 极限抗性 / 电容注射 / 辅助维修 / 吸电，**不经任何筛选**。
+样本：`noobbaozi/acceptance/fixtures/` 共 **65 条**（52 个 `*.json` killmail + 13 个 `*.eft`，各带 `*.expected.json`）。本次取按名排序的 **16 条**（`--limit 16`），覆盖：T3D / T3C / 后勤 / 指挥 / 战列 / HAC / 激光 / 弹道 / 导弹 HAC / 无人机 / 极限抗性 / 电容注射 / 辅助维修 / 吸电，**不经任何筛选**。
 
 ### 4.2 表 A · 逐件 DPS 对账（引擎 Σ(-12)×quantity vs eos 逐件）
 
@@ -380,4 +380,4 @@ f25-nos-neut            299.6394     2 / 0
 - `spike/pyfa_scratch/eos-master/`：第一次用 `tarfile.extractall()` 解 tarball 时，解到第一个文件就 `PermissionError`，随后该目录变成**不可读也不可删**（`Get-Acl` 都抛 `UnauthorizedAccessException`）。后续改成手工 `makedirs + open` 解到 `eos_src/` 就正常了。
 - `spike/uvcache/builds-v0/.tmp*/`：uv 构建 PyYAML 失败后留下的 3–4 个临时目录同样被锁成不可读。
 - 这些目录**都是垃圾**，不影响任何功能；因为本会话的提权审批被禁用（`approval prompts are disabled`），我没有尝试 `workspace-write`/`danger-full-access` 去修 ACL——按规则如实上报，不硬绕。
-- **写入范围自查**：本任务只新建了 `evefit/spike/pyfa_probe.py`、`evefit/spike/pyfa_report.md`，以及 `evefit/spike/pyfa_scratch/`（源码、venv、日志、结果 JSON）。**未修改**任何产品代码 / 测试 / 文档 / acceptance / PROGRESS.md。
+- **写入范围自查**：本任务只新建了 `noobbaozi/spike/pyfa_probe.py`、`noobbaozi/spike/pyfa_report.md`，以及 `noobbaozi/spike/pyfa_scratch/`（源码、venv、日志、结果 JSON）。**未修改**任何产品代码 / 测试 / 文档 / acceptance / PROGRESS.md。

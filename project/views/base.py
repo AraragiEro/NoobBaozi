@@ -36,9 +36,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from evefit import contracts
-from evefit.engine import scenarios
-from evefit.project import units
+from noobbaozi import contracts
+from noobbaozi.engine import scenarios
+from noobbaozi.project import units
 
 SLOT_CARGO = "cargo"
 """唯一不算「已装」的槽位类别（软件设计 §7.3 的合法 slot.type 里的一个）。"""

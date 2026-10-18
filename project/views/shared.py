@@ -57,11 +57,11 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from evefit.config import attributes as A
-from evefit.config import paths as _paths
-from evefit.config.attributes import ATTR_CHARGE_RATE, ATTR_EXPLOSION_DELAY
-from evefit.project import units
-from evefit.project.views.base import (
+from noobbaozi.config import attributes as A
+from noobbaozi.config import paths as _paths
+from noobbaozi.config.attributes import ATTR_CHARGE_RATE, ATTR_EXPLOSION_DELAY
+from noobbaozi.project import units
+from noobbaozi.project.views.base import (
     BASE,
     SLOT_CARGO,
     ViewContext,

@@ -1,6 +1,6 @@
 """输出分层的第一阶段（L0 摘要 / L1 单视角 / 按路径取数）—— **只组装，不计算**。
 
-权威文档：`evefit/docs/输出分层与工具集-v1.md`。三个入口：
+权威文档：`noobbaozi/docs/输出分层与工具集-v1.md`。三个入口：
 
 ```python
 render_index(ctx)          -> dict   # L0 摘要（≤ INDEX_BUDGET_CHARS 字符）
@@ -152,10 +152,10 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Mapping
 
-from evefit.project import render
-from evefit.project.views import available_views
-from evefit.project.views.base import ViewContext
-from evefit.project.views.loader import load_views
+from noobbaozi.project import render
+from noobbaozi.project.views import available_views
+from noobbaozi.project.views.base import ViewContext
+from noobbaozi.project.views.loader import load_views
 
 # =============================================================================
 # 一、常量与口径

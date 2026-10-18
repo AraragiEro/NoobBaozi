@@ -13,9 +13,9 @@
 5. 必须带描述性 `User-Agent`、路径带尾斜杠、`< 5 分钟` 的 killmail 不下发、响应 gzip。
 
 用法：
-    $env:UV_CACHE_DIR = (Join-Path $PWD "evefit/spike/uvcache")
+    $env:UV_CACHE_DIR = (Join-Path $PWD "noobbaozi/spike/uvcache")
     uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" `
-      python evefit/acceptance/fetch_fixtures.py --round 2
+      python noobbaozi/acceptance/fetch_fixtures.py --round 2
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ ROOT = HERE.parent
 FIXTURES = HERE / "fixtures"
 sys.path.insert(0, str(ROOT.parent))
 
-UA = "evefit-acceptance-qa/1.0 (+https://github.com/evefit; QA fixture fetch)"
+UA = "noobbaozi-acceptance-qa/1.0 (+https://github.com/noobbaozi; QA fixture fetch)"
 HEADERS = {"User-Agent": UA, "Accept-Encoding": "gzip", "Accept": "application/json"}
 
 COMBAT_SLOTS = ("high", "medium", "low", "rig", "subsystem", "service",
@@ -240,11 +240,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"已有样本，跳过（幂等）：{skipped}")
         specs = [s for s in specs if (FIXTURES / f"{s['stem']}.json").is_file() is False]
 
-    from evefit.config import paths as paths_mod
-    from evefit.engine.assumptions import default_assumptions
-    from evefit.engine import adapter
-    from evefit.engine.normalize import normalize_fit
-    from evefit.sde.index import Index
+    from noobbaozi.config import paths as paths_mod
+    from noobbaozi.engine.assumptions import default_assumptions
+    from noobbaozi.engine import adapter
+    from noobbaozi.engine.normalize import normalize_fit
+    from noobbaozi.sde.index import Index
 
     engine = adapter.Engine()
     index = Index.open(paths_mod.db_path())

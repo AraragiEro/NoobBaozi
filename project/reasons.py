@@ -69,7 +69,7 @@ from __future__ import annotations
 
 from typing import Iterable, Mapping
 
-from evefit.config import attributes as _a
+from noobbaozi.config import attributes as _a
 
 UNKNOWN_REASONS: tuple[str, ...] = (
     "input_incomplete",

@@ -1,9 +1,9 @@
 ---
-name: evefit
-description: 读取并理解 EVE Online 配装（EFT / DNA / killmail）。通过 evefit MCP 拿六维度事实、三态可信度与诊断信号；用于回答「这套配装什么样、哪里有问题、能不能飞」，不用于生成配装、写战报叙事或做判定。
+name: noobbaozi
+description: 读取并理解 EVE Online 配装（EFT / DNA / killmail）。通过 noobbaozi MCP 拿六维度事实、三态可信度与诊断信号；用于回答「这套配装什么样、哪里有问题、能不能飞」，不用于生成配装、写战报叙事或做判定。
 ---
 
-# evefit · 配装理解
+# noobbaozi · 配装理解
 
 一个 MCP 服务，提供 EVE 配装的**事实**：六维度数值、三态 provenance、诊断 flags、战报上下文。**它只给事实，不做判断、不评分、不写叙事。**
 
@@ -23,10 +23,10 @@ description: 读取并理解 EVE Online 配装（EFT / DNA / killmail）。通�
 ## 怎么连
 
 ```powershell
-python -m evefit.mcp_server --transport http --host 0.0.0.0 --port 8080
+python -m noobbaozi.mcp_server --transport http --host 0.0.0.0 --port 8080
 ```
 
-stdio 形态、客户端 JSON、`/health`、错误语义等细节见 `evefit/mcp/README.md`。
+stdio 形态、客户端 JSON、`/health`、错误语义等细节见 `noobbaozi/mcp/README.md`。
 
 ## 三条判读纪律
 

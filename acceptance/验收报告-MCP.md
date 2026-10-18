@@ -1,9 +1,9 @@
 # 验收报告 · MCP 服务器（P4 最后一块）
 
-- 执行：`evefit-tester`（独立验收）
+- 执行：`noobbaozi-tester`（独立验收）
 - 客户端：**我自己写的**（`acceptance/check_mcp.py`，仅标准库 + `subprocess`），
   **没有复用**开发方的 `client_smoke.py`
-- 启动方式：`python -m evefit.mcp_server`（stdio，零第三方依赖）
+- 启动方式：`python -m noobbaozi.mcp_server`（stdio，零第三方依赖）
 - 样本：`fixtures/f1-hecate-killmail.eft`（Hecate，6 高槽）
 - 实现侧基线（我自己跑）：`pytest` **707+ passed**
 
@@ -44,7 +44,7 @@
 
 - 整个主会话共 **17 行** stdout 输出，逐行解析后 `jsonrpc == "2.0"` **0 违规**；
 - 首行**无 UTF-8 BOM**（输入也是无 BOM 字节，符合你提醒的 PowerShell 管道坑）；
-- 日志确实存在，但**全在 stderr**（`[evefit-mcp] 工具就绪 / initialize: ...`）—— 这是正确做法。
+- 日志确实存在，但**全在 stderr**（`[noobbaozi-mcp] 工具就绪 / initialize: ...`）—— 这是正确做法。
 
 ## 3. ③ 五个工具
 
@@ -120,10 +120,10 @@
 ## 9. 复现
 
 ```powershell
-$env:UV_CACHE_DIR = "$PWD\evefit\spike\uvcache"
+$env:UV_CACHE_DIR = "$PWD\noobbaozi\spike\uvcache"
 $env:PYTHONUNBUFFERED='1'
 uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" `
-  python -u evefit/acceptance/check_mcp.py
+  python -u noobbaozi/acceptance/check_mcp.py
 ```
 
 产物：`out/mcp-check.json`（版本协商逐条结果 + 缺陷列表）。

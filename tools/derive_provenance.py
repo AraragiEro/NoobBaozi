@@ -73,8 +73,8 @@ T-14 修的两个缺陷（都是**静默退化**，必须显式炸出来）
 产物
 ----
 - 标准输出：人类复核用（分样本 × 分轴证据、三态计数）；
-- `evefit/tools/provenance_report.json`：机器可复核用的完整证据（按样本 × 轴分组）；
-- `evefit/project/provenance.py`：**三张表由本脚本重写**（人不再手抄；`_MANUAL_OVERRIDES`
+- `noobbaozi/tools/provenance_report.json`：机器可复核用的完整证据（按样本 × 轴分组）；
+- `noobbaozi/project/provenance.py`：**三张表由本脚本重写**（人不再手抄；`_MANUAL_OVERRIDES`
   与理由、`audit()` 元信息仍是人维护的部分）。写回前会先 `compile()` 语法护栏。
 
 轴外风险（补一节取证，不改表）
@@ -95,17 +95,17 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
-from evefit.config import attributes as _a
-from evefit.config.paths import db_path
-from evefit.engine.adapter import Engine, load_eft, load_killmail
-from evefit.engine.assumptions import (
+from noobbaozi.config import attributes as _a
+from noobbaozi.config.paths import db_path
+from noobbaozi.engine.adapter import Engine, load_eft, load_killmail
+from noobbaozi.engine.assumptions import (
     DEFAULT_DAMAGE_PROFILE,
     SKILL_TIER_NAME,
     SKILL_TIER_NAME_MIN_ONLY,
     derive_skill_tier,
 )
-from evefit.sde import attribute_dict as _dict
-from evefit.sde.index import Index
+from noobbaozi.sde import attribute_dict as _dict
+from noobbaozi.sde.index import Index
 
 # =============================================================================
 # 零、常量
@@ -1305,7 +1305,7 @@ def main() -> int:
     out(f"三态表已重写：{module.as_posix()}（写盘前已过 compile() 语法护栏）")
     out("")
     out("人的动作（脚本只写表，不写理由）：")
-    out("  1. `git diff evefit/project/provenance.py` 逐条复核三张表的变化；")
+    out("  1. `git diff noobbaozi/project/provenance.py` 逐条复核三张表的变化；")
     out("  2. 手工覆盖逐条写理由（目前只有 -70，见 OVERRIDES / _MANUAL_OVERRIDES）；")
     out("  3. 跑 pytest（tests/test_projection_core.py 有 provenance 护栏断言）。")
     return 0

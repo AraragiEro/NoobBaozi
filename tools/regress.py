@@ -1,11 +1,11 @@
-r"""T-33 全部门禁一键化：`python -m evefit.tools.regress`。
+r"""T-33 全部门禁一键化：`python -m noobbaozi.tools.regress`。
 
 判断「项目健康」原本要手工跑四件事，漏一件就等于没跑（而且没人会记得自己漏了哪件）：
 
-1. `pytest -q evefit/tests`
-2. `python -m evefit.tools.check_attr_coverage`（常量覆盖硬门）
-3. `python evefit/acceptance/check_snapshot.py --enforce`（回归快照）
-4. `python evefit/acceptance/run_acceptance.py`（独立验收，36 样本，较慢）
+1. `pytest -q noobbaozi/tests`
+2. `python -m noobbaozi.tools.check_attr_coverage`（常量覆盖硬门）
+3. `python noobbaozi/acceptance/check_snapshot.py --enforce`（回归快照）
+4. `python noobbaozi/acceptance/run_acceptance.py`（独立验收，36 样本，较慢）
 
 历史上已经出过「看起来全绿其实全错」：`derive_skill_tier` 静默退化到 19 个技能，
 所有数值都跑在旧档上，测试、快照、验收却一路绿灯。所以本工具的默认值是
@@ -26,17 +26,17 @@ r"""T-33 全部门禁一键化：`python -m evefit.tools.regress`。
 
 用法：
 
-    python -m evefit.tools.regress                                   # 全部快速门禁
-    python -m evefit.tools.regress --full                            # 追加 acceptance
-    python -m evefit.tools.regress --gate pytest --gate snapshot     # 只跑指定门
-    python -m evefit.tools.regress --json                            # 机器可读（CI / agent）
-    python -m evefit.tools.regress --timeout 1200                    # 单门超时（默认 600s）
+    python -m noobbaozi.tools.regress                                   # 全部快速门禁
+    python -m noobbaozi.tools.regress --full                            # 追加 acceptance
+    python -m noobbaozi.tools.regress --gate pytest --gate snapshot     # 只跑指定门
+    python -m noobbaozi.tools.regress --json                            # 机器可读（CI / agent）
+    python -m noobbaozi.tools.regress --timeout 1200                    # 单门超时（默认 600s）
 
 门禁命令用 `sys.executable`，因此**必须与使用者同一套 python / uv 环境**：
 
-    $env:UV_CACHE_DIR = "$PWD\evefit\spike\uvcache"
+    $env:UV_CACHE_DIR = "$PWD\noobbaozi\spike\uvcache"
     uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" `
-      python -m evefit.tools.regress
+      python -m noobbaozi.tools.regress
 
 `--gate` 写错 id、或参数本身不合法时，argparse 自己以退出码 2 结束（stderr 有 usage）。
 这与「全部 SKIPPED → 2」同码，但 stderr 会立刻说明是参数问题。
@@ -61,10 +61,10 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 EVE_ROOT: Path = Path(__file__).resolve().parents[1]
-"""`evefit/` 目录（本文件在 `evefit/tools/` 下）。"""
+"""`noobbaozi/` 目录（本文件在 `noobbaozi/tools/` 下）。"""
 
 WORKSPACE: Path = EVE_ROOT.parent
-"""仓库根：所有门禁命令的工作目录（`pytest -q evefit/tests` 这类相对路径都相对它）。"""
+"""仓库根：所有门禁命令的工作目录（`pytest -q noobbaozi/tests` 这类相对路径都相对它）。"""
 
 DEFAULT_TIMEOUT_S: int = 600
 """单门超时（秒）。超时 → `FAIL` 并在摘要里注明，绝不当作跳过。"""
@@ -177,24 +177,24 @@ def build_gates(python: str | None = None) -> tuple[Gate, ...]:
     return (
         Gate(
             id="pytest",
-            title="单元测试（evefit/tests 全量）",
-            command=(py, "-m", "pytest", "-q", "evefit/tests", "-p", "no:cacheprovider"),
+            title="单元测试（noobbaozi/tests 全量）",
+            command=(py, "-m", "pytest", "-q", "noobbaozi/tests", "-p", "no:cacheprovider"),
         ),
         Gate(
             id="attr-coverage",
             title="常量覆盖硬门（FIELD_SOURCES / 裸属性 ID / 常量表自洽）",
-            command=(py, "-m", "evefit.tools.check_attr_coverage"),
+            command=(py, "-m", "noobbaozi.tools.check_attr_coverage"),
         ),
         Gate(
             id="snapshot",
             title="回归快照对拍（§6.2 主样本 + 四模式 + fixtures 漂移）",
-            command=(py, "evefit/acceptance/check_snapshot.py", "--enforce"),
+            command=(py, "noobbaozi/acceptance/check_snapshot.py", "--enforce"),
             # 技能档护栏退化时该脚本退出码 2 → 这里照样判 FAIL（非零即红）
         ),
         Gate(
             id="acceptance",
             title="独立验收（六视角 + I1–I7，36 样本，较慢）",
-            command=(py, "evefit/acceptance/run_acceptance.py", "--label", "regress"),
+            command=(py, "noobbaozi/acceptance/run_acceptance.py", "--label", "regress"),
             requires=("pytest",),
             full_only=True,
         ),
@@ -448,7 +448,7 @@ def render_report(
     counts = count_statuses(results)
     lines: list[str] = []
     lines.append("=" * 96)
-    lines.append("evefit 门禁汇总" + ("（--full）" if full else "（快速门）"))
+    lines.append("noobbaozi 门禁汇总" + ("（--full）" if full else "（快速门）"))
     lines.append("=" * 96)
     for note in notes:
         lines.append(f"  · {note}")
@@ -482,7 +482,7 @@ def render_report(
     lines.append(f"结论：{VERDICT_BY_EXIT.get(exit_code, '未知')}（退出码 {exit_code}）")
     if exit_code != EXIT_OK:
         lines.append(
-            "单门复跑：python -m evefit.tools.regress --gate <id>；"
+            "单门复跑：python -m noobbaozi.tools.regress --gate <id>；"
             "或直接执行该门命令看完整输出。"
         )
     return "\n".join(lines)
@@ -500,7 +500,7 @@ def build_payload(
     """机器可读结果（CI / agent 消费）。"""
     counts = count_statuses(results)
     return {
-        "tool": "evefit.tools.regress",
+        "tool": "noobbaozi.tools.regress",
         "generated_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         "python": sys.executable,
         "workspace": str(WORKSPACE),
@@ -527,10 +527,10 @@ def build_payload(
 
 _EPILOG = """\
 门禁清单（顺序即执行顺序）：
-  pytest          pytest -q evefit/tests -p no:cacheprovider
-  attr-coverage   python -m evefit.tools.check_attr_coverage
-  snapshot        python evefit/acceptance/check_snapshot.py --enforce
-  acceptance      python evefit/acceptance/run_acceptance.py --label regress
+  pytest          pytest -q noobbaozi/tests -p no:cacheprovider
+  attr-coverage   python -m noobbaozi.tools.check_attr_coverage
+  snapshot        python noobbaozi/acceptance/check_snapshot.py --enforce
+  acceptance      python noobbaozi/acceptance/run_acceptance.py --label regress
                   （仅 --full；声明依赖 pytest，pytest 失败则 SKIPPED）
 
 退出码：0 全 PASS；1 任一 FAIL（或有门被跳过）；2 一项都没真跑。
@@ -540,8 +540,8 @@ _EPILOG = """\
 def main(argv: Sequence[str] | None = None, *, runner: Runner | None = None) -> int:
     """CLI 入口。`runner` 只给测试用（注入假执行器，不真起子进程）。"""
     parser = argparse.ArgumentParser(
-        prog="python -m evefit.tools.regress",
-        description="evefit 全部门禁一键化（默认全开、默认严格）",
+        prog="python -m noobbaozi.tools.regress",
+        description="noobbaozi 全部门禁一键化（默认全开、默认严格）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=_EPILOG,
     )

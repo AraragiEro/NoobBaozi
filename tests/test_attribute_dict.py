@@ -1,8 +1,8 @@
 """T1 单元测试：属性字典与单位/缩放表。
 
 被测：
-- `evefit/config/attributes.py`（常量 + 单位/缩放表）
-- `evefit/sde/attribute_dict.py`（纯函数查询层）
+- `noobbaozi/config/attributes.py`（常量 + 单位/缩放表）
+- `noobbaozi/sde/attribute_dict.py`（纯函数查询层）
 
 覆盖：
 1. 常量表完整性：每个 `ATTR_*` 值唯一、为 `int`、且都有元数据行；
@@ -36,8 +36,8 @@ from pathlib import Path
 
 import pytest
 
-from evefit.config import attributes
-from evefit.sde import attribute_dict
+from noobbaozi.config import attributes
+from noobbaozi.sde import attribute_dict
 
 # 全部 ATTR_* 常量名（顺序稳定，便于失败时定位）
 CONSTANT_NAMES: list[str] = sorted(
@@ -338,7 +338,7 @@ def test_audit_is_pure_and_repeatable() -> None:
 # 6. 纯函数约束（AST 静态检查）
 # ---------------------------------------------------------------------------
 
-_ALLOWED_IMPORTS = {"__future__", "math", "evefit.config", "evefit.config.attributes"}
+_ALLOWED_IMPORTS = {"__future__", "math", "noobbaozi.config", "noobbaozi.config.attributes"}
 _FORBIDDEN_MODULE_PREFIXES = ("os", "io", "sys", "pathlib", "sqlite3", "urllib", "socket", "json")
 
 
@@ -481,8 +481,8 @@ def test_fighter_positive_ids_match_the_index_names() -> None:
     索引库不可用（未 ingest / 路径缺失）时 `pytest.skip`，不把环境问题当失败；
     但只要能打开就必须逐字对上，否则说明常量表写错了 ID 或名字。
     """
-    from evefit.config.paths import db_path
-    from evefit.sde.index import Index
+    from noobbaozi.config.paths import db_path
+    from noobbaozi.sde.index import Index
 
     try:
         index = Index.open(db_path())
@@ -507,8 +507,8 @@ def test_fighter_positive_ids_match_the_index_names() -> None:
 
 def test_fighter_derived_ids_stay_out_of_the_sde_attribute_table() -> None:
     """负 ID 属引擎 pass 4 派生，SDE 里查不到 —— 若"补"出来了说明有人越界改索引。"""
-    from evefit.config.paths import db_path
-    from evefit.sde.index import Index
+    from noobbaozi.config.paths import db_path
+    from noobbaozi.sde.index import Index
 
     try:
         index = Index.open(db_path())
@@ -601,8 +601,8 @@ def test_t13_new_ids_match_the_index_names() -> None:
 
     索引库不可用（未 ingest / 路径缺失）时 `pytest.skip`，不把环境问题当失败。
     """
-    from evefit.config.paths import db_path
-    from evefit.sde.index import Index
+    from noobbaozi.config.paths import db_path
+    from noobbaozi.sde.index import Index
 
     try:
         index = Index.open(db_path())
@@ -742,8 +742,8 @@ def test_t23_new_ids_match_the_index_names_and_units() -> None:
 
     索引库不可用（未 ingest / 路径缺失）时 `pytest.skip`，不把环境问题当失败。
     """
-    from evefit.config.paths import db_path
-    from evefit.sde.index import Index
+    from noobbaozi.config.paths import db_path
+    from noobbaozi.sde.index import Index
 
     try:
         index = Index.open(db_path())
@@ -895,8 +895,8 @@ def test_t32_max_targets_constant_is_registered() -> None:
 
 def test_t32_max_targets_is_a_derived_id_absent_from_the_sde() -> None:
     """`Index.attribute(-70)` = None —— 这就是「派生，SDE 无记录」的实证（也是它要单独登记的原因）。"""
-    from evefit.config.paths import db_path
-    from evefit.sde.index import Index
+    from noobbaozi.config.paths import db_path
+    from noobbaozi.sde.index import Index
 
     try:
         index = Index.open(db_path())
@@ -915,7 +915,7 @@ def test_t32_max_targets_is_a_derived_id_absent_from_the_sde() -> None:
 
 def test_t32_provenance_side_is_pinned() -> None:
     """补登之后 provenance 侧的三条事实：`-70` 仍 unknown、仍是手工覆盖、不再有未登记项。"""
-    from evefit.project import provenance as P
+    from noobbaozi.project import provenance as P
 
     assert P.tag(attributes.ATTR_MAX_TARGETS) == "unknown"
     assert attributes.ATTR_MAX_TARGETS in P._MANUAL_OVERRIDES

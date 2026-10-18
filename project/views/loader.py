@@ -1,6 +1,6 @@
 """视角加载器：**唯一**允许 import 六个视角模块的地方（副作用即注册）。
 
-为什么要单独一个文件：`evefit/project/views/__init__.py` 是并行开发的汇合点，
+为什么要单独一个文件：`noobbaozi/project/views/__init__.py` 是并行开发的汇合点，
 不能在里面 import 六个视角——任何一个还没写完，整个包就会 import 失败，六个视角
 就没法各自独立开发与测试（见该文件 docstring）。但渲染层又必须**确定**六视角都已
 注册：`available_views()` 在没人 import 过视角模块时是空元组，那会渲染出一个
@@ -20,13 +20,13 @@ from __future__ import annotations
 
 from types import ModuleType
 
-from evefit.project.views import available_views
-from evefit.project.views import constraints as _constraints
-from evefit.project.views import firepower as _firepower
-from evefit.project.views import mobility as _mobility
-from evefit.project.views import resources as _resources
-from evefit.project.views import stability as _stability
-from evefit.project.views import survivability as _survivability
+from noobbaozi.project.views import available_views
+from noobbaozi.project.views import constraints as _constraints
+from noobbaozi.project.views import firepower as _firepower
+from noobbaozi.project.views import mobility as _mobility
+from noobbaozi.project.views import resources as _resources
+from noobbaozi.project.views import stability as _stability
+from noobbaozi.project.views import survivability as _survivability
 
 VIEW_MODULES: dict[str, ModuleType] = {
     "firepower": _firepower,

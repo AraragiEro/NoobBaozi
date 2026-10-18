@@ -37,11 +37,11 @@
 ```powershell
 $PY = 'uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python'
 # ① 先看漂移（只读）
-Invoke-Expression "$PY evefit/acceptance/check_snapshot.py"     # D) fixtures 期望值漂移
+Invoke-Expression "$PY noobbaozi/acceptance/check_snapshot.py"     # D) fixtures 期望值漂移
 # ② 重写（rebaseline 会先自检技能档，未修复则拒绝）
-Invoke-Expression "$PY evefit/acceptance/rebaseline.py --rewrite-fixtures"
+Invoke-Expression "$PY noobbaozi/acceptance/rebaseline.py --rewrite-fixtures"
 # ③ 也可直接重标三个样本
-Invoke-Expression "$PY evefit/acceptance/fixtures/prepare_expected.py"
+Invoke-Expression "$PY noobbaozi/acceptance/fixtures/prepare_expected.py"
 ```
 
 **纪律**：重写后必须人工 diff 三个 `.expected.json`，确认每处变化都能由「技能档/SDE 变更」
@@ -65,7 +65,7 @@ Invoke-Expression "$PY evefit/acceptance/fixtures/prepare_expected.py"
 | `f5-no-mwd.json` | **Drake / Combat Battlecruiser** | 非 MWD 推进（10MN Afterburner II） | 20 |
 | `f6-minimal-fit.json` | **Griffin / Frigate** | 极简配装（只有船体，0 模块） | 0 |
 
-重新抓取：`python evefit/acceptance/fetch_fixtures.py`（脚本里记了 4 条踩坑：
+重新抓取：`python noobbaozi/acceptance/fetch_fixtures.py`（脚本里记了 4 条踩坑：
 
 1. `/api/kills/shipTypeID/` 按「涉入」过滤，**必须用 `/api/losses/`**（按受害者）；
 2. 仍要硬校验 `victim.ship_type_id == 查询船型`；
@@ -90,7 +90,7 @@ Invoke-Expression "$PY evefit/acceptance/fixtures/prepare_expected.py"
 | `f15-battleship-raven.json` | Raven / Battleship | 22 | 0 |
 | `f16-hac-ishtar.json` | Ishtar / Heavy Assault Cruiser | 13 | 0 |
 
-抓取命令：`python evefit/acceptance/fetch_fixtures.py --round 1`
+抓取命令：`python noobbaozi/acceptance/fetch_fixtures.py --round 1`
 （脚本内置去重：与已有样本、同轮内都不允许同型船；**按覆盖目标分批，不随机抓**。）
 
 ## 第 2 轮：武器族与防御族覆盖（f17–f26）
@@ -108,7 +108,7 @@ Invoke-Expression "$PY evefit/acceptance/fixtures/prepare_expected.py"
 | `f25-nos-neut.json` | Vexor Navy Issue / Cruiser | 吸电/毁电 + 辅助修 | 18 |
 | `f26-carrier-fighter.json` | Thanatos / Carrier | 舰载机（fighter_bay） | 21 |
 
-抓取：`python evefit/acceptance/fetch_fixtures.py --round 2`
+抓取：`python noobbaozi/acceptance/fetch_fixtures.py --round 2`
 （幂等：已有样本自动跳过；`--only <stem>` 可补抓单条。）
 
 ## 第 3 轮：极端形态（f27-f36）

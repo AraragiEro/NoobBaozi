@@ -1,4 +1,4 @@
-# evefit · 项目进度（工作文档）
+# noobbaozi · 项目进度（工作文档）
 
 > 用途：**我自己的工作台账**。中断后靠它恢复上下文，不依赖对话记忆。
 > 更新时机：每个里程碑完成、每次派发子代理任务后、每次踩坑后。
@@ -103,7 +103,7 @@
 34. **`Damage Control I` / `Light Neutron Blaster I` 都是合法已发布类型**，不能用来构造"模块名未知"样例；要用**截断拼写**（`...Microwarpdriv`）或 `Offline` 后缀。
 35. 索引层与属性字典层已接线：`attribute(51).scale == 0.001`、`attribute(160).scale == 1000.0`、`attribute(51).unit == "Milliseconds"`。
 36. **`search_types` 只有精确/前缀/包含三级匹配，没有编辑距离**：`Damage Controll II` 这类"中间错位"拿不到任何候选 → 模糊候选需单独立项（见 §5 欠账 11）。
-37. **`evefit/` 已于 2026-10-18 `git init`**（首提交 `afdf5b5`，100 文件 / 1.1 MB）。`data/`、`spike/uvcache/`、`__pycache__/`、`acceptance/out/` 已忽略。→ 子代理「是否越界」从此可用 `git status --short` 硬验。
+37. **`noobbaozi/` 已于 2026-10-18 `git init`**（首提交 `afdf5b5`，100 文件 / 1.1 MB）。`data/`、`spike/uvcache/`、`__pycache__/`、`acceptance/out/` 已忽略。→ 子代理「是否越界」从此可用 `git status --short` 硬验。
 38. **战斗机 DPS 层次**：装备级 `-55/-56/-12` 是**逐架**值；舰船 `-58 = Σ 架数 × 逐机 -12`，且**逐机 `-12 = -55 + -56`**。实测 Nidhoggur + 6×Templar II → `-58 = 519.5687`；同配装 Nyx → `606.1635`（**舰船加成已计入**）。
 39. **槽位口径**：`-59/-60/-61` = 已占用 重/轻/支援 **中队**槽位；`-62` = 发射管占用（**按中队，不按架数**）；`-57` = 机库占用 m³ = `Σ 架数 × types.volume`。
 40. **支援中队占槽位但不出 DPS**（Cenobite II → `-61=1`、`-62=1`、`-58=0`）；纯战斗机配装下 `-12 == -58`，`-14`（无人机）不混入。
@@ -407,7 +407,7 @@
 302. **我的算术又错了一次**：我说公式会算出 22,000，实际 `18,631 × 1.2 = 22,357.2` → ceil 到 **23,000**。19,000 对 f12 的实际余量是 **346 chars ≈ 1.85%**。
 303. **第二次外科手术**：`test_views_a.py` 只改 f67 的 3 处断言 + 1 个文案常量 + 1 段注释，**没有放宽任何断言** —— f27/f57 仍精确钉旧形状，f67 反而从「旧形状」**收紧**成新形状。
 304. **一个容易顺手改错的点**：`mwd_sig_increase.evidence.propulsion` 仍只含 AB/MWD 两件（MJFG 的 SDE group 名不同），f67 上 `len == 2` 的断言**仍然成立**，别顺手改成 3。
-305. **P4 完成（786 passed）**：`mcp_server.py`（手写零依赖 stdio 实现）+ `mcp/client_smoke.py` + `mcp/README.md` + `skill/evefit/SKILL.md` + `tests/test_mcp_server.py`（38 条）。
+305. **P4 完成（786 passed）**：`mcp_server.py`（手写零依赖 stdio 实现）+ `mcp/client_smoke.py` + `mcp/README.md` + `skill/noobbaozi/SKILL.md` + `tests/test_mcp_server.py`（38 条）。
 306. **服务端必须手写零依赖**，不是偏好：验收命令的环境里没有 `mcp` 包，依赖它会在 `import` 阶段就死；且 `mcp 2.x` 已把 `FastMCP` 改名 `MCPServer`，网上代码全过期。
 307. **stdout 纯净性用硬保险**：启动时 `os.dup(1)` 留私有 fd 写协议、`os.dup2(2,1)` 把 fd 1 改指 stderr → **第三方库的裸 `print()` 也污染不了协议流**。
 308. **业务失败 ≠ 协议错误**：`invalid_path` / `unknown_module` 是 `isError:true` 的正常响应（agent 能看到结构化原因）；`-32602` 只留给「参数本身不合法」。这个区分决定了 agent 收到的是「调用失败」还是「这个路径不在这，可用的是这些」。
@@ -421,8 +421,8 @@
 
 ### P0-0 契约（阻塞一切并行）✅
 
-- [x] `evefit/contracts.py`：9 个 TypedDict + 常量 + 5 个模块接口注释块
-- [x] 包骨架 `evefit/__init__.py` 与 6 个子包
+- [x] `noobbaozi/contracts.py`：9 个 TypedDict + 常量 + 5 个模块接口注释块
+- [x] 包骨架 `noobbaozi/__init__.py` 与 6 个子包
 - [x] `tests/test_contracts.py`：18 个测试通过
 
 ### P0 数据层（T-01 ✅ / T-02 ✅）
@@ -476,16 +476,16 @@
 | 5 | `-58 fighterDps` 未复测 | T-06 | ✅ 完成（13 例；`-58` = 519.5687 实测） |
 | 6 | `docs/回归快照-changelog.md` 未建 | Lead | 等第一次 SDE 变更 |
 | 7 | `PostDiv` 算子（模式抗性）未落成表 | P2 之后 | 待办 |
-| 8 | 引擎升级回归未固化成单条命令 | T-33 | ✅ 完成（`python -m evefit.tools.regress [--full]`） |
+| 8 | 引擎升级回归未固化成单条命令 | T-33 | ✅ 完成（`python -m noobbaozi.tools.regress [--full]`） |
 | 9 | 可疑点"同类船聚合"需要索引支持 | 后置 | 低 |
 | 10 | `-70 maxTargets` 实测恒 0，标记为不可用字段 | 已在 §3 记录 | ✅ |
 | 11 | **模糊名称候选**：`search_types` 无编辑距离，`Damage Controll II` 这类错位拿不到候选 | 待立项 | 新增 |
-| 12 | verify 权限：越界自查只能靠 mtime | Lead | ✅ 完成（`evefit/` 已 `git init`，首提交 `afdf5b5`） |
+| 12 | verify 权限：越界自查只能靠 mtime | Lead | ✅ 完成（`noobbaozi/` 已 `git init`，首提交 `afdf5b5`） |
 | 13 | 战斗机 7 个负 ID + 5 个正 ID 常量未登记 | T-07 | ✅ 完成（常量 129 → **141**） |
 | 14 | **provenance 表改为实测推导**（手写表与验收口径冲突） | T-08 | 进行中 |
 | 15 | 六视角抽取器未写（火力/生存/机动/资源/约束/不稳定） | T-09/T-10 | 待派（等 T-08） |
 | 16 | `project/render.py`（overview/detail 组装 + 预算护栏）未写 | T-11 | 待派 |
-| 17 | `acceptance/field_spec.json` 的 provenance 列需按新口径重写 | evefit-tester | ✅ 完成（41 字段，双列拆分） |
+| 17 | `acceptance/field_spec.json` 的 provenance 列需按新口径重写 | noobbaozi-tester | ✅ 完成（41 字段，双列拆分） |
 | 18 | **技能档语义偏差**：`derive_skill_tier` 只补「被要求」的技能，未实现「全部技能 4 级」 | T-12（待 T-09/T-10 结束后派） | **高** |
 | 19 | 快照整体重标定（规范 §6.2 + 字段规格 §10.2 + 模式四项） | Lead + 测试员 | ✅ 完成（22 行 + 四模式新值已写入文档，逐行归因无残留） |
 | 20 | `items[i]` 不含 `type_id`/`slot`，投影层靠隐式顺序对位，需加自检 | T-13 | 中 |
@@ -501,19 +501,19 @@
 | 30 | **`ATTR_DERIVED_CYCLE_TIME`(-3) 单位标注错误**：实为毫秒，表中标 `s` 且未进缩放表 | T-13 | ✅ 已修（进缩放表 + 注释改「存储毫秒」） |
 | 31 | `FIELD_SOURCES` 数组元素约定（`cap_by_module[].field`）需写进契约 | T-11 | 进行中 |
 | 32 | 常量表缺 `281 explosionDelay`（T-13 只补了 56/73/1272） | 待立项 | 中 |
-| 33 | `damage_split` 口径统一为 0..1 比率；验收样例（60/40）需改 | evefit-tester | 待通知 |
+| 33 | `damage_split` 口径统一为 0..1 比率；验收样例（60/40）需改 | noobbaozi-tester | 待通知 |
 | 34 | `propulsion_states` 键名定为 `base/off/active/overload`；`mass` → `mass_kg` | 已裁决 | ✅ 规格已更新 |
 | 35 | **overview 预算装不进**：RAW 17,777 > 12,000，降级后仍 16,528。根因是 `upgrade_space` 单项 4,135 chars | T-15 | ✅ 完成（摘要化 → 13,519 chars，预算 17,000，默认不降级） |
 | 36 | `FIELD_SOURCES` 不一致：两套数组写法、漏登记字符串/布尔叶子、`count_by_level` 是 int 键 dict | T-15 + T-16 | ✅ 完成（叶子补齐 + `[]` 写法统一 + 键空间对齐） |
 | 37 | `damage_split`/`application` 的 provenance 仍 `unknown` | T-14（输入常量通道） | 中 |
 | 38 | `render_detail` 的 `missing` 恒返回空列表（便于稳定解析） | 已采纳 | ✅ |
-| 39 | **acceptance 四个脚本调用 `default_assumptions` 未传 index** → 静默跑旧档（`check_snapshot` 可能拿旧值假绿） | evefit-tester | ✅ 完成（4 处全改 + 新增技能档护栏两层） |
+| 39 | **acceptance 四个脚本调用 `default_assumptions` 未传 index** → 静默跑旧档（`check_snapshot` 可能拿旧值假绿） | noobbaozi-tester | ✅ 完成（4 处全改 + 新增技能档护栏两层） |
 | 40 | `tests/test_projection_core.py` 仍走 `index=None` 并钉旧值（8854.9587） | T-15 | 进行中 |
 | 41 | overview 预算装不进 + `FIELD_SOURCES` 不齐 + `contracts` 签名注释过期 | T-15/T-16 | ✅ 完成 |
 | 42 | **`confidence` 全量平行表 +5,093 chars**（默认值被显式输出）→ 改稀疏表 | T-18 | ✅ 完成（真实增量降到 +223） |
-| 43 | `acceptance/run_acceptance.py` 的 confidence 查表口径（spec 字段名 vs 叶子路径） | evefit-tester | ✅ 已对齐（验收侧本就是稀疏约定） |
+| 43 | `acceptance/run_acceptance.py` 的 confidence 查表口径（spec 字段名 vs 叶子路径） | noobbaozi-tester | ✅ 已对齐（验收侧本就是稀疏约定） |
 | 44 | 文档里 `D`（需对拍）档已收敛为 `A`；`C` 仅表示「不可用」 | Lead | 待改字段规格 |
-| 45 | `acceptance/run_acceptance.py::check_repair_zero` 仍期望 `0.0 + measured`，与新裁决（`0.0` + 属性级 tag + `has_source`）不一致 → 会误报 6 条 low | evefit-tester | ✅ 完成（4 条判据重写，0 误报且 4/4 注入全中） |
+| 45 | `acceptance/run_acceptance.py::check_repair_zero` 仍期望 `0.0 + measured`，与新裁决（`0.0` + 属性级 tag + `has_source`）不一致 → 会误报 6 条 low | noobbaozi-tester | ✅ 完成（4 条判据重写，0 误报且 4/4 注入全中） |
 | 46 | **D5** `ammo_endurance_s` 两视角不一致 | T-20 | ✅ 完成（抽到 `shared.py`，三样本逐位相同） |
 | 47 | **D6** `depletes_in_s` 哨兵 `-1.0` 被当秒数 | T-20 | ✅ 完成（f3–f6 → `None`，f1 仍 38.4） |
 | 48 | **D7** 导弹船 `dph = 0`（实为突变数据丢失） | T-22 | 进行中（改 `null` + `unknown` + flag） |
@@ -555,7 +555,7 @@
 13. **无战斗机时引擎不输出 `-58`（不是输出 0）** → 断言「归零」必须写成「缺失或 0」，否则测试 KeyError 假红。
 14. **pwsh 下 `python -c "..."` 会吞掉内层双引号**（`print("stats", x)` 变成 `print(stats, x)`）→ 必须用 `uv --% run ...` 或走 stdin（`@'...'@ | uv run ... python -`）。`--%` 后面接多行 `-c` 同样会炸，优先 stdin。
 15. `Index.attribute(id)` 返回字典的键是 **`unit`**，不是 `unit_id`。
-16. **工作区根目录不是 git 仓库，只有 `evefit/` 是**；在 `evefit/` 之外操作仍只能靠 mtime 自查。
+16. **工作区根目录不是 git 仓库，只有 `noobbaozi/` 是**；在 `noobbaozi/` 之外操作仍只能靠 mtime 自查。
 17. **装备级属性也会被 `units.physical()` 换算**（`views/base.py::item_attributes`）→ 千万别在视角里对已登记的毫秒属性再除 1000，会差 1000 倍且不报错。
 18. **子代理之间会互相打红测试**：T-12 在改 `engine/assumptions.py` 期间，`test_engine` 必然红；这类红是并行的正常摩擦，判据是「最终全量绿」，不是「中途每个代理都绿」。
 19. **`ViewContext` 只从 `ctx.fit` 建变体，不读 `ctx.assumptions`** → 构造上下文时必须把技能注入 `fit["character"]["skills"]`，否则全部按**零技能**算（EHP 7585.48、速度 1059.68），看起来像一堆口径错误。验收员自己就踩过，误报 72 条。
@@ -590,7 +590,7 @@
 ## 8. 文件地图
 
 ```
-evefit/
+noobbaozi/
 ├── README.md                     导航 + 复跑说明
 ├── PROGRESS.md                   ← 本文件
 ├── .gitignore
@@ -608,9 +608,9 @@ evefit/
 2. 验环境（应输出 0.33 ms 量级）：
 
 ```powershell
-$env:UV_CACHE_DIR = "$PWD\evefit\spike\uvcache"
+$env:UV_CACHE_DIR = "$PWD\noobbaozi\spike\uvcache"
 uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" `
-  python evefit\spike\smoke3.py
+  python noobbaozi\spike\smoke3.py
 ```
 
 3. 看 §4 待办，从最上面未勾选的那条开始。
@@ -624,8 +624,8 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 
 | 项 | 结果 |
 |---|---|
-| `pytest -q evefit/tests` | **117 passed**（18 契约 + 35 引擎 + 34 数据 + 30 属性字典） |
-| 索引库 | `evefit/data/evefit-3607705.sqlite3`，14.3 MiB |
+| `pytest -q noobbaozi/tests` | **117 passed**（18 契约 + 35 引擎 + 34 数据 + 30 属性字典） |
+| 索引库 | `noobbaozi/data/noobbaozi-3607705.sqlite3`，14.3 MiB |
 | 索引统计 | types 53,288 / groups 1,611 / attributes 2,871 / modes 18 |
 | 模式 | `modes_for_ship(35683)` → Defense / Propulsion / Sharpshooter，**恰好 3 个** |
 | 中文检索 | `search_types("赫卡特")` → 35683 ✅（不必走 ESI） |
@@ -660,7 +660,7 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 | 坏索引容错 | 传入坏对象不影响归一化，不影响基本功能 |
 | 船名误标修正 | 引擎 `unknown type` 二义 → 用 EFT 头回比纠正为 `failed_at="ship_name"` 且不给候选 |
 
-**说明**：本条为子代理自报，PM 未独立复跑；按分工由 `evefit-tester` 在 P2 验收时复核。
+**说明**：本条为子代理自报，PM 未独立复跑；按分工由 `noobbaozi-tester` 在 P2 验收时复核。
 
 ---
 
@@ -691,7 +691,7 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 
 ### 提交前的检查
 
-1. `pytest -q evefit/tests` 全绿
+1. `pytest -q noobbaozi/tests` 全绿
 2. `git status --short` 里的改动**全部属于本次任务**
 3. 没有把 `data/`、缓存、大文件带进来（`git diff --cached --stat` 看一眼）
 4. 若改了字段或口径，对应文档已同步
@@ -700,13 +700,13 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 | 项 | 结果 |
 |---|---|
 | NAS | `192.168.5.2`（UGREEN DXP4800P，Debian 12 / x86_64，Docker 26.1.0 / Compose v2.26.1） |
-| 部署目录 | `/volume1/docker/evefit-mcp`（21 MB = 源码 + 15 MB SDE 索引库） |
-| 镜像 | `evefit-mcp:1.0.0`，`BUILD_RC=0` |
-| 容器 | `evefit-mcp`，`restart: unless-stopped`，端口 `8080` |
+| 部署目录 | `/volume1/docker/noobbaozi-mcp`（21 MB = 源码 + 15 MB SDE 索引库） |
+| 镜像 | `noobbaozi-mcp:1.0.0`，`BUILD_RC=0` |
+| 容器 | `noobbaozi-mcp`，`restart: unless-stopped`，端口 `8080` |
 | 局域网验证 | 从**开发机 Windows** 访问 `http://192.168.5.2:8080/health` → `{"ok":true,...,"tools":5}` |
 | MCP 全链路 | `initialize`（SSE，`Mcp-Session-Id`）→ `initialized`（202 空 body）→ `tools/list`（5 个）→ 五个工具全部 `ok:true` |
 | 负例 | `invalid_path` 返回 `isError:true` + `kind=invalid_path`（业务错误，非协议错误） |
-| 已注册为 DSH 连接器 | `evefit_nas`（streamable-http，`allowInsecurePrivateNetwork`），并**实际调用成功**（见下） |
+| 已注册为 DSH 连接器 | `noobbaozi_nas`（streamable-http，`allowInsecurePrivateNetwork`），并**实际调用成功**（见下） |
 
 **首次构建失败与修复**：
 
@@ -723,7 +723,7 @@ failed to solve: failed to compute cache key: "/__init__.py": not found
 1. **SFTP 上传反复中断**（15 MB 分两批仍卡）→ 改用 **GitHub 中转**：本地打包成部署快照仓库，强制推送到 `AraragiEro/NoobBaozi`，NAS 上 `git clone`（GitHub 连通 200）。
 2. **git 凭证助手被沙箱管道限制挡住**：`sh.exe: couldn't create signal pipe, Win32 error 5` → 改为「token 直接写进 URL + `http.sslBackend=openssl` + 禁用 credential.helper」，一次成功。
 
-**一次自己的失误**：把 `.tmp/`（部署暂存目录）误提交进 `evefit` 仓库，已 `git rm --cached` + 加入 `.gitignore` 并 `--amend` 修补，未留下痕迹（`f776694`）。
+**一次自己的失误**：把 `.tmp/`（部署暂存目录）误提交进 `noobbaozi` 仓库，已 `git rm --cached` + 加入 `.gitignore` 并 `--amend` 修补，未留下痕迹（`f776694`）。
 
 **实测样例（通过 NAS 上的 MCP，从本会话直接调用）**：
 

@@ -13,7 +13,7 @@
 - 验收脚本**自己不许崩**：任何一处意外形状都记「口径错误」并继续，保证整场有结论。
 
 用法：
-    uv run --python 3.13 --no-project python evefit/acceptance/check_layers.py
+    uv run --python 3.13 --no-project python noobbaozi/acceptance/check_layers.py
 """
 from __future__ import annotations
 
@@ -115,12 +115,12 @@ def find_key(node: object, target: str, found: list[str]) -> None:
 
 
 def load_cases() -> list[tuple[str, object]]:
-    from evefit.config import paths as paths_mod
-    from evefit.engine import adapter
-    from evefit.engine.assumptions import default_assumptions
-    from evefit.engine.normalize import normalize_fit
-    from evefit.project.views import base as views_base
-    from evefit.sde.index import Index
+    from noobbaozi.config import paths as paths_mod
+    from noobbaozi.engine import adapter
+    from noobbaozi.engine.assumptions import default_assumptions
+    from noobbaozi.engine.normalize import normalize_fit
+    from noobbaozi.project.views import base as views_base
+    from noobbaozi.sde.index import Index
 
     engine = adapter.Engine()
     index = Index.open(paths_mod.db_path())
@@ -145,8 +145,8 @@ def load_cases() -> list[tuple[str, object]]:
 
 
 def main() -> int:
-    from evefit.project import render as R
-    from evefit.project.summary import INDEX_BUDGET_CHARS as IMPL_BUDGET
+    from noobbaozi.project import render as R
+    from noobbaozi.project.summary import INDEX_BUDGET_CHARS as IMPL_BUDGET
 
     defects: list[dict] = []
     notes: list[str] = []
@@ -344,7 +344,7 @@ def main() -> int:
     # ── degraded=True 分支：把预算临时压到 1，字段数值必须一字不变 ──
     degraded_ok = "未执行"
     try:
-        from evefit.project import summary as summary_mod
+        from noobbaozi.project import summary as summary_mod
         probe_name, probe_ctx = cases[0]
         normal = R.render_index(probe_ctx)
         original = summary_mod.INDEX_BUDGET_CHARS

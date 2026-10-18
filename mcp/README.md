@@ -1,6 +1,6 @@
-# evefit MCP server（stdio + HTTP）
+# noobbaozi MCP server（stdio + HTTP）
 
-把 `evefit/api.py` 的函数暴露成 **MCP 工具**，让 agent 直接问「这套配装什么样、哪里有问题」
+把 `noobbaozi/api.py` 的函数暴露成 **MCP 工具**，让 agent 直接问「这套配装什么样、哪里有问题」
 「这条战报是谁打的、损失多少」，而不是自己写 Python —— 更不是自己打开 zkillboard 网页。
 
 **一句话定位：MCP 自己解释自己。** 服务的 `initialize.instructions` 给推荐顺序与三条判读
@@ -9,18 +9,18 @@
 **不复制工具文案** —— 文案的权威来源永远是 `mcp_server.py` 的 `_TOOL_DESCRIPTIONS`
 与 `INSTRUCTIONS`（Skill 只做发现性，见第 8 节）。
 
-- 服务（协议 + stdio 传输 + 命令行）：`evefit/mcp_server.py`
-- **HTTP 传输**：`evefit/mcp_http.py`
-- 真实客户端冒烟：`evefit/mcp/client_smoke.py`（stdio）、`evefit/mcp/client_smoke_http.py`（http）
-- 契约测试（含自解释守卫）：`evefit/tests/test_mcp_server.py`、`evefit/tests/test_mcp_http.py`
+- 服务（协议 + stdio 传输 + 命令行）：`noobbaozi/mcp_server.py`
+- **HTTP 传输**：`noobbaozi/mcp_http.py`
+- 真实客户端冒烟：`noobbaozi/mcp/client_smoke.py`（stdio）、`noobbaozi/mcp/client_smoke_http.py`（http）
+- 契约测试（含自解释守卫）：`noobbaozi/tests/test_mcp_server.py`、`noobbaozi/tests/test_mcp_http.py`
 
 两种传输，**同一套协议实现**（同一个 `dispatch()`、同一套错误码、同一个信封）；
 都是**零第三方依赖**：只需要 `eveshipfit-dogma-engine[sde]`，不需要 `mcp` 包（见第 9 节）。
 
 | 传输 | 启动 | 用途 |
 |---|---|---|
-| **stdio**（默认） | `python -m evefit.mcp_server` | 一个客户端一个子进程；本地客户端最省事 |
-| **HTTP**（Streamable HTTP） | `python -m evefit.mcp_server --transport http --host 0.0.0.0 --port 8080` | **能跨机器 / 局域网访问**；容器里的唯一可行形态 |
+| **stdio**（默认） | `python -m noobbaozi.mcp_server` | 一个客户端一个子进程；本地客户端最省事 |
+| **HTTP**（Streamable HTTP） | `python -m noobbaozi.mcp_server --transport http --host 0.0.0.0 --port 8080` | **能跨机器 / 局域网访问**；容器里的唯一可行形态 |
 
 ---
 
@@ -30,7 +30,7 @@
 
 ```powershell
 cd F:\WorkSpace\GIT\opencode_general_workspace
-uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m evefit.mcp_server
+uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m noobbaozi.mcp_server
 ```
 
 它是个 **stdio 服务**：从 stdin 读 JSON-RPC、往 stdout 写 JSON-RPC，读到 EOF 就退出。
@@ -40,7 +40,7 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 
 ```powershell
 '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"manual","version":"1"}}}' |
-  uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m evefit.mcp_server
+  uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m noobbaozi.mcp_server
 ```
 
 回包里就有 `instructions`（推荐顺序 + 三条判读纪律）与 `capabilities.tools`。
@@ -49,26 +49,26 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 
 ```powershell
 # 绑所有网卡（局域网可访问）；容器里的推荐写法
-uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m evefit.mcp_server --transport http --host 0.0.0.0 --port 8080
+uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m noobbaozi.mcp_server --transport http --host 0.0.0.0 --port 8080
 
 # 只给本机用（默认就是 127.0.0.1）
-uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m evefit.mcp_server --transport http
+uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m noobbaozi.mcp_server --transport http
 ```
 
 它前台阻塞，日志全部走 **stderr**，stdout 一个字节都没有（http 模式下 stdout 也不是
 协议通道，但同样不许被污染）。看到这两行就说明起来了：
 
 ```
-[evefit-mcp] evefit 1.0.0 启动（http）：POST http://0.0.0.0:8080/mcp · GET http://0.0.0.0:8080/health
-[evefit-mcp] 监听 0.0.0.0（所有网卡）：本机用 http://127.0.0.1:8080/mcp 访问，局域网用本机 IP 访问
+[noobbaozi-mcp] noobbaozi 1.0.0 启动（http）：POST http://0.0.0.0:8080/mcp · GET http://0.0.0.0:8080/health
+[noobbaozi-mcp] 监听 0.0.0.0（所有网卡）：本机用 http://127.0.0.1:8080/mcp 访问，局域网用本机 IP 访问
 ```
 
 自检：
 
 ```powershell
 curl http://127.0.0.1:8080/health
-python -m evefit.mcp.client_smoke_http                    # 完整 HTTP 客户端冒烟
-python -m evefit.mcp.client_smoke_http --base-url http://127.0.0.1:18080
+python -m noobbaozi.mcp.client_smoke_http                    # 完整 HTTP 客户端冒烟
+python -m noobbaozi.mcp.client_smoke_http --base-url http://127.0.0.1:18080
 ```
 
 ### 1.3 命令行开关
@@ -113,13 +113,13 @@ python -m evefit.mcp.client_smoke_http --base-url http://127.0.0.1:18080
 ### 2.2 `GET /health`（容器 healthcheck 的契约）
 
 ```json
-{"ok": true, "server": "evefit", "version": "1.0.0", "transport": "http", "tools": 7, "sessions": 3}
+{"ok": true, "server": "noobbaozi", "version": "1.0.0", "transport": "http", "tools": 7, "sessions": 3}
 ```
 
 | 字段 | 值 |
 |---|---|
 | `ok` | 恒 `true`（能回这个就说明进程活着） |
-| `server` | `evefit` |
+| `server` | `noobbaozi` |
 | `version` | `1.0.0`（= `mcp_server.SERVER_VERSION`） |
 | `transport` | `http` |
 | `tools` | 工具条数（`= len(mcp_server.TOOL_NAMES)`，与 `tools/list` 同源；**别抄数字**，上面的 `7` 只是当前快照） |
@@ -149,7 +149,7 @@ python -m evefit.mcp.client_smoke_http --base-url http://127.0.0.1:18080
 - **body ≤ 1 MiB**（`mcp_http.MAX_BODY_BYTES`）：在 `json.loads` 之前拦住（MCP 那层另有
   256 KiB 的 `fit` 上限）；
 - **异常不杀进程**：handler 抛异常 → `500 + JSON`，`serve_forever` 继续；
-- **日志只走 stderr**：访问日志、启动日志、异常栈全部 `[evefit-mcp]` 前缀 → stderr；
+- **日志只走 stderr**：访问日志、启动日志、异常栈全部 `[noobbaozi-mcp]` 前缀 → stderr；
 - **`SIGTERM`** → 优雅停止（`docker stop` 发的就是它）；`Ctrl+C` 同理。
 
 ### 2.5 客户端怎么连
@@ -159,7 +159,7 @@ http 传输的客户端配置就是一个 URL（不需要 `command` / `cwd` / `P
 ```json
 {
   "mcpServers": {
-    "evefit": {
+    "noobbaozi": {
       "type": "http",
       "url": "http://192.168.1.20:8080/mcp"
     }
@@ -186,7 +186,7 @@ Invoke-WebRequest -Method Post -Uri http://127.0.0.1:8080/mcp -Body $body -Conte
 ```json
 {
   "mcpServers": {
-    "evefit": {
+    "noobbaozi": {
       "command": "uv",
       "args": [
         "run",
@@ -194,11 +194,11 @@ Invoke-WebRequest -Method Post -Uri http://127.0.0.1:8080/mcp -Body $body -Conte
         "--no-project",
         "--with", "eveshipfit-dogma-engine[sde]==13.6.0",
         "python",
-        "-m", "evefit.mcp_server"
+        "-m", "noobbaozi.mcp_server"
       ],
       "cwd": "F:\\WorkSpace\\GIT\\opencode_general_workspace",
       "env": {
-        "UV_CACHE_DIR": "F:\\WorkSpace\\GIT\\opencode_general_workspace\\evefit\\spike\\uvcache",
+        "UV_CACHE_DIR": "F:\\WorkSpace\\GIT\\opencode_general_workspace\\noobbaozi\\spike\\uvcache",
         "PYTHONIOENCODING": "utf-8"
       }
     }
@@ -210,8 +210,8 @@ Invoke-WebRequest -Method Post -Uri http://127.0.0.1:8080/mcp -Body $body -Conte
 
 | 字段 | 为什么要写 |
 |---|---|
-| `cwd` | `python -m evefit.mcp_server` 靠 **cwd** 找到 `evefit` 包。客户端不支持 `cwd` 时，把仓库根加进下面的 `PYTHONPATH`（见 3.2）。 |
-| `env.UV_CACHE_DIR` | uv 的缓存目录。不指定会落到用户级缓存（`%LOCALAPPDATA%\uv\cache`），与项目 `evefit/spike/uvcache` 里的既有缓存不共享，首次启动会重新下载 SDE / 引擎。 |
+| `cwd` | `python -m noobbaozi.mcp_server` 靠 **cwd** 找到 `noobbaozi` 包。客户端不支持 `cwd` 时，把仓库根加进下面的 `PYTHONPATH`（见 3.2）。 |
+| `env.UV_CACHE_DIR` | uv 的缓存目录。不指定会落到用户级缓存（`%LOCALAPPDATA%\uv\cache`），与项目 `noobbaozi/spike/uvcache` 里的既有缓存不共享，首次启动会重新下载 SDE / 引擎。 |
 | `env.PYTHONIOENCODING` | `utf-8`。Windows 默认代码页（cp936）会让子进程的 stderr 写崩、也会让管道里的中文变乱码。**stdout 我们按 UTF-8 字节读写**，这个变量管的是 stderr 与内部字符串。 |
 
 > JSON 里 Windows 路径要写双反斜杠（`F:\\WorkSpace\\...`）。也可以写成
@@ -224,9 +224,9 @@ Invoke-WebRequest -Method Post -Uri http://127.0.0.1:8080/mcp -Body $body -Conte
 ```json
 {
   "mcpServers": {
-    "evefit": {
+    "noobbaozi": {
       "command": "python",
-      "args": ["-m", "evefit.mcp_server"],
+      "args": ["-m", "noobbaozi.mcp_server"],
       "cwd": "F:\\WorkSpace\\GIT\\opencode_general_workspace",
       "env": {
         "PYTHONPATH": "F:\\WorkSpace\\GIT\\opencode_general_workspace",
@@ -243,7 +243,7 @@ Invoke-WebRequest -Method Post -Uri http://127.0.0.1:8080/mcp -Body $body -Conte
 schema），然后按 `instructions` 给的顺序调。**服务无业务状态**：每次调用自带 `fit`，
 不依赖会话上下文；`Engine` / `Index` / LRU 是进程级单例。
 
-当前握手信息：`serverInfo = {"name": "evefit", "version": "1.0.0"}`，
+当前握手信息：`serverInfo = {"name": "noobbaozi", "version": "1.0.0"}`，
 `capabilities.tools = {"listChanged": false}`，
 支持协议版本 `2026-07-28 / 2025-11-25 / 2025-06-18 / 2025-03-26 / 2024-11-05`。
 协议版本 ≥ `2025-06-18` 时工具结果里**同时**给 `structuredContent`。
@@ -258,7 +258,7 @@ description）、`_schema_for()`（参数）。`tools/list`、`/health` 的 `too
 
 ```powershell
 cd F:\WorkSpace\GIT\opencode_general_workspace
-python -c "from evefit import mcp_server as m; print(m.INSTRUCTIONS); [print(n, '::', m._TOOL_DESCRIPTIONS[n][1]) for n in m.TOOL_NAMES]"
+python -c "from noobbaozi import mcp_server as m; print(m.INSTRUCTIONS); [print(n, '::', m._TOOL_DESCRIPTIONS[n][1]) for n in m.TOOL_NAMES]"
 ```
 
 ### 4.1 索引（顺序 = 推荐调用顺序）
@@ -338,7 +338,7 @@ python -c "from evefit import mcp_server as m; print(m.INSTRUCTIONS); [print(n, 
 ## 5. 返回契约
 
 每个工具的结果是 `content: [{"type": "text", "text": "<JSON>"}]`，`text` 就是
-`evefit/api.py` 的**信封原样**：
+`noobbaozi/api.py` 的**信封原样**：
 
 ```json
 {"ok": true,  "result": { ... }, "meta": {"spec_version": "v1", "skill_tier": {"name": "all4+min_required", "count": 512}, ...}}
@@ -372,7 +372,7 @@ python -c "from evefit import mcp_server as m; print(m.INSTRUCTIONS); [print(n, 
 3. **`fit_detail` 不指定 `view` 时返回六个视角全部**，实测 10 KB 起（`meta.assumptions`
    里还带 512 条完整技能表）。先 `fit_view` 定位，再 `fit_detail(view="...")`。工具
    **不做截断**：截断 = 丢事实，宁可大也不悄悄少东西。
-4. **`fit` 上限 256 KiB**（`evefit.mcp_server.MAX_FIT_CHARS`），空串直接 `-32602`。
+4. **`fit` 上限 256 KiB**（`noobbaozi.mcp_server.MAX_FIT_CHARS`），空串直接 `-32602`。
    正常 EFT / DNA / killmail JSON 都在几 KB 量级，这个上限比真实输入大一个量级。
 5. **联网形态**：`fit` 传 zkillboard / ESI 链接、或 `{"killmail_id":N,"hash":"…"}`（对象）
    需要网络，超时 20 s，失败统一 `network_failed`。
@@ -400,22 +400,22 @@ python -c "from evefit import mcp_server as m; print(m.INSTRUCTIONS); [print(n, 
 
 ```powershell
 # 真实客户端冒烟（stdio）：起子进程 → initialize → tools/list → 用例表（每个工具 + 两个负例）
-uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m evefit.mcp.client_smoke
+uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m noobbaozi.mcp.client_smoke
 
 # 真实 HTTP 客户端冒烟：握手 → 202 通知 → 清单 → SSE → 用例表 → /health
 #   （先按 1.2 起服务；绑 0.0.0.0 时也用 127.0.0.1 连，这本身就是局域网可达的证据）
-uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m evefit.mcp.client_smoke_http
-uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m evefit.mcp.client_smoke_http --base-url http://127.0.0.1:18080
+uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m noobbaozi.mcp.client_smoke_http
+uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" python -m noobbaozi.mcp.client_smoke_http --base-url http://127.0.0.1:18080
 
 # 契约测试（含子进程集成、stdout 纯净性、非永真断言、自解释守卫、http 传输）
-uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" --with pytest python -m pytest -q evefit/tests -p no:cacheprovider
+uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" --with pytest python -m pytest -q noobbaozi/tests -p no:cacheprovider
 ```
 
 `client_smoke.py` 三种模式：
 
 | 命令 | 用什么客户端 |
 |---|---|
-| `python -m evefit.mcp.client_smoke` | `auto`：装了官方 `mcp` 包就用它，否则（或它失败时）用手写客户端 |
+| `python -m noobbaozi.mcp.client_smoke` | `auto`：装了官方 `mcp` 包就用它，否则（或它失败时）用手写客户端 |
 | `... --stdio` | 强制手写客户端（只用标准库，零依赖） |
 | `... --sdk` | 强制官方 SDK（需要 `--with mcp`；装不上会直接失败） |
 
@@ -434,7 +434,7 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 是「能调通但会话数一直涨 / 上下文没复用」，而不是一个刺眼的错误。`client_smoke_http` 会
 在 `initialize` 那一步直接把会话 id 打出来。
 
-**打开请求级日志**：`--log-level debug`（或 `EVEFIT_MCP_DEBUG=1`），写到 stderr。
+**打开请求级日志**：`--log-level debug`（或 `NOOBBAOZI_MCP_DEBUG=1`），写到 stderr。
 
 ## 8. 没有 Skill 也能用吗
 
@@ -456,7 +456,7 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
    （删掉任一段就变红，配对断言见 `test_description_guard_is_not_vacuous`）；再加上
    `TOOL_NAMES` 的顺序就是推荐调用顺序，顺序信息从清单里也读得出来。
 3. **Skill 的价值只是「发现性」**：在**还没连上 MCP** 的时候，让 agent / 用户知道「世界上有
-   evefit 这个东西、什么时候该想起它」。一旦连上，指引全部来自 MCP 本身。
+   noobbaozi 这个东西、什么时候该想起它」。一旦连上，指引全部来自 MCP 本身。
 4. **所以 Skill 里不许复制工具细节**（工具清单、字段表、调用顺序细节）—— 那会变成第二份
    真源，迟早与 MCP 漂移。`tests/test_mcp_server.py::test_skill_md_is_a_thin_shell` 钉住：
    `SKILL.md` ≤ 60 行、每个工具名出现 ≤ 1 次、必须指向本 README。

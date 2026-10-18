@@ -1,4 +1,4 @@
-"""evefit 跨模块契约。全员只读，修改需审查。"""
+"""noobbaozi 跨模块契约。全员只读，修改需审查。"""
 from __future__ import annotations
 from typing import Literal, TypedDict
 

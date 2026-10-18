@@ -57,11 +57,11 @@ AB 7.2/8.0 = 0.9、扰频 4.0/5.0 = 0.8、MWD 36/10 = 3.6，与本视角输出�
 
 from __future__ import annotations
 
-from evefit.config import attributes as A
-from evefit.config.attributes import ATTR_CHARGE_RATE, ATTR_MODULE_DURATION
-from evefit.project import units
-from evefit.project.views import register, shared
-from evefit.project.views.base import BASE, SLOT_CARGO, ViewContext, ship_attributes
+from noobbaozi.config import attributes as A
+from noobbaozi.config.attributes import ATTR_CHARGE_RATE, ATTR_MODULE_DURATION
+from noobbaozi.project import units
+from noobbaozi.project.views import register, shared
+from noobbaozi.project.views.base import BASE, SLOT_CARGO, ViewContext, ship_attributes
 
 # =============================================================================
 # 上限与结构判定用 group 名（SDE 实测）
