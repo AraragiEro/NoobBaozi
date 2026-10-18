@@ -9,3 +9,6 @@ data/
 # 测试与运行产物（可重建）
 .pytest_cache/
 acceptance/out/
+
+# pyfa 侦察的临时环境 / 被 Windows ACL 锁死的解包目录（不可读不可删，不影响功能）
+spike/pyfa_scratch/
