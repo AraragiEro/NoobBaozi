@@ -1,0 +1,8 @@
+# 统一换行，避免 Windows/Linux 混用时产生无意义 diff
+* text=auto eol=lf
+
+# 二进制/生成物声明（即便未跟踪，也明确类型）
+*.dat   binary
+*.sqlite3 binary
+*.zip   binary
+*.pyd   binary

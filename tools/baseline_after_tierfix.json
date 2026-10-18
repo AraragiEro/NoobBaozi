@@ -1,0 +1,369 @@
+{
+  "generated_at": "2026-10-18T20:20:27+08:00",
+  "label": "T-12 baseline_after_tierfix",
+  "sde_build": 3607705,
+  "engine_version": "13.6.0",
+  "spec_version": "v1",
+  "sample": "evefit/spike/kill.json",
+  "skill_tier": {
+    "name": "all4+min_required",
+    "count": 512,
+    "level_distribution": {
+      "4": 510,
+      "5": 2
+    },
+    "required_5": [
+      3301,
+      33093
+    ],
+    "degraded_name_without_index": "min_required_only",
+    "degraded_count_without_index": 19
+  },
+  "rows": {
+    "分层HP": {
+      "shield_hp": 780.0,
+      "armor_hp": 840.0,
+      "hull_hp": 2343.75
+    },
+    "ehp_mixed": 9102.577816,
+    "ehp_by_damage": {
+      "em": 8698.122608,
+      "explosive": 8711.119861,
+      "kinetic": 11842.375965,
+      "thermal": 9343.086945
+    },
+    "resonances": {
+      "shield": {
+        "em": 0.875,
+        "explosive": 0.4375,
+        "kinetic": 0.2625,
+        "thermal": 0.525
+      },
+      "armor": {
+        "em": 0.425,
+        "explosive": 0.765,
+        "kinetic": 0.27625,
+        "thermal": 0.414375
+      },
+      "hull": {
+        "em": 0.402,
+        "explosive": 0.402,
+        "kinetic": 0.402,
+        "thermal": 0.402
+      }
+    },
+    "repair": {
+      "armor_raw_hp_s": 32.5,
+      "armor_effective_ehp_s": 69.125954,
+      "shield_passive_raw_hp_s": 3.046875,
+      "shield_passive_effective_ehp_s": 5.803571
+    },
+    "cpu": {
+      "output": 276.0,
+      "load": 287.0,
+      "free": -11.0,
+      "shortfall": 11.0
+    },
+    "powergrid": {
+      "output": 64.8,
+      "load": 68.4,
+      "free": -3.6,
+      "shortfall": 3.6
+    },
+    "calibration": {
+      "output": 400.0,
+      "load": 225.0,
+      "free": 175.0
+    },
+    "capacitor": {
+      "capacity_gj": 672.00001,
+      "recharge_s": 224.0,
+      "stable_pct": -193.210878,
+      "peak_load_gj_s": 21.990816,
+      "delta_gj_s": -14.490816
+    },
+    "slots": {
+      "high": {
+        "used": 6,
+        "total": 6.0,
+        "free": 0.0
+      },
+      "medium": {
+        "used": 4,
+        "total": 4.0,
+        "free": 0.0
+      },
+      "low": {
+        "used": 4,
+        "total": 4.0,
+        "free": 0.0
+      },
+      "rig": {
+        "used": 3,
+        "total": 3.0,
+        "free": 0.0
+      }
+    },
+    "mobility_active": {
+      "speed_mps": 1482.735484,
+      "signature_radius_m": 385.0,
+      "align_time_s": 9.488908
+    },
+    "dps": {
+      "base": 487.458266,
+      "dph": 943.667678,
+      "with_reload": 472.212956
+    },
+    "violations": [
+      "resource"
+    ]
+  },
+  "rows_before_tierfix": {
+    "分层HP": {
+      "shield_hp": 650.0,
+      "armor_hp": 840.0,
+      "hull_hp": 2343.75
+    },
+    "ehp_mixed": 8854.958772,
+    "ehp_by_damage": {
+      "em": 8549.551179,
+      "explosive": 8413.977003,
+      "kinetic": 11347.13789,
+      "thermal": 9095.467907
+    },
+    "resonances": {
+      "shield": {
+        "em": 0.875,
+        "explosive": 0.4375,
+        "kinetic": 0.2625,
+        "thermal": 0.525
+      },
+      "armor": {
+        "em": 0.425,
+        "explosive": 0.765,
+        "kinetic": 0.27625,
+        "thermal": 0.414375
+      },
+      "hull": {
+        "em": 0.402,
+        "explosive": 0.402,
+        "kinetic": 0.402,
+        "thermal": 0.402
+      }
+    },
+    "repair": {
+      "armor_raw_hp_s": 32.5,
+      "armor_effective_ehp_s": 69.125954,
+      "shield_passive_raw_hp_s": 2.03125,
+      "shield_passive_effective_ehp_s": 3.869048
+    },
+    "cpu": {
+      "output": 276.0,
+      "load": 287.0,
+      "free": -11.0,
+      "shortfall": 11.0
+    },
+    "powergrid": {
+      "output": 54.0,
+      "load": 72.0,
+      "free": -18.0,
+      "shortfall": 18.0
+    },
+    "calibration": {
+      "output": 400.0,
+      "load": 225.0,
+      "free": 175.0
+    },
+    "capacitor": {
+      "capacity_gj": 560.000008,
+      "recharge_s": 280.0,
+      "stable_pct": -343.473799,
+      "peak_load_gj_s": 22.17369,
+      "delta_gj_s": -17.17369
+    },
+    "slots": {
+      "high": {
+        "used": 6,
+        "total": 6.0,
+        "free": 0.0
+      },
+      "medium": {
+        "used": 4,
+        "total": 4.0,
+        "free": 0.0
+      },
+      "low": {
+        "used": 4,
+        "total": 4.0,
+        "free": 0.0
+      },
+      "rig": {
+        "used": 3,
+        "total": 3.0,
+        "free": 0.0
+      }
+    },
+    "mobility_active": {
+      "speed_mps": 1271.612903,
+      "signature_radius_m": 385.0,
+      "align_time_s": 11.861135
+    },
+    "dps": {
+      "base": 365.5937,
+      "dph": 842.560427,
+      "with_reload": 355.940851
+    },
+    "violations": [
+      "resource"
+    ]
+  },
+  "ablation": {
+    "3310": {
+      "name": "Rapid Firing",
+      "delta_if_level_0": {
+        "dps": -77.9933,
+        "dps_with_reload": -73.5592,
+        "cap_stable_pct": 7.8026,
+        "cap_peak_load": -0.5852
+      }
+    },
+    "3311": {
+      "name": "Sharpshooter",
+      "delta_if_level_0": {
+        "item_optimal_range_m": -270.0
+      }
+    },
+    "3315": {
+      "name": "Surgical Strike",
+      "delta_if_level_0": {
+        "dps": -52.2277,
+        "dph": -101.1073,
+        "dps_with_reload": -50.5942
+      }
+    },
+    "3316": {
+      "name": "Controlled Bursts",
+      "delta_if_level_0": {
+        "cap_stable_pct": -12.1916,
+        "cap_peak_load": 0.9144
+      }
+    },
+    "3317": {
+      "name": "Trajectory Analysis",
+      "delta_if_level_0": {
+        "item_falloff_m": -250.0
+      }
+    },
+    "3413": {
+      "name": "Power Grid Management",
+      "delta_if_level_0": {
+        "pg_output": -10.8
+      }
+    },
+    "3416": {
+      "name": "Shield Operation",
+      "delta_if_level_0": {
+        "shield_passive_raw_hp_s": -0.6094,
+        "shield_passive_effective_ehp_s": -1.1607
+      }
+    },
+    "3417": {
+      "name": "Capacitor Systems Operation",
+      "delta_if_level_0": {
+        "capacitor_recharge_ms": 56000.0,
+        "cap_stable_pct": -73.3027
+      }
+    },
+    "3418": {
+      "name": "Capacitor Management",
+      "delta_if_level_0": {
+        "capacitor_capacity_gj": -112.0,
+        "cap_stable_pct": -58.6422
+      }
+    },
+    "3419": {
+      "name": "Shield Management",
+      "delta_if_level_0": {
+        "ehp_mixed": -247.619,
+        "shield_hp": -130.0,
+        "shield_passive_raw_hp_s": -0.5078,
+        "shield_passive_effective_ehp_s": -0.9673
+      }
+    },
+    "3452": {
+      "name": "Acceleration Control",
+      "delta_if_level_0": {
+        "speed_mps": -211.1226
+      }
+    },
+    "3453": {
+      "name": "Evasive Maneuvering",
+      "delta_if_level_0": {
+        "align_time_s": 2.3722
+      }
+    },
+    "11207": {
+      "name": "Advanced Weapon Upgrades",
+      "delta_if_level_0": {
+        "pg_load": 3.6
+      }
+    }
+  },
+  "modes": {
+    "none": {
+      "mode_type_id": null,
+      "ehp": 4609.688796,
+      "dps": 66.319945,
+      "align_time_s": 6.42797
+    },
+    "Defense": {
+      "mode_type_id": 35686,
+      "ehp": 6264.533204,
+      "dps": 66.319945,
+      "align_time_s": 6.42797
+    },
+    "Propulsion": {
+      "mode_type_id": 35687,
+      "ehp": 4609.688796,
+      "dps": 66.319945,
+      "align_time_s": 2.142657
+    },
+    "Sharpshooter": {
+      "mode_type_id": 35688,
+      "ehp": 4609.688796,
+      "dps": 88.426594,
+      "align_time_s": 6.42797
+    }
+  },
+  "modes_before_tierfix": {
+    "none": {
+      "mode_type_id": null,
+      "ehp": 3841.40733,
+      "dps": 49.739959,
+      "align_time_s": 8.034962
+    },
+    "Defense": {
+      "mode_type_id": 35686,
+      "ehp": 5220.444337,
+      "dps": 49.739959,
+      "align_time_s": 8.034962
+    },
+    "Propulsion": {
+      "mode_type_id": 35687,
+      "ehp": 3841.40733,
+      "dps": 49.739959,
+      "align_time_s": 2.678321
+    },
+    "Sharpshooter": {
+      "mode_type_id": 35688,
+      "ehp": 3841.40733,
+      "dps": 66.319945,
+      "align_time_s": 8.034962
+    }
+  },
+  "mode_sample": {
+    "eft": "[Hecate, mode snapshot]\nLight Neutron Blaster II, Void S\n",
+    "ship": 35683,
+    "skill_count": 512
+  }
+}

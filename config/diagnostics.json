@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "note": "可疑点规则开关与文案。判定逻辑在 evefit/project/diagnostics.py，按 id 索引；本文件只允许出现 id / view / enabled / message，不得出现任何阈值（主人明确要求不设绝对阈值）。message 里的 {xxx} 由 evidence 同名字段填充。",
+  "rules": [
+    {
+      "id": "resource_overflow",
+      "view": "resources",
+      "enabled": true,
+      "message": "CPU 余量 {cpu_free}、PG 余量 {power_free}：当前档位下超载（缺口 CPU {cpu_deficit} / PG {power_deficit}）"
+    },
+    {
+      "id": "resource_slack",
+      "view": "resources",
+      "enabled": true,
+      "message": "CPU 余量 {cpu_free}/{cpu_output}、PG 余量 {power_free}/{power_output}，同时还有 {empty_slots} 个空槽位"
+    },
+    {
+      "id": "empty_hardpoint",
+      "view": "resources",
+      "enabled": true,
+      "message": "高槽空 {high_empty} 个，但炮台挂点余 {turret_free}、发射器挂点余 {launcher_free}"
+    },
+    {
+      "id": "drone_bandwidth_idle",
+      "view": "resources",
+      "enabled": true,
+      "message": "无人机带宽 {bandwidth_total} Mbit/s 全部空闲，未携带任何无人机"
+    },
+    {
+      "id": "no_propulsion",
+      "view": "mobility",
+      "enabled": true,
+      "message": "已装 {fitted_modules} 个模块，其中推进模块 0 个"
+    },
+    {
+      "id": "mwd_sig_increase",
+      "view": "mobility",
+      "enabled": true,
+      "message": "推进模块 {propulsion_state} 时信号半径 {signature_radius_m} m，关闭时为 {signature_radius_off_m} m（{sig_ratio} 倍）"
+    },
+    {
+      "id": "resist_hole",
+      "view": "survivability",
+      "enabled": true,
+      "message": "{layer} 层最弱抗性 {weakest_damage}（{weakest_resist_pct}%），最强 {strongest_damage}（{strongest_resist_pct}%），共振率比值 {ratio}"
+    },
+    {
+      "id": "repaired_but_unstable",
+      "view": "stability",
+      "enabled": true,
+      "message": "存在修复速率（{repair_layers}），但电容不稳定（{cap_depletes_in_s} s 耗尽）"
+    },
+    {
+      "id": "alpha_dph_ratio",
+      "view": "firepower",
+      "enabled": true,
+      "message": "dph/dps = {ratio_s} s，与主要武器周期 {cycle_min_s}–{cycle_max_s} s 不符"
+    },
+    {
+      "id": "cap_sensitive",
+      "view": "stability",
+      "enabled": true,
+      "message": "关闭 {module} 后电容由不稳定转为稳定（{stable_pct_after}%）"
+    }
+  ]
+}

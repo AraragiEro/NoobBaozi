@@ -1,0 +1,11 @@
+# 验证脚本的运行时缓存与产物，不入库
+spike/uvcache/
+**/__pycache__/
+*.pyc
+
+# SDE 索引库与下载缓存（构建产物，按 build 号重建，见 docs/配装理解-软件设计-v1.md §7.1）
+data/
+
+# 测试与运行产物（可重建）
+.pytest_cache/
+acceptance/out/

@@ -1,0 +1,893 @@
+{
+  "spec_version": "v1.1",
+  "source_doc": "evefit/docs/配装理解-字段规格-v1.md",
+  "note": "六视角 overview 字段的机器可读副本。runner 与验收计划共用此文件，避免两份口径漂移。",
+  "revision_2026_10_18": {
+    "by": "Lead 裁决（team-message-469e9b5c）",
+    "why": "原表把「可信度」与「provenance」两个正交维度混成一列",
+    "change": [
+      "provenance 改按「是否依赖假设」重新定义：measured=输入直接决定且不随技能/状态/模式/剖面变化；assumed=依赖上述假设之一；unknown=引擎未提供",
+      "新增 confidence 列（A–E）承接原「可信度」维度",
+      "权威来源：provenance 以 evefit/project/provenance.py 的 tag(attr_id) 为准，本文件只作文档与兜底",
+      "校验逻辑不得硬编码期望 provenance：T-08 正在用三轴敏感性重推该表，落地后 runner 自动跟随"
+    ]
+  },
+  "provenance_legend": {
+    "measured": "输入直接决定，且不随技能档 / 模块状态 / 模式 / 伤害剖面变化",
+    "assumed": "依赖技能档、模块状态、模式或伤害剖面之一",
+    "unknown": "引擎未提供（如 -70 maxTargets 恒 0）",
+    "authority": "evefit/project/provenance.py 的 tag(attr_id)；本文件的 provenance 列仅为文档，runner 不据此断言"
+  },
+  "confidence_legend": {
+    "A": "口径已实测对拍：输入直接决定，或已与外部基线/不变式严格对上 —— 输出可直接当结论用",
+    "C": "不可用：引擎不给值（如 -70 maxTargets 恒 0），看到 C 就不要拿它做结论",
+    "E": "未建模：视角只给参数、不给结论（应用层命中率/爆炸半径），agent 需自行建模",
+    "note": "输出层只产生 A / C / E 三档（Lead 裁决 2026-10-18）：B（需换算）已被投影层 units.physical() 吃掉；D（需对拍/属推断）已收敛为 A（抗性 12/12 已对拍）。权威登记表 = evefit/project/confidence.py 的 CONFIDENCE；输出为**稀疏表**：只输出非 A 的叶子路径，缺省 = A，空表输出 {}。"
+  },
+  "tier": "overview",
+  "views": {
+    "firepower": {
+      "label": "火力",
+      "spec_section": "§1",
+      "fields": [
+        {
+          "name": "weapons",
+          "aliases": [],
+          "kind": "array",
+          "item_keys": [
+            "family",
+            "name",
+            "count",
+            "ammo_name"
+          ],
+          "provenance": "measured",
+          "confidence": "A",
+          "confidence_basis": "family 靠 group→family 自建映射，未全量对拍｜输出层口径（Lead 裁决）：C → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": null,
+          "source_attrs": [],
+          "meaning": "武器组清单：family ∈ laser/hybrid/projectile/missile/drone/fighter/smartbomb；ammo_name 为已装弹药名，无弹药为 null",
+          "severe": "high"
+        },
+        {
+          "name": "dps",
+          "aliases": [
+            "dps_base"
+          ],
+          "kind": "object",
+          "subpaths": [
+            "base",
+            "with_reload"
+          ],
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "引擎 -12/-13，与 §6.2 快照 365.59 一致；未与第三方对拍｜输出层口径（Lead 裁决）：B → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": "hp/s",
+          "source_attrs": [
+            -12,
+            -13
+          ],
+          "meaning": "秒伤；base=不含装填，with_reload=含装填",
+          "severe": "high"
+        },
+        {
+          "name": "dph",
+          "aliases": [
+            "alpha"
+          ],
+          "kind": "number",
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "I2 严格成立：alpha = Σ 逐装备 volley（实测比值 1.0000）",
+          "unit": "hp",
+          "source_attrs": [
+            -11
+          ],
+          "meaning": "首轮齐射伤（= Σ 逐装备 volley，不变式 I2）",
+          "severe": "high"
+        },
+        {
+          "name": "damage_split",
+          "aliases": [],
+          "kind": "object",
+          "subpaths": [
+            "em",
+            "explosive",
+            "kinetic",
+            "thermal"
+          ],
+          "provenance": "measured",
+          "confidence": "A",
+          "confidence_basis": "弹药 114/116/117/118 × damageMultiplier 实测过，未全量对拍｜输出层口径（Lead 裁决）：B → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": "0..1 比率",
+          "source_attrs": [
+            114,
+            116,
+            117,
+            118
+          ],
+          "meaning": "四系伤害占比，按伤害量加权（非按弹种数量）；**0..1 比率，四值之和 = 1**——渲染层不做 ×100（Lead 裁决 2026-10-18）",
+          "severe": "medium"
+        },
+        {
+          "name": "range",
+          "aliases": [],
+          "kind": "object",
+          "subpaths": [
+            "optimal_m",
+            "optimal_plus_falloff_m",
+            "optimal_plus_2falloff_m"
+          ],
+          "optional_subpaths": [
+            "max_range_m"
+          ],
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "54/158 直接取，三档为自算加法；导弹档未在本样本验证｜输出层口径（Lead 裁决）：B → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": "m",
+          "source_attrs": [
+            54,
+            158
+          ],
+          "meaning": "三档射程全给；导弹额外给 max_range_m",
+          "severe": "high"
+        },
+        {
+          "name": "application",
+          "aliases": [],
+          "kind": "object",
+          "one_of_subpaths": [
+            "tracking_rad_s",
+            "explosion_radius_m",
+            "explosion_velocity_mps"
+          ],
+          "provenance": "assumed",
+          "confidence": "E",
+          "confidence_basis": "应用层命中率属未建模项：只给参数，不给命中结论",
+          "unit": "rad/s | m | m/s",
+          "source_attrs": [
+            160
+          ],
+          "meaning": "应用层参数（未建模）：炮给 tracking_rad_s，导弹给爆炸半径/速度；只给参数不给命中结论。「未建模」由 confidence=E 表达，不塞进 provenance",
+          "severe": "medium"
+        },
+        {
+          "name": "ammo_endurance_s",
+          "aliases": [],
+          "kind": "number",
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "弹匣量 × cycle 自算；cycle 随技能变化｜输出层口径（Lead 裁决）：C → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": "s",
+          "source_attrs": [],
+          "meaning": "单弹匣持续射击时长（弹匣量 × cycle）",
+          "severe": "medium"
+        },
+        {
+          "name": "overload",
+          "aliases": [],
+          "kind": "object",
+          "subpaths": [
+            "off",
+            "on",
+            "delta"
+          ],
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "引擎 state=overload 重算，实测有变化；未对拍绝对值｜输出层口径（Lead 裁决）：B → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": null,
+          "source_attrs": [],
+          "meaning": "过载前后 dps/range 变化",
+          "severe": "medium"
+        },
+        {
+          "name": "hardpoints_free",
+          "aliases": [
+            "hardpoints"
+          ],
+          "kind": "object",
+          "subpaths": [
+            "turret",
+            "launcher"
+          ],
+          "provenance": "measured",
+          "confidence": "A",
+          "confidence_basis": "102 turretSlotsLeft / 101 launcherSlotsLeft，§9 已确认",
+          "unit": "个",
+          "source_attrs": [
+            102,
+            101
+          ],
+          "meaning": "空闲挂点；与资源视角同名字段**必须由同一函数计算且值相等**（Lead 裁决 2026-10-18）",
+          "severe": "medium"
+        }
+      ]
+    },
+    "survivability": {
+      "label": "生存",
+      "spec_section": "§2",
+      "fields": [
+        {
+          "name": "layers",
+          "aliases": [
+            "layer_hp"
+          ],
+          "kind": "object",
+          "subpaths": [
+            "shield_hp",
+            "armor_hp",
+            "hull_hp"
+          ],
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "263/265/9 与 ESI 官方基础值 12/12 一致；但护甲 HP 随 Hull Upgrades 技能变化",
+          "unit": "hp",
+          "source_attrs": [
+            263,
+            265,
+            9
+          ],
+          "meaning": "三层基础 HP",
+          "severe": "high"
+        },
+        {
+          "name": "layer_ehp",
+          "aliases": [],
+          "kind": "object",
+          "subpaths": [
+            "shield",
+            "armor",
+            "hull"
+          ],
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "引擎 -30/-28/-29 派生值，I1 严格成立；未与外部对拍｜输出层口径（Lead 裁决）：B → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": "hp",
+          "source_attrs": [
+            -30,
+            -28,
+            -29
+          ],
+          "meaning": "三层 EHP；三者之和必须等于 ehp_mixed（不变式 I1）",
+          "severe": "high"
+        },
+        {
+          "name": "ehp_by_damage",
+          "aliases": [],
+          "kind": "object",
+          "subpaths": [
+            "em",
+            "explosive",
+            "kinetic",
+            "thermal"
+          ],
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "抗性对拍 12/12 通过，按层 Σ HP/r 复算",
+          "unit": "hp",
+          "source_attrs": [
+            271,
+            272,
+            273,
+            274,
+            267,
+            268,
+            269,
+            270,
+            113,
+            111,
+            109,
+            110
+          ],
+          "meaning": "四系纯伤 EHP（Σ_layer HP/r）",
+          "severe": "high"
+        },
+        {
+          "name": "ehp_mixed",
+          "aliases": [],
+          "kind": "number",
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "按层复算 I3 严格成立；且 ≠ 四系算术/调和平均（实测 8855/9352/9219）",
+          "unit": "hp",
+          "source_attrs": [
+            -43
+          ],
+          "meaning": "混合 EHP，按层复算；必须注明「不是四系平均」（不变式 I3）",
+          "severe": "high"
+        },
+        {
+          "name": "thinnest",
+          "aliases": [],
+          "kind": "object",
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "自算比较，口径简单但未对拍｜输出层口径（Lead 裁决）：B → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": "hp",
+          "source_attrs": [],
+          "meaning": "每层最薄系 + 该层 EHP",
+          "severe": "low"
+        },
+        {
+          "name": "repair",
+          "aliases": [],
+          "kind": "object",
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "effective/raw 实测等于 1/生效共振率；未对拍绝对值｜输出层口径（Lead 裁决）：B → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": "hp/s",
+          "source_attrs": [
+            -45,
+            -48,
+            -47,
+            -50,
+            -46,
+            -49,
+            -51,
+            -52
+          ],
+          "meaning": "每层 {raw_hp_s, effective_ehp_s}；**无对应模块的层统一输出 0.0 且 provenance=measured**（「没有该模块」由输入直接决定，不是 unknown）——Lead 裁决 2026-10-18",
+          "severe": "medium"
+        },
+        {
+          "name": "overload",
+          "aliases": [],
+          "kind": "object",
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "过载重算；未对拍绝对值｜输出层口径（Lead 裁决）：B → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": null,
+          "source_attrs": [],
+          "meaning": "修复与 EHP 的过载变化",
+          "severe": "low"
+        }
+      ]
+    },
+    "mobility": {
+      "label": "机动",
+      "spec_section": "§3",
+      "fields": [
+        {
+          "name": "speed_mps",
+          "aliases": [
+            "speed"
+          ],
+          "kind": "number",
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "37 实测，与推进状态强相关；快照 1271.61 与文档 1059.68 的差异已定位为技能档口径｜输出层口径（Lead 裁决）：B → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": "m/s",
+          "source_attrs": [
+            37
+          ],
+          "meaning": "最大速度（米/秒）",
+          "severe": "high"
+        },
+        {
+          "name": "align_time_s",
+          "aliases": [
+            "align_time"
+          ],
+          "kind": "number",
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "-1 引擎已给秒；实测 11.861 与快照一致｜输出层口径（Lead 裁决）：B → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": "s",
+          "source_attrs": [
+            -1
+          ],
+          "meaning": "对齐时间（秒；引擎 -1 已是秒，不得再 ÷1000）",
+          "severe": "high"
+        },
+        {
+          "name": "signature_radius_m",
+          "aliases": [
+            "sig_m",
+            "signature_radius"
+          ],
+          "kind": "number",
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "552 实测；MWD active ×5.5 与规格 §3 已知取舍一致｜输出层口径（Lead 裁决）：B → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": "m",
+          "source_attrs": [
+            552
+          ],
+          "meaning": "信号半径（米）",
+          "severe": "high"
+        },
+        {
+          "name": "mass_kg",
+          "aliases": [
+            "mass"
+          ],
+          "kind": "number",
+          "provenance": "measured",
+          "confidence": "A",
+          "confidence_basis": "ESI 静态基础值，装配决定，不随假设变化",
+          "unit": "kg",
+          "source_attrs": [
+            4
+          ],
+          "meaning": "质量（kg）",
+          "severe": "medium"
+        },
+        {
+          "name": "agility",
+          "aliases": [],
+          "kind": "number",
+          "provenance": "measured",
+          "confidence": "A",
+          "confidence_basis": "ESI 静态基础值",
+          "unit": "-",
+          "source_attrs": [
+            70
+          ],
+          "meaning": "惯性系数（无量纲）",
+          "severe": "medium"
+        },
+        {
+          "name": "warp_speed_au_s",
+          "aliases": [],
+          "kind": "number",
+          "provenance": "measured",
+          "confidence": "A",
+          "confidence_basis": "600=4.5 AU/s 已实测；跃迁飞行时间属自研公式（不在本字段）｜输出层口径（Lead 裁决）：B → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": "AU/s",
+          "source_attrs": [
+            600
+          ],
+          "meaning": "跃迁速度（AU/s）；属性名叫 warpSpeedMultiplier 但值即 AU/s，Hecate=4.5，不得乘 3 也不得输出 600",
+          "severe": "high"
+        },
+        {
+          "name": "propulsion_states",
+          "aliases": [],
+          "kind": "object",
+          "subpaths": [
+            "off",
+            "active",
+            "overload"
+          ],
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "三态重算，实测 active 相对 online 速度 ×5.89 / 信号 ×5.5 / 对齐 +47.6%｜输出层口径（Lead 裁决）：B → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": null,
+          "source_attrs": [],
+          "meaning": "推进 off/active/overload 三态下的 {speed_mps, sig_m, align_time_s}",
+          "severe": "high"
+        }
+      ]
+    },
+    "resources": {
+      "label": "资源",
+      "spec_section": "§4",
+      "fields": [
+        {
+          "name": "cpu",
+          "aliases": [],
+          "kind": "object",
+          "subpaths": [
+            "output",
+            "load",
+            "free"
+          ],
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "48/49 与 §6.2 快照一致；输出随 CPU Management 技能变化",
+          "unit": "tf",
+          "source_attrs": [
+            48,
+            49
+          ],
+          "meaning": "CPU 输出/占用/余量（绝对值，非百分比）",
+          "severe": "high"
+        },
+        {
+          "name": "powergrid",
+          "aliases": [
+            "pg"
+          ],
+          "kind": "object",
+          "subpaths": [
+            "output",
+            "load",
+            "free"
+          ],
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "11/15 直接取；输出随 Power Grid Management 技能变化（§6.2 快照 PG 行口径待更正）",
+          "unit": "MW",
+          "source_attrs": [
+            11,
+            15
+          ],
+          "meaning": "PG 输出/占用/余量（绝对值）",
+          "severe": "high"
+        },
+        {
+          "name": "calibration",
+          "aliases": [
+            "calibration_points"
+          ],
+          "kind": "object",
+          "subpaths": [
+            "output",
+            "load",
+            "free"
+          ],
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "1132/1152 与 §6.2 快照 400/225 一致",
+          "unit": "点",
+          "source_attrs": [
+            1132,
+            1152
+          ],
+          "meaning": "标定量/已占用/余量",
+          "severe": "medium"
+        },
+        {
+          "name": "slots",
+          "aliases": [],
+          "kind": "object",
+          "subpaths": [
+            "high",
+            "medium",
+            "low",
+            "rig"
+          ],
+          "provenance": "measured",
+          "confidence": "A",
+          "confidence_basis": "14/13/12/1137 由船体决定，不随假设变化",
+          "unit": "个",
+          "source_attrs": [
+            14,
+            13,
+            12,
+            1137
+          ],
+          "meaning": "各槽位 {used, total}",
+          "severe": "high"
+        },
+        {
+          "name": "hardpoints_free",
+          "aliases": [
+            "hardpoints"
+          ],
+          "kind": "object",
+          "subpaths": [
+            "turret",
+            "launcher"
+          ],
+          "provenance": "measured",
+          "confidence": "A",
+          "confidence_basis": "102/101 由船体与装配决定",
+          "unit": "个",
+          "source_attrs": [
+            102,
+            101
+          ],
+          "meaning": "空闲炮台/发射器挂点（102 turretSlotsLeft / 101 launcherSlotsLeft）；与火力视角同名字段**必须由同一函数计算且值相等**（Lead 裁决 2026-10-18）",
+          "severe": "medium"
+        },
+        {
+          "name": "drone",
+          "aliases": [
+            "drones"
+          ],
+          "kind": "object",
+          "subpaths": [
+            "bandwidth",
+            "capacity"
+          ],
+          "provenance": "measured",
+          "confidence": "A",
+          "confidence_basis": "1271/283 已确认（PROGRESS §3 第 19 条）",
+          "unit": "Mbit/s | m3",
+          "source_attrs": [
+            1271,
+            283
+          ],
+          "meaning": "无人机带宽/舱容 {used,total}",
+          "severe": "medium"
+        },
+        {
+          "name": "cargo",
+          "aliases": [],
+          "kind": "object",
+          "subpaths": [
+            "used",
+            "total"
+          ],
+          "provenance": "measured",
+          "confidence": "A",
+          "confidence_basis": "38 只给容量（实测 328.05，去 cargo 项不变）；used 需由货舱项体积求和，属自算｜输出层口径（Lead 裁决）：C → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": "m3",
+          "source_attrs": [
+            38
+          ],
+          "meaning": "货舱已用/总量。total 取属性 38；used = 仅 slot_type==\"cargo\" 的项按 volume×quantity 累加，**不含已装填弹药**（已装弹药挂在模块的 charge 上，不是货舱项）——Lead 裁决 2026-10-18",
+          "severe": "medium"
+        },
+        {
+          "name": "empty_slots",
+          "aliases": [],
+          "kind": "object",
+          "subpaths": [
+            "high",
+            "medium",
+            "low",
+            "rig"
+          ],
+          "provenance": "measured",
+          "confidence": "A",
+          "confidence_basis": "由 slots - used 推导；used 的槽位归类需与装配一致｜输出层口径（Lead 裁决）：B → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": "个",
+          "source_attrs": [],
+          "meaning": "各槽位空几个",
+          "severe": "medium"
+        },
+        {
+          "name": "upgrade_space",
+          "aliases": [],
+          "kind": "array",
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "自建索引候选 + 重算是否装得下，未对拍｜输出层口径（Lead 裁决）：C → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": null,
+          "source_attrs": [],
+          "meaning": "每槽位的更高 meta 候选 + 是否装得下（自建索引 + 重算）",
+          "severe": "low"
+        }
+      ]
+    },
+    "constraints": {
+      "label": "约束",
+      "spec_section": "§5",
+      "fields": [
+        {
+          "name": "hard_violations",
+          "aliases": [],
+          "kind": "array",
+          "provenance": "measured",
+          "confidence": "A",
+          "confidence_basis": "引擎 validate 规则；与技能无关（§5 分类映射），实测 charge_group / charge_size / slots / max_group 均可复现｜输出层口径（Lead 裁决）：B → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": null,
+          "source_attrs": [],
+          "meaning": "与技能无关的错（弹药组/尺寸、rig 尺寸、槽位冲突、子系统、船体限制）；分类映射：resource+skill 之外的都是硬违规",
+          "severe": "high"
+        },
+        {
+          "name": "tier_violations",
+          "aliases": [],
+          "kind": "array",
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "依赖当前技能档；引擎 validate 给出 used/available，可直接算「超多少」｜输出层口径（Lead 裁决）：B → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": null,
+          "source_attrs": [],
+          "meaning": "当前技能档下的资源/技能缺口，必须带具体数值（如「PG 超 7.2」）",
+          "severe": "high"
+        },
+        {
+          "name": "skill_floor",
+          "aliases": [],
+          "kind": "object",
+          "subpaths": [
+            "max_level",
+            "count_by_level",
+            "distinct_skills"
+          ],
+          "provenance": "measured",
+          "confidence": "A",
+          "confidence_basis": "requiredSkill 属性是静态值；ID 不连号已实测修正（182/183/184/1285/1289/1290）｜输出层口径（Lead 裁决）：B → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": "级",
+          "source_attrs": [
+            182,
+            183,
+            184,
+            1285,
+            1289,
+            1290,
+            277,
+            278,
+            279,
+            1286,
+            1287,
+            1288
+          ],
+          "meaning": "配装门槛画像（聚合，不做求解）",
+          "severe": "medium"
+        },
+        {
+          "name": "needs_implant",
+          "aliases": [],
+          "kind": "boolean",
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "属推断、不可证实，输出必须标注（规格 §9）｜输出层口径（Lead 裁决）：D → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": null,
+          "source_attrs": [],
+          "meaning": "全 5 档仍超载 → 提示需要植入体支持；属推断不可证实，输出必须标注",
+          "severe": "medium"
+        }
+      ]
+    },
+    "stability": {
+      "label": "不稳定",
+      "spec_section": "§6",
+      "fields": [
+        {
+          "name": "capacitor",
+          "aliases": [
+            "cap"
+          ],
+          "kind": "object",
+          "subpaths": [
+            "capacity",
+            "recharge_s",
+            "stable_pct",
+            "depletes_in_s",
+            "peak_load",
+            "peak_recharge",
+            "delta"
+          ],
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "482/55/-72/-7/-4/-2/-5 实测；-5=-2−-4、-6=-5/-2×100、-2=2.5×cap/recharge 均已自证｜输出层口径（Lead 裁决）：B → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": "GJ | s | % | s | GJ/s",
+          "source_attrs": [
+            482,
+            55,
+            -72,
+            -7,
+            -4,
+            -2,
+            -5
+          ],
+          "meaning": "电容容量/回充时间(秒)/稳定百分比/耗尽秒/峰值耗电/峰值回充/净差；recharge_s 必须由毫秒换算",
+          "severe": "high"
+        },
+        {
+          "name": "cap_by_module",
+          "aliases": [],
+          "kind": "array",
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "逐装备 -4 直接取；随模块状态变化｜输出层口径（Lead 裁决）：B → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": "GJ/s",
+          "source_attrs": [
+            -4
+          ],
+          "meaning": "逐装备电容消耗排行",
+          "severe": "medium"
+        },
+        {
+          "name": "cap_sensitivity",
+          "aliases": [],
+          "kind": "array",
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "逐模块关闭重算，属自研聚合，未对拍｜输出层口径（Lead 裁决）：C → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": "%",
+          "source_attrs": [],
+          "meaning": "逐模块关闭后的 stable_pct",
+          "severe": "low"
+        },
+        {
+          "name": "external_dependency",
+          "aliases": [],
+          "kind": "object",
+          "subpaths": [
+            "remote_rep",
+            "cap_transfer"
+          ],
+          "provenance": "measured",
+          "confidence": "A",
+          "confidence_basis": "结构判定（是否装远程修复/传电），口径简单但未对拍｜输出层口径（Lead 裁决）：D → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": null,
+          "source_attrs": [],
+          "meaning": "是否依赖外来修复/传电（结构判定）",
+          "severe": "low"
+        },
+        {
+          "name": "consumables",
+          "aliases": [],
+          "kind": "object",
+          "subpaths": [
+            "ammo_endurance_s",
+            "paste_endurance_s",
+            "cap_booster"
+          ],
+          "provenance": "assumed",
+          "confidence": "A",
+          "confidence_basis": "纳米胶/注射续航属自研公式，原料齐全但未验公式｜输出层口径（Lead 裁决）：C → A；B 已被投影层换算吃掉，D 已收敛为 A",
+          "unit": "s | -",
+          "source_attrs": [],
+          "meaning": "弹药/纳米胶/电容注射支撑时长",
+          "severe": "medium"
+        }
+      ]
+    }
+  },
+  "invariants": {
+    "I1": "EHP = shieldEhp + armorEhp + hullEhp（容差 1e-6）",
+    "I2": "alpha = Σ 逐装备 volley（容差 1e-6）",
+    "I3": "ehp_mixed = Σ_layer HP_layer / Σ_i(w_i × r_i,layer)，且 ≠ 四系算术平均、≠ 四系调和平均（与算术平均差 > 1%）",
+    "I4": "EFT 往返无损（save → load → calculate 8 项指标一致，容差 1e-6）",
+    "I5": "抗性叠加 = 共振率相乘（逐层四项一致）",
+    "I6": "输出中每个数值都带 provenance（全字段检查）",
+    "I7": "解析失败必含可修复结构（line/raw/failed_at/candidates/reason）"
+  },
+  "unit_rules": {
+    "forbidden_patterns": [
+      {
+        "pattern": "*_s",
+        "comment": "秒；不得出现毫秒原值"
+      },
+      {
+        "pattern": "*_m",
+        "comment": "米"
+      },
+      {
+        "pattern": "*_mps",
+        "comment": "米/秒"
+      },
+      {
+        "pattern": "*_pct",
+        "comment": "百分比"
+      },
+      {
+        "pattern": "*_au_s",
+        "comment": "AU/秒"
+      }
+    ],
+    "ms_source_attrs": [
+      55,
+      79,
+      479,
+      51,
+      1795,
+      1985
+    ],
+    "ms_engine_attrs": [
+      -3
+    ],
+    "kilo_source_attrs": [
+      160
+    ],
+    "notes": [
+      "毫秒来源属性（55 rechargeRate / 79 scanSpeed / 479 shieldRechargeRate / 51 speed / 1795 / 1985 stanceSwitchTime）与引擎 item 级 cycleTime(-3) 必须 ÷1000",
+      "`-2`（peakRecharge，GJ/s）**不是**毫秒，不要误换算",
+      "×1000 来源属性（160 trackingSpeed）必须 ÷1000；optimalSigRadius 同规则",
+      "属性 600 warpSpeedMultiplier 的值即 AU/s（Hecate=4.5），既不是 600 也不是 13.5",
+      "属性 -1 alignTime 引擎已给秒，不得再 ÷1000",
+      "禁止出现浮点毫秒原值：任何 *_s 字段若与 raw 值精确相等且 raw 属于毫秒来源属性 → 单位错误"
+    ]
+  },
+  "modes": {
+    "spec_section": "§10.2",
+    "placement": "顶层，与 \u000biews 平级（{meta, views, modes, flags, budget}）",
+    "entry_keys": [
+      "mode_id",
+      "mode_name",
+      "ehp_mixed",
+      "dps_base",
+      "align_time_s"
+    ],
+    "required_modes": {
+      "Hecate": [
+        "Defense",
+        "Propulsion",
+        "Sharpshooter"
+      ]
+    },
+    "direction": {
+      "Defense": "ehp_mixed > 无模式基准",
+      "Propulsion": "align_time_s < 无模式基准",
+      "Sharpshooter": "dps_base > 无模式基准"
+    },
+    "authoritative_sample": "Hecate + 1 炮的最小探针配装（fixtures/f3-hecate-modes）——文档快照只认它；killmail 样本只验结构与方向（Lead 裁决 2026-10-18）",
+    "note": "runner 三层校验：结构 → 方向 → 数值（数值用引擎独立重算对拍；最小探针再对 fixture 期望值）"
+  }
+}
