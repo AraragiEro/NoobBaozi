@@ -407,6 +407,13 @@
 302. **我的算术又错了一次**：我说公式会算出 22,000，实际 `18,631 × 1.2 = 22,357.2` → ceil 到 **23,000**。19,000 对 f12 的实际余量是 **346 chars ≈ 1.85%**。
 303. **第二次外科手术**：`test_views_a.py` 只改 f67 的 3 处断言 + 1 个文案常量 + 1 段注释，**没有放宽任何断言** —— f27/f57 仍精确钉旧形状，f67 反而从「旧形状」**收紧**成新形状。
 304. **一个容易顺手改错的点**：`mwd_sig_increase.evidence.propulsion` 仍只含 AB/MWD 两件（MJFG 的 SDE group 名不同），f67 上 `len == 2` 的断言**仍然成立**，别顺手改成 3。
+305. **P4 完成（786 passed）**：`mcp_server.py`（手写零依赖 stdio 实现）+ `mcp/client_smoke.py` + `mcp/README.md` + `skill/evefit/SKILL.md` + `tests/test_mcp_server.py`（38 条）。
+306. **服务端必须手写零依赖**，不是偏好：验收命令的环境里没有 `mcp` 包，依赖它会在 `import` 阶段就死；且 `mcp 2.x` 已把 `FastMCP` 改名 `MCPServer`，网上代码全过期。
+307. **stdout 纯净性用硬保险**：启动时 `os.dup(1)` 留私有 fd 写协议、`os.dup2(2,1)` 把 fd 1 改指 stderr → **第三方库的裸 `print()` 也污染不了协议流**。
+308. **业务失败 ≠ 协议错误**：`invalid_path` / `unknown_module` 是 `isError:true` 的正常响应（agent 能看到结构化原因）；`-32602` 只留给「参数本身不合法」。这个区分决定了 agent 收到的是「调用失败」还是「这个路径不在这，可用的是这些」。
+309. **两把尺子都通过**：开发方 `client_smoke` PASS 7/7；验收方**自己写**的 `acceptance/check_mcp.py` 五组全 PASS、**缺陷 0**（协议协商 5 档 + 越界回首选、通知不回包、stdout 17 行全 JSON、`fit_index` 与手写 L0 契约 0 缺 0 多、三工具数值逐位相同、负例语义、灌 1MB 垃圾后存活、同输入 20 次加速 **606.6×**）。
+310. **验收方两次"红脸"都是自己的客户端**：① `proc.stdout.read(65536)` 在管道上会阻塞到读满 → 整场挂死（应逐行 `readline()`）；② **错误响应的 `id` 是 `null`**，它却按固定 id 等 → 把「`-32700` 正确返回」误判成「没返回」。→ 通则：**断言按响应实际语义匹配，别假设 id 一定回显**。
+311. **`asyncio.create_subprocess_exec` 在本机报 `PermissionError [WinError 5]`**（`subprocess.Popen` 正常）。这条会影响任何「Python asyncio + 子进程」的后续任务。
 
 ---
 
