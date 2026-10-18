@@ -157,6 +157,38 @@ CONDITIONAL_LEAVES: dict[str, frozenset[str]] = {
             "overload.off.range_m",
             "overload.on.range_m",
             "overload.delta.range_m",
+            # **T-40 补回（缺陷 1）**：T-37 把 `dps.base` / `dps.with_reload` /
+            # `overload.{off,on,delta}.dps` 从本表整条删掉，理由是「一个武器系统都没有时
+            # 它们已被补齐成 `0.0`，有值就不再需要说不适用」。但 **`reason_for()` 只对
+            # `provenance == "unknown"` 的路径求值** —— 删掉规则之后，**值为 `None`** 的
+            # 那两类配装就没有任何规则可匹配，落进 `unclassified` 兜底（硬门缺陷）。
+            # 教训（文档 §8.2）：**删一条规则前先枚举它当前在哪些样本上生效**，而不是只想
+            # 「现在有值了所以用不上」。
+            #
+            # 这两条路径值仍是 `None` 的样本与 `dph` **完全同源**，归属也必须是同一个：
+            # 实测（T-40，`ctx.attrs(BASE)` 逐键核对）—— f12 / f34 的船级
+            #   `-11 damageAlpha` / `-12 damageDps` / `-13 damageDpsWithReload`
+            #   **三个键全部不存在**（`-14 droneDps` / `-58 fighterDps` 同样不存在），
+            # 而对照样本 f67 三个键都在（均为 `0.0`）。
+            # 更进一步：引擎的判据**不是** T-36 猜的「至少有一个高槽模块」——
+            # f12 有 4 件 `Large Remote Armor Repairer II`、f34 有 5 件
+            # `Small Knave Scoped Energy Nosferatu`（都在 high 槽），照样没有这三个键；
+            # f67 之所以有，是因为它有一件 `Expanded Probe Launcher I`（装了探针、
+            # 逐件 `-21 volley` = `0.0`）。也就是说：**引擎只在「至少有一件模块产出了
+            # `-21`（伤害管线）」时才派生 `-11`/`-12`/`-13`**，而这两套配装的模块一件
+            # `-21` 都没有（后勤/ECM 无人机也没有伤害属性）。
+            # 结论：值缺失的原因是「这套配装没有可产出伤害的模块」= 该字段对本配装
+            # **不适用**（`not_applicable`），与同一配装 `dph` 的判定逐字相同。
+            # **不是** `input_incomplete`（killmail 没缺数据：后勤/ECM 无人机本来就不产生
+            # 伤害，换渠道补数据也变不出 dps），也**不是** `engine_omits`（那是「引擎对
+            # 任何配装都不提供」，如 `-70 maxTargets`；`-12` 对 f67 等配装是照给的）。
+            # **有值时这些条目完全不生效**（reason 只为 unknown 求值），所以与 T-37 的裁决
+            # 不冲突：f67 的 `0.0` 仍是 `assumed`，不会被说成「不适用」。
+            "dps.base",
+            "dps.with_reload",
+            "overload.off.dps",
+            "overload.on.dps",
+            "overload.delta.dps",
         }
     ),
     "resources": frozenset(
@@ -198,6 +230,9 @@ CONDITIONAL_SUBTREES: dict[str, tuple[str, ...]] = {
         # 都没有」时已是 `0.0`（有值），前缀会把有值字段说成「不适用」；三条射程叶子改在
         # `CONDITIONAL_LEAVES` 里逐条登记（它们才是真的条件产出）。要恢复前缀必须同时把
         # `dps` 三条从 `FIELD_SOURCES` 的有值集合里排除 —— 那等于把 T-37 的裁决推翻。
+        # **T-40**：`dps.base` / `dps.with_reload` / `overload.{off,on,delta}.dps` 这五条走的是
+        # **叶子级**登记（见 `CONDITIONAL_LEAVES`），**不是**把前缀加回来 —— 前缀覆盖面更大，
+        # 以后 `dps` 一旦出现「非条件性的缺失」就会被前缀误判成不适用（T-34 的教训）。
     ),
     "stability": (
         # 没有耗电模块 → 逐模块排行 / 逐模块敏感性列表为空（f6）

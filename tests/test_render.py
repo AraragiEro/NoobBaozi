@@ -56,6 +56,9 @@
     `thinnest.*.damage_type` → `ambiguous`；以 `-70 maxTargets` 为来源的字段 →
     `engine_omits`。**守门**：f1/f4/f5/f26 四个样本上 `unclassified` 必须为 **0**
     （出现即缺陷），并用「抹掉一条规则 → 守门断言变红」证明它不是永真的。
+    **T-40 补两个样本**（f12 / f34）：它们「有武器系统但引擎不产出伤害」（后勤维修无人机 /
+    ECM 无人机），`dps.base` / `dps.with_reload` / `overload.{off,on,delta}.dps` 的值是
+    `None` → T-37 删掉的那五条条件登记必须补回，否则落进 `unclassified`（本轮 blocker）。
 16. **T-34 结构性叶子补登记**：`tier_violations` / `hard_violations` 的元素字段
     （`kind` / `message` / `resource` / `rule.*` / `target.*`）是**我们自己算出来的合成 /
     枚举值** → `FIELD_SOURCES` 登记 `None` → `assumed`（不再是 `unknown` + `not_applicable`）。
@@ -1931,6 +1934,102 @@ def test_no_unclassified_on_the_guard_samples(
     # 非空转前置：该样本确实产出了若干带原因的 unknown（否则上面是空断言）
     total = sum(len(entry["unknown_reasons"]) for entry in rendered["views"].values())
     assert total >= 5, f"{stem} 只有 {total} 条 unknown 原因，样本或规则接错了"
+
+
+DPS_REASON_SAMPLES: tuple[str, ...] = ("f12-logistics-oneiros", "f34-no-charge")
+"""T-40 缺陷 1（blocker）的两个样本。
+
+共同点：**有武器系统、但那套武器系统不产出伤害**，于是引擎连 `-11`/`-12`/`-13` 三个键
+都不给 —— T-37 的「一个武器系统都没有 → 补 `0.0`」不生效，`dps.*` 的值保持 `None`：
+
+- `f12`（Oneiros 后勤）：`Light Hull Maintenance Bot I` ×2 + `Medium Armor
+  Maintenance Bot I` ×4（**维修**无人机，无伤害）；
+- `f34`（武器空弹）：`Vespa EC-600` ×1 + `Hornet EC-300` ×1（**ECM** 无人机，无伤害）。
+"""
+
+NO_DAMAGE_DPS_PATHS: tuple[str, ...] = (
+    "dps.base",
+    "dps.with_reload",
+    "overload.off.dps",
+    "overload.on.dps",
+    "overload.delta.dps",
+)
+"""这五条就是验收报告里报 `unclassified` 的那五条（`dps.base` / `dps.with_reload` /
+`overload.{off,on,delta}.dps`）。"""
+
+
+@pytest.fixture(scope="module")
+def dps_reason_samples(engine: Engine, index) -> dict[str, tuple[ViewContext, dict]]:
+    """两个样本各渲染一次 overview（预算调大，排除降级对结构的干扰）。"""
+    original = render.BUDGET_CHARS
+    render.BUDGET_CHARS = BIG_BUDGET
+    try:
+        out: dict[str, tuple[ViewContext, dict]] = {}
+        for stem in DPS_REASON_SAMPLES:
+            ctx = _make_ctx(engine, index, stem)
+            out[stem] = (ctx, render.render_overview(ctx))
+        return out
+    finally:
+        render.BUDGET_CHARS = original
+
+
+def _dps_leaf(overview: dict, path: str) -> object:
+    """按点路径取 `dps.base` / `overload.off.dps` 这样的嵌套值。"""
+    node: object = overview
+    for part in path.split("."):
+        assert isinstance(node, dict) and part in node, f"路径 {path!r} 在 overview 里断了"
+        node = node[part]
+    return node
+
+
+def test_no_unclassified_when_weapon_system_has_no_damage(
+    dps_reason_samples: dict[str, tuple[ViewContext, dict]],
+) -> None:
+    """**T-40 缺陷 1 的靶心**：`dps.*` 五条在「有武器系统但不产出伤害」时判 `not_applicable`。
+
+    三件事同时钉住（缺一条就说明归属又漂了）：
+
+    ① **引擎真的不给键**（`-11`/`-12`/`-13` 全缺）→ 值确实是 `None`，不是「有值却报不适用」；
+    ② 配装**确实有武器系统**（无人机在 `weapons[]` 里）→ T-37 的「补 `0.0`」不生效，
+       所以这不是「一套武器系统都没有」那条路；
+    ③ 五条路径的 reason 必须是 `not_applicable`（与同一配装的 `dph` **同判据**），
+       且守门断言 `unclassified == 0`。
+
+    红线：**不许把 `unknown` 改成一个值**来消灭 `unclassified`（那才是伪事实）。
+    """
+    for stem, (ctx, rendered) in dps_reason_samples.items():
+        attrs = ctx.attrs(BASE)
+        for attribute_id in (
+            A.ATTR_DAMAGE_ALPHA,
+            A.ATTR_DAMAGE_DPS,
+            A.ATTR_DAMAGE_DPS_WITH_RELOAD,
+        ):
+            assert attribute_id not in attrs, (
+                f"{stem} 的引擎给了属性 {attribute_id}？那这条样本不构成「缺键」情形"
+            )
+
+        firepower = rendered["views"]["firepower"]
+        assert firepower["overview"]["weapons"], f"{stem} 应当有武器系统（无人机）"
+        assert any(
+            row.get("count") for row in firepower["overview"]["weapons"]
+        ), f"{stem} 的 weapons[] 应当有件数"
+
+        for path in NO_DAMAGE_DPS_PATHS:
+            value = _dps_leaf(firepower["overview"], path)
+            assert value is None, f"{stem}.{path} 应为 None（不许为消除 unclassified 补值）"
+            assert firepower["provenance"][path] == "unknown", f"{stem}.{path}"
+            assert firepower["unknown_reasons"][path] == "not_applicable", (
+                f"{stem}.{path} 判成了 {firepower['unknown_reasons'][path]!r}"
+            )
+
+        # 同一配装的 `dph` 早就判 not_applicable —— 五条 `dps` 必须与它同判据
+        assert firepower["provenance"]["dph"] == "unknown"
+        assert firepower["unknown_reasons"]["dph"] == "not_applicable"
+
+        # 守门的最终判据：这两个样本上一条 `unclassified` 都不许有
+        assert _unclassified(rendered) == [], (
+            f"{stem} 又出现了 unclassified：{_unclassified(rendered)}"
+        )
 
 
 def test_unclassified_guard_catches_a_synthetic_unexplained_path(

@@ -24,8 +24,8 @@ get_path(ctx, "mobility.speed_mps")  -> {value, provenance, reason?, source_view
    （唯一例外见下一条）。
 2. **L0 只砍元信息，不砍数值**：L0 丢掉的只有「逐叶子 provenance / unknown_reasons /
    confidence / 逐模块列表 / evidence / flag 的 message / 512 条技能明细」——**每一个业务
-   数值都还在**（`provenance_counts` 给三态计数、`flags` 给完整 id 清单、`meta.skill_tier`
-   给 `{name, count, hash}`），并且都能用 `get_path()` 原路取回、逐位相同。
+   数值都还在**（`provenance_counts` 给三态计数、`flags` 给完整清单 + 6–10 字 `hint`、
+   `meta.skill_tier` 给 `{name, count, hash}`），并且都能用 `get_path()` 原路取回、逐位相同。
 3. **L1 不降级**：单视角本身就是「全量」，`render_view` 不做预算裁剪（预算护栏只属于
    `render_overview` 的六视角合计）。因此当 overview 因超预算而降级时，
    `render_view(v)` 会比 `render_overview()["views"][v]` **多出** evidence / 未截断的
@@ -47,19 +47,49 @@ L0 的字段清单（文档 §3，每视角 3–5 个）
 | `resources` | `cpu{output, load, free}` / `powergrid{...}` / `feasible` / `slots{high: "3/6", …}` |
 | `constraints` | `hard_violations{count, kinds}` / `tier_violations{count, kinds}` / `needs_implant` |
 | `stability` | `cap_stable_pct` / `cap_depletes_in_s` / `cap_load_gj_s` / `cap_recharge_gj_s` / `has_external_dependency` |
-| 顶层 | `ship{name, group, type_id}` / `meta`（**技能档只给 `{name, count, hash}`**）/ `flags[{id}]` / `provenance_counts` / `budget{chars, degraded}` |
+| 顶层 | `ship{name, group, type_id}` / `meta`（**技能档只给 `{name, count, hash}`**）/ `flags[{id, hint}]` / `provenance_counts{measured, assumed, unknown}` / `budget{chars, degraded}` |
 
-两处相对文档 §3 的**形态取舍**（都有实测依据，见下；数值一个没丢）
+T-40 之后的三处**形态**（都是验收方实测后裁决的，数值一个没丢）
 
-1. **`flags` 只给 `id`**（文档写 `[{id, message}]`）。实测 f47 有 **7 条**、f67 有 **6 条**
-   flag：带 message 时 `flags` 单块 688 / 555 字符（六视角合计才 960），无论把 message
-   截到多短都过不了 2,000（cap=8 时 f47 仍有 1,989，且正文被截成碎句）。**一条不丢**
-   优于「留几条完整的」——渲染层的红线是「绝不丢弃诊断，丢一条就少一条可疑点」，
-   而少一段解释不丢任何一条可疑点。完整 message 与 evidence 都在
-   `render_view()["flags"]` / `get_path("flags[0].message")`。
-2. **`provenance_counts` 用顺序三元组 `[measured, assumed, unknown]`**（文档写
-   `{measured, assumed, unknown}`）。**同一组数、同一顺序**，省 204 字符（58 → 20 每视角）；
-   `get_path("provenance_counts.mobility.assumed")` 按名字照样取得动。
+1. **`flags` 给 `{id, hint}`**（T-39 只给 `{id}`）：`message` 太长（f47 七条合计 688 字符），
+   但只有 id 又猜不出来（`propulsion_state_conflict` / `resist_hole` 这类 id 光看没有信息量）
+   → 取 **6–10 字**的 `hint`，**由当次 evidence 生成**（见 `_flag_hint()`：形状规则 +
+   领域词表，**没有任何「flag id → 文案」的常量表**，所以 hint 永远带当次的真实数字）。
+   无 evidence 可生成时 `hint` 给 `null`。实测成本见 `INDEX_BUDGET_CHARS` 的 docstring。
+2. **`provenance_counts` 用带标签对象 `{measured, assumed, unknown}`**（T-39 用的是顺序
+   三元组 `[measured, assumed, unknown]`）。T-40 改回对象：**未标序的数组对 agent 是隐藏
+   契约**（不查文档就不知道第 0 位是什么），多花约 230 字符值得；
+   `get_path("provenance_counts.mobility.assumed")` 照样取得动。
+3. **两处可逆压缩**（省字符但**不丢数值**，靠 `get_path` 还原；**字段形状不变**）：
+   - `meta.module_states` 四槽位同值 → 压成单值（如 `"engine_default"`）；
+   - `meta.damage_profile` 四系全 `0.25` → 压成 `"uniform"`；
+     **两者都能还原**：`get_path("meta.module_states.high")` / `meta.damage_profile.em`
+     在压缩形态下仍取得到原值（`META_COMPRESSED_ALIASES` → `meta.assumptions.*`）。
+
+   > **`firepower.damage_split` 不压缩**（T-40 收敛时 Lead 的验收裁决）：L0 的**字段形状
+   > 必须恒定**（对象永远对象、数组永远数组，可变的只有值），所以四系全 `None` 时仍是
+   > `{"em": null, "explosive": null, "kinetic": null, "thermal": null}`，**不许整块
+   > `null`**——形状一变，下游按 `damage_split.em` 取数就得先判 null，契约就退化了。
+   > 30 字符换形状恒定，值。
+
+**别名表（L0 名 → L1 底层路径，`IndexField.source` / `IndexField.aliases` 显式登记）**
+
+| L0 字段 | 底层路径（L1） | 三态来源 |
+|---|---|---|
+| `firepower.dps_base` | `dps.base` | 底层叶子 |
+| `firepower.dph` | `dph` | 底层叶子 |
+| `firepower.range_m.optimal` / `.max` | `range.optimal_m` / `range.max_range_m` | 底层叶子 |
+| `firepower.damage_split.<系>` | `damage_split.<系>` | 底层叶子（同名下钻） |
+| `firepower.weapons.count` / `.families` | `weapons[].count` / `weapons[].family` **聚合** | `assumed`（合成值） |
+| `survivability.layers.shield` / `.armor` / `.hull` | `layers.shield_hp` / `armor_hp` / `hull_hp` | 底层叶子（**改名**，走 `aliases`） |
+| `resources.cpu.*` / `powergrid.*` | `cpu.*` / `powergrid.*` | 底层叶子（同名下钻） |
+| `constraints.hard_violations.count` / `tier_violations.count` | 清单长度 **聚合** | `assumed`（合成值） |
+
+**没有单一来源的聚合值一律给 `assumed`（合成值），绝不给 `null`** —— 这条是 T-40 修的
+缺陷 2：968 处 `provenance: null` 的根因是 T-39 的 `_field_provenance()` 只认「字段路径
+完全相等」，L0 用别名（`dps_base` ← `dps.base`、`layers.shield` ← `layers.shield_hp`、
+`weapons.count` ← `weapons[]` 聚合）时一条都匹配不上，于是「值都对，只有可信度丢了」。
+现在按**底层路径**查表，两种写法（`firepower.dps_base` 与 `firepower.dps.base`）都带三态。
 
 三处细节是**派生值**（L1 里没有同名叶子，由本模块从 L1 可见字段组装）：
 
@@ -90,6 +120,10 @@ L0 只用 `meta.mode` 交代「当前在哪个模式」；要看三模式对比�
   所以超预算时**不删任何数值**，只把 `degraded` 置位，让读者/上层自己决定是否改用
   L1/L2。这也正是文档 §7 那条红线要的效果：`degraded` 若为 true 必须在 L0 显式出现，
   不能让读者以为看到了全部。
+- **已知欠账（T-41，不在 T-40 范围）**：因为 `chars` 不量自己，它与
+  `len(json.dumps(整个 L0))` 相差约 46 字符（`budget` 块的键名 + 两个数字）。验收脚本
+  `check_layers.py` 把它记成 **1 条 medium** 并注明「已派 T-41」；改成「量自己」需要解
+  自指方程（长度依赖长度），属于独立口径变更，本层**不在这里顺手改**。
 """
 
 from __future__ import annotations
@@ -110,33 +144,51 @@ from evefit.project.views.loader import load_views
 # 一、常量与口径
 # =============================================================================
 
-INDEX_BUDGET_CHARS: int = 2000
+INDEX_BUDGET_CHARS: int = 2500
 """L0 的字符预算（`len(json.dumps(L0 正文))`）。
 
-**实测重定，不是拍的**（四个真实样本，`tests/test_summary.py` 逐个钉住）：
+**T-40 上调：2,000 → 2,500**（验收方实测后裁决，不是拍的）：
 
-| 样本 | L0 字符数（含 budget 块） |
-|---|---|
-| `f67-spotcheck-139255942` | **1,918** |
-| `f47-random-raptor` | **1,965** |
-| `f12-logistics-oneiros` | **1,934** |
-| `f1-hecate-killmail` | **1,884** |
+| 时点 | 实测 L0 字符数（65 样本，含 `budget` 块） | 预算 |
+|---|---|---|
+| T-39 | min **1,722** / median **1,859** / max **1,987** | 2,000 |
+| **T-40** | min **1,801** / median **2,000** / max **2,183** | **2,500** |
 
-对比 `render_overview` 的 f67 **23,256**（views 16,723 + meta 6,439）→ 降幅 **91.8%**，
-约 7,000 token 的「概览」变成约 600 token 的「索引」。
+原 2,000 是按 T-39 的四个样本重定的，而验收方跑 65 样本的实测区间是 **1,722–1,987**；
+再叠加 T-40 的两项**净增**（`flags` 的 `hint`、`provenance_counts` 改带标签对象）必然
+越过 2,000。**2,500 仍比旧 `render_overview` 的 f67 实测 23,256 低 89%**（护栏意义不变：
+一份「概览」约 7,000 token → 约 800 token）。
 
-**文档 §6 的 ~1,220 估不出来**，原因是两处系统性低估（不是本层没压干净）：
+T-40 的两处压缩（`module_states` 同值 → 单值、`damage_profile` 均匀 → `"uniform"`）是
+**净省**（`meta` 占 L0 的最高占比从 21.9% 降到 **12.9%**），但它们的作用是抵消新增开销，
+而不是「为省字符丢数值」—— 见模块 docstring 第 3 条：压缩都可逆，`get_path` 原路取回原值。
+净增的开销实测：`hint` **均 86.5 字符/样本**（276 条 flag、hint 正文均 7.9 字，
+最肥的 7 条 flag 样本 146）、`provenance_counts` 改对象 **约 +190**（6 视角 × 32）。
 
-1. `flags`：文档按「2 条 × 110」估 220，实测 f47 有 **7 条**、f67 有 **6 条**
-   （每条 id 约 25–40 字符），这一块 217 / 204；
-2. 六视角 4–5 个字段实测 **约 940**（文档估 620）——`damage_split` 四系、`cpu`/`powergrid`
-   三元组、`slots` 五槽这些「字段名 + 真实数值」本身就压不动（而红线禁止为省字符丢数值）；
-3. `meta` 实测 **377**（文档估 180，与 `ship` 合并算）：`module_states`（104）与
-   `damage_profile`（65）都是文档明列的项，不能砍。
+`degraded` 只在更肥的配装上置位（**只上报，不裁剪** —— 见模块 docstring 末尾「`budget`
+的口径」；这条分支由 `tests/test_summary.py` 用 monkeypatch 把预算调小来实测，
+验收脚本 `check_layers.py` 也会把预算压到 1 跑一遍）。
+"""
 
-于是预算按实测重定：`ceil(1,965 × 1.02 ÷ 1000) × 1000 = 2,000`。四个样本都留 **≥35**
-字符余量（f47 最紧——它有 7 条 flag）；`degraded` 只在更肥的配装上置位
-（**只上报，不裁剪**——见模块 docstring 末尾「`budget` 的口径」）。
+HINT_MIN_CHARS: int = 6
+"""`flags[].hint` 的下限（文档 §3：6–10 字，够看清「是什么」，又放得进预算）。"""
+
+HINT_MAX_CHARS: int = 10
+"""`flags[].hint` 的上限（超过就截断——hint 是提示，不是诊断正文；正文在 L1）。"""
+
+DAMAGE_PROFILE_UNIFORM: str = "uniform"
+"""`meta.damage_profile` 的四系**全相等**时压缩成的单值（默认 25/25/25/25）。"""
+
+META_COMPRESSED_ALIASES: dict[str, str] = {
+    "module_states": "assumptions.module_states",
+    "damage_profile": "assumptions.damage_profile",
+}
+"""`meta` 里**可压缩块 → 完整版路径**（`get_path` 的还原通道）。
+
+L0 把这两个块压成单值（`"engine_default"` / `"uniform"`）之后，`meta.module_states.high`
+这种「按槽位取」的路径在 L0 里就不再存在；本表把它翻译成 `meta.assumptions.module_states.high`
+（`render._meta()` 的完整形状）去取 —— **压缩可逆**是 T-40 的硬要求，
+`tests/test_summary.py` 用「压缩前后取到的值逐位相同」钉住。
 """
 
 SKILL_HASH_DIGITS: int = 12
@@ -186,12 +238,16 @@ class IndexField:
     Attributes:
         path: L0 里的点路径（相对视角，如 `range_m.max`）；点号表示嵌套。
         source: L1 里对应叶子的点路径（相对视角 overview，如 `range.max_range_m`）；
-            写 `None` 表示「纯派生值」——没有单一对应叶子，三态记 `assumed`。
+            写 `None` 表示「纯派生 / 聚合值」——没有单一对应叶子，三态记 `assumed`。
         read: 派生函数 `overview -> value`；`None` 表示按 `source` 取值。
         omit_if_none: 值为 `None` 时**不写这个键**（只给 `range_m.max`：没有导弹时
             文档 §3 明确「只给 optimal」，`None` 的 max 是噪声）。
         synthetic: 纯派生（与 `source is None` 等价），保留独立标记让 `_field_provenance`
             的意图更好读。
+        aliases: **子键级别名表** `({L0 子键: L1 叶子})`，只给「L0 换了键名」的块用
+            （`layers.shield` ← `layers.shield_hp`）。L0 与 L1 同名的块（`cpu` /
+            `powergrid` / `damage_split`）不需要它 —— `source` 本身就能当下钻前缀，
+            见 `_underlying_paths()`。
     """
 
     path: str
@@ -199,6 +255,7 @@ class IndexField:
     read: Callable[[Mapping[str, object]], object] | None = None
     omit_if_none: bool = False
     synthetic: bool = False
+    aliases: tuple[tuple[str, str], ...] = ()
 
 
 def _weapons_block(overview: Mapping[str, object]) -> dict:
@@ -354,11 +411,24 @@ INDEX_SPEC: dict[str, tuple[IndexField, ...]] = {
         IndexField("dph", source="dph"),
         IndexField("range_m.optimal", source="range.optimal_m"),
         IndexField("range_m.max", source="range.max_range_m", omit_if_none=True),
+        # `damage_split` **不做任何压缩**：四系全 None 时仍是四键 + 四个 null
+        # （Lead 裁决：L0 的字段形状恒定，对象永远对象）。见模块 docstring 第 3 条。
         IndexField("damage_split", source="damage_split"),
     ),
     "survivability": (
         IndexField("ehp_mixed", source="ehp_mixed"),
-        IndexField("layers", read=_layers_block, synthetic=True),
+        IndexField(
+            "layers",
+            read=_layers_block,
+            synthetic=True,
+            # L0 换了键名（`shield` ← `shield_hp`）：别名表是**必需**的，否则
+            # `get_path("survivability.layers.shield")` 查不到底层叶子（缺陷 2 的 3/16 类）。
+            aliases=(
+                ("shield", "layers.shield_hp"),
+                ("armor", "layers.armor_hp"),
+                ("hull", "layers.hull_hp"),
+            ),
+        ),
         IndexField("thinnest", read=_thinnest_block, synthetic=True),
         IndexField("repair_total_hp_s", read=_repair_total, synthetic=True),
     ),
@@ -392,6 +462,25 @@ INDEX_SPEC: dict[str, tuple[IndexField, ...]] = {
 `render_index` 按它组装 L0，`get_path` 按它查三态——两处读同一张表，所以
 「L0 的每个数值都能被 `get_path` 取到」不是靠测试对齐，而是**构造上不可能漂移**。
 每个视角的**顶层键**必须落在文档 §3 的 3–5 个之间（`tests/test_summary.py` 钉住）。
+
+**别名 → 底层路径的三种形态**（`get_path` 的 provenance 解析只认这三种，见
+`_underlying_paths()`）：
+
+1. **整字段改名**：`source` 就是底层路径 —— `dps_base` ← `dps.base`、
+   `dph` ← `dph`、`range_m.optimal` ← `range.optimal_m`、`cap_load_gj_s` ←
+   `capacitor.peak_load` …（`source` 为 `None` 的不属于这一类）；
+2. **块内子键改名**：`aliases` 给出「L0 子键 → L1 叶子」—— 只有 `survivability.layers`
+   需要（`shield` ← `layers.shield_hp`）；
+3. **同名块下钻**：`source` 本身当下钻前缀 —— `damage_split.em` ← `damage_split.em`、
+   `resources.cpu.output` ← `cpu.output`、`powergrid.load` ← `powergrid.load`。
+   这三块**不需要** `aliases`（键名一模一样），但**必须**能下钻，否则
+   `get_path("firepower.damage_split.em")` 之类的 16 类路径里最粗的那几类会返回 `null`。
+
+**聚合值（没有单一底层叶子）**：`weapons.count` / `weapons.families`（`weapons[]` 求和 /
+去重）、`hard_violations.count` / `.kinds`、`tier_violations.count` / `.kinds`、
+`slots.*`、`thinnest.*`、`repair_total_hp_s`、`propulsion_state`、`has_external_dependency`
+—— 它们登记为 `synthetic=True` 且 `source=None`，三态一律 `assumed`（**合成值**语义：
+建立在同一份 L1 数据之上），**绝不给 `null`**。
 """
 
 
@@ -446,12 +535,52 @@ def _is_index_ready(ctx: ViewContext, type_id: object) -> bool:
     return isinstance(type_id, int) and getattr(ctx, "index", None) is not None
 
 
+def _module_states_block(assumptions: Mapping[str, object]) -> object:
+    """`assumptions.module_states` → **四槽位同值就压成单值**（T-40 压缩②，省约 100 字符）。
+
+    现状（`engine/assumptions.derive_module_states()`）恒为
+    `{"high": "engine_default", "medium": "engine_default", "low": "engine_default",
+    "rig": "engine_default"}` —— 四个键重复同一个字符串，压成 `"engine_default"` 后
+    语义不变（「所有槽位的状态来源都是引擎默认」）。
+
+    **只在四值全同时压缩**：不同值（未来真按槽位记来源时）原样保留整张表。
+    还原通道：`get_path("meta.module_states.high")` → `META_COMPRESSED_ALIASES` →
+    `meta.assumptions.module_states.high`（压缩不改真值）。
+    """
+    states = assumptions.get("module_states")
+    if isinstance(states, dict) and states:
+        values = list(states.values())
+        if all(value == values[0] for value in values):
+            return values[0]
+    return states
+
+
+def _damage_profile_block(assumptions: Mapping[str, object]) -> object:
+    """`assumptions.damage_profile` → **四系全相等就压成 `"uniform"`**（T-40 压缩③）。
+
+    默认剖面是 25/25/25/25（`engine/assumptions.DEFAULT_DAMAGE_PROFILE`），四个 `0.25`
+    在 L0 里只是重复声明「均匀」；压成 `"uniform"` 省约 50 字符，且语义更直接。
+
+    **只在四值全相等时压缩**（`0.25/0.25/0.25/0.25` 与 `0.5/0.5/0/0` 不同：后者不均匀）。
+    还原通道：`get_path("meta.damage_profile.em")` → `meta.assumptions.damage_profile.em`。
+    """
+    profile = assumptions.get("damage_profile")
+    if isinstance(profile, dict) and profile:
+        values = list(profile.values())
+        if all(value == values[0] for value in values):
+            return DAMAGE_PROFILE_UNIFORM
+    return profile
+
+
 def _meta_block(ctx: ViewContext) -> dict:
     """`meta` → 版本三元组 + **压缩后的**假设块（技能档只给 `{name, count, hash}`）。
 
     与 `render._meta()` 的区别只有一处：`assumptions` 被压成
     `skill_tier / module_states / damage_profile / mode` 四项。不做假设推导
     （红线 N9：`ctx.assumptions` 是唯一来源，这里只读不改）。
+
+    `module_states` / `damage_profile` 再各走一层**可逆压缩**（见上面两个函数）：
+    L0 只留单值，完整形状与逐槽位取值走 `get_path`。
     """
     engine_meta = ctx.meta if isinstance(ctx.meta, dict) else {}
     assumptions = ctx.assumptions if isinstance(ctx.assumptions, dict) else {}
@@ -460,8 +589,8 @@ def _meta_block(ctx: ViewContext) -> dict:
         "engine_version": engine_meta.get("engine_version"),
         "spec_version": engine_meta.get("spec_version"),
         "skill_tier": _skill_tier_block(assumptions),
-        "module_states": assumptions.get("module_states"),
-        "damage_profile": assumptions.get("damage_profile"),
+        "module_states": _module_states_block(assumptions),
+        "damage_profile": _damage_profile_block(assumptions),
         "mode": assumptions.get("mode_id"),
     }
 
@@ -483,23 +612,176 @@ def _entries(ctx: ViewContext, targets: tuple[str, ...]) -> tuple[dict[str, dict
     return entries, residual
 
 
-def _flag_pairs(entries: Mapping[str, dict], residual: list[dict] | None = None) -> list[dict]:
-    """所有 flag → `[{id}]`（**不带 `message`、不带 `evidence`**）。
+# -----------------------------------------------------------------------------
+# flags 的 `hint`（T-40）：从**当次 evidence** 生成 6–10 字摘要
+# -----------------------------------------------------------------------------
 
-    为什么 L0 连 `message` 都不带（这是相对文档 §3「`[{id, message}]`」的**取舍之一**，
-    另一处见 `_provenance_counts()`）：
+_LAYER_LABELS: dict[str, str] = {"shield": "护盾", "armor": "装甲", "hull": "结构"}
+"""三层的短名（`survability.layers` 的层名 → 中文）。**只翻译领域词**，不含任何文案。"""
+
+_DAMAGE_LABELS: dict[str, str] = {
+    "em": "电磁",
+    "explosive": "爆炸",
+    "kinetic": "动能",
+    "thermal": "热能",
+}
+"""四系伤害的短名（与 `views/shared.DAMAGE_TYPES` 同一组词，只做中文转写）。"""
+
+_RESOURCE_LABELS: dict[str, str] = {"cpu": "CPU", "power": "PG", "powergrid": "PG", "calibration": "标定"}
+"""资源三项的短名（`*_deficit` 的键去掉后缀之后 → 显示名）。"""
+
+
+def _hint_label(table: Mapping[str, str], value: object) -> str:
+    """领域词 → 短名；**表外一律原样返回**（不猜、不编一个中文名）。"""
+    text = str(value)
+    return table.get(text, text)
+
+
+def _hint_number(value: object) -> str:
+    """数字 → 极短字符串（整数不写 `.0`，浮点保持 `str()` 的精度，非数字老实 `str()`）。"""
+    if isinstance(value, bool):
+        return str(int(value))
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if number.is_integer():
+            return str(int(number))
+        return f"{number:g}"
+    return str(value)
+
+
+def _hint_compact(value: object) -> str:
+    """去掉所有空白（`"MWD 与 AB"` → `"MWD与AB"`）：hint 的字数预算很紧。"""
+    return "".join(str(value).split())
+
+
+def _hint_token(value: object) -> str:
+    """取一个名字的**首个词**再截到 5 字符（模块全名太长：`5MN Y-T8 Compact MWD` → `5MN`）。"""
+    parts = str(value).split()
+    return parts[0][:5] if parts else ""
+
+
+def _hint_deficit(evidence: Mapping[str, object]) -> str:
+    """`*_deficit` 里**最大**的那一项 → `"CPU超14.3"` / `"PG超64.71"`（超得最多的是主因）。"""
+    deficits = [
+        (key, value)
+        for key, value in evidence.items()
+        if key.endswith("_deficit")
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and value > 0
+    ]
+    if not deficits:
+        return ""
+    key, value = max(deficits, key=lambda pair: pair[1])
+    label = _hint_label(_RESOURCE_LABELS, key[: -len("_deficit")])
+    return f"{label}超{_hint_number(value)}"
+
+
+def _hint_from_scalars(evidence: Mapping[str, object]) -> str:
+    """兜底：把**前两个标量**事实拼成 `键=值`（新 flag 复用已知形状就不会走到这里）。"""
+    parts: list[str] = []
+    for key, value in evidence.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            continue
+        parts.append(f"{key}={_hint_number(value) if not isinstance(value, str) else value}")
+        if len(parts) == 2:
+            break
+    return " ".join(parts)
+
+
+_HINT_SHAPES: tuple[tuple[tuple[str, ...], Callable[[Mapping[str, object]], str]], ...] = (
+    # 推进状态冲突：evidence.conflict 已经是人话（"AB 与 MWD"）→ "AB与MWD同时启用"
+    (("conflict",), lambda e: f"{_hint_compact(e['conflict'])}同时启用"),
+    # 抗性洞：最薄的那一层 + 最弱的系 → "装甲最弱:爆炸"
+    (
+        ("layer", "weakest_damage"),
+        lambda e: (
+            f"{_hint_label(_LAYER_LABELS, e['layer'])}最弱:"
+            f"{_hint_label(_DAMAGE_LABELS, e['weakest_damage'])}"
+        ),
+    ),
+    # 资源超预算（按全 active 算装不下）：开着的模块数是这条的专属证据 → "11件全active"
+    (("open_state_modules",), lambda e: f"{_hint_number(e['open_state_modules'])}件全active"),
+    # 资源溢出（余量为负）→ "CPU超11" / "PG超64.71"
+    (("cpu_deficit",), _hint_deficit),
+    # MWD 把信号半径撑大 → "信号×5.5"
+    (("sig_ratio",), lambda e: f"信号×{_hint_number(e['sig_ratio'])}"),
+    # 高槽有挂点但空着 → "高槽空3/4"
+    (
+        ("high_empty", "high_total"),
+        lambda e: f"高槽空{_hint_number(e['high_empty'])}/{_hint_number(e['high_total'])}",
+    ),
+    # 关掉这一件电容就稳 → "关5MN就稳"
+    (("module", "stable_pct_after"), lambda e: f"关{_hint_token(e['module'])}就稳"),
+    # 机库里有载机但没起飞 → "机库8架未飞"
+    (("fighter_bay_count",), lambda e: f"机库{_hint_number(e['fighter_bay_count'])}架未飞"),
+    # 有弹药却零齐射 → "5门有弹零伤害"
+    (("armed_weapons", "dph_hp"), lambda e: f"{_hint_number(e['armed_weapons'])}门有弹零伤害"),
+    # 电容会耗尽（有修复速率也不稳）→ "电容38.4s耗尽"
+    (("cap_depletes_in_s",), lambda e: f"电容{_hint_number(e['cap_depletes_in_s'])}s耗尽"),
+    # 无人机带宽闲着 → "带宽50未用"
+    (("bandwidth_total", "drones_carried"), lambda e: f"带宽{_hint_number(e['bandwidth_total'])}未用"),
+    # 一件推进模块都没有 → "无推进模块22件"
+    (
+        ("propulsion_modules", "fitted_modules"),
+        lambda e: f"无推进模块{_hint_number(e['fitted_modules'])}件",
+    ),
+    # 齐射/秒伤与武器周期不符 → "周期比0.0s"
+    (("ratio_s", "cycle_max_s"), lambda e: f"周期比{_hint_number(e['ratio_s'])}s"),
+    # 空槽闲置 → "空槽16个闲置"
+    (("empty_slots",), lambda e: f"空槽{_hint_number(e['empty_slots'])}个闲置"),
+)
+"""evidence **形状** → hint 生成器（**表的键是 evidence 的字段名组合，不是 flag id**）。
+
+为什么按形状而不按 id：hint 必须**跟着当次数据走**（`"装甲最弱:爆炸"` 换成另一条船就是
+`"护盾最弱:电磁"`），所以不能写一张 `{flag_id: 文案}` 的常量表——那种表第一次换样本就过时。
+按形状登记之后：① 同一个 flag 在不同配装上得到**不同的真实数字**；② 新 flag 只要复用
+已有的 evidence 形状就自动有 hint；③ 表的每一条都只在「这些键同时存在」时命中，
+不存在的键不会编出数字。域词表（`_LAYER_LABELS` / `_DAMAGE_LABELS` / `_RESOURCE_LABELS`）
+只翻译 **evidence 里本来就有的值**（`armor` / `explosive` / `cpu`），不产生任何新事实。
+"""
+
+
+def _hint_from_evidence(evidence: Mapping[str, object]) -> str:
+    """按形状表生成 hint（全都不命中时退回前两个标量事实；仍为空 → 调用方给 `null`）。"""
+    for keys, formatter in _HINT_SHAPES:
+        if all(key in evidence for key in keys):
+            text = formatter(evidence)
+            if text:
+                return text
+    return _hint_from_scalars(evidence)
+
+
+def _flag_hint(flag: Mapping[str, object]) -> str | None:
+    """一条 flag → **6–10 字**的 hint（`None` = 没有 evidence 可生成）。
+
+    长度口径：形状表里的模板设计上都落在 6–10 之间；超过 `HINT_MAX_CHARS` 截断
+    （hint 是「要不要展开看」的提示，不是诊断正文），更短就照实给——**不填充假字**。
+    """
+    evidence = flag.get("evidence")
+    if not isinstance(evidence, dict) or not evidence:
+        return None
+    text = " ".join(str(_hint_from_evidence(evidence)).split())
+    if not text:
+        return None
+    return text[:HINT_MAX_CHARS]
+
+
+def _flag_pairs(entries: Mapping[str, dict], residual: list[dict] | None = None) -> list[dict]:
+    """所有 flag → `[{id, hint}]`（**不带 `message`、不带 `evidence`**）。
+
+    为什么 L0 连 `message` 都不带：
 
     - **一条不丢**：L0 的 flag 清单是**完整**的（视角顺序 + 顶层兜底桶），只是把
-      「为什么」留给 L1——`id` 已经自解释（`resist_hole` / `resource_overflow` /
-      `cap_sensitive` …），L0 的读者要回答的是「要不要继续看」，不是「为什么」；
+      「为什么」留给 L1——`id` + 6–10 字的 `hint` 已经够回答「要不要继续看」；
     - **换成 message 就装不下**：实测 f47 有 7 条 flag，带 message 时 `flags` 单块
-      **688 字符**（六视角合计才 960）；把 message 留到 L1 后 f47 的 L0 是 1,965，
-      **带上 message 无论怎么截都过不了 2,000**（cap=8 已是 1,989，且正文被截成碎句）；
+      **688 字符**（六视角合计才 960），无论怎么截都过不了预算，且正文被截成碎句；
     - 反过来「只留前 N 条」更糟：那会**真的丢诊断**（渲染层 docstring 的红线是
-      「绝不丢弃，丢一条就少一条可疑点」），而少一段解释不丢任何一条可疑点。
+      「绝不丢弃，丢一条就少一条可疑点」）。
 
-    `render_view(v)["flags"]` / `get_path("flags[0].message")` 都拿得到完整 message
-    与 evidence。
+    `hint` 由 `_flag_hint()` **从当次 evidence 生成**（T-40）：没有 evidence 的 flag
+    给 `null`（不编内容）。完整 message 与 evidence 都在
+    `render_view()["flags"]` / `get_path("flags[0].message")`。
 
     顺序 = 视角顺序 + 顶层兜底桶（与 `render_overview` 的归位一致）。
     """
@@ -507,29 +789,29 @@ def _flag_pairs(entries: Mapping[str, dict], residual: list[dict] | None = None)
     for entry in entries.values():
         for flag in entry.get("flags") or []:
             if isinstance(flag, dict):
-                pairs.append({"id": flag.get("id")})
+                pairs.append({"id": flag.get("id"), "hint": _flag_hint(flag)})
     for flag in residual or []:
         if isinstance(flag, dict):
-            pairs.append({"id": flag.get("id")})
+            pairs.append({"id": flag.get("id"), "hint": _flag_hint(flag)})
     return pairs
 
 
-def _provenance_counts(entries: Mapping[str, dict]) -> dict[str, list[int]]:
-    """每视角的 **`[measured, assumed, unknown]` 计数三元组**（逐叶子表属 L1，文档 §2）。
+def _provenance_counts(entries: Mapping[str, dict]) -> dict[str, dict[str, int]]:
+    """每视角的 **`{measured, assumed, unknown}` 计数**（逐叶子表属 L1，文档 §2）。
 
-    文档 §3 写的是 `{measured, assumed, unknown}`；这里用**同一组数、固定顺序**的
-    三元组（省 204 字符：`{"measured": 2, "assumed": 9, "unknown": 19}` 58 → 20）。
-    没有丢任何信息：`PROVENANCE_STATES` 就是这三个状态的**声明顺序**，
-    按名字取也读得通（`get_path("provenance_counts.mobility.assumed")`，见
-    `_get_simple_path()` 里的 named 回退）。
+    文档 §3（T-40 裁决后）就是**带标签对象**。T-39 曾用顺序三元组
+    `[2, 9, 19]` 省 204 字符，但**未标序的数组对 agent 是隐藏契约**（不查文档就不知道
+    第 0 位是哪个态）——多花约 230 字符换一个自解释的形状，值得。
+    `get_path("provenance_counts.mobility.assumed")` 按名字直接取得动（键就是名字，
+    不再需要「按下标猜」的回退）。
     """
-    counts: dict[str, list[int]] = {}
+    counts: dict[str, dict[str, int]] = {}
     for name, entry in entries.items():
         bucket = {state: 0 for state in PROVENANCE_STATES}
         for state in (entry.get("provenance") or {}).values():
             if state in bucket:
                 bucket[state] += 1
-        counts[name] = [bucket[state] for state in PROVENANCE_STATES]
+        counts[name] = bucket
     return counts
 
 
@@ -610,32 +892,74 @@ def _view_index(view: str, overview: Mapping[str, object]) -> dict:
     return block
 
 
+def _underlying_paths(field: IndexField, l0_path: str) -> list[str]:
+    """L0 路径 → 它对应的**一条或多条 L1 底层叶子路径**（查三态用）。
+
+    三种形态（与 `INDEX_SPEC` 的 docstring 一一对应）：
+
+    - **整字段改名**（`l0_path == field.path`）：就是 `field.source`；
+    - **块内子键改名**（`l0_path` 是 `field.path` 的子键）：先查 `field.aliases`
+      （`layers.shield` → `layers.shield_hp`），没有别名就按 `source` 当下钻前缀
+      （`cpu.output` → `cpu.output`、`damage_split.em` → `damage_split.em`）；
+    - **节点请求**（`l0_path` 是 `field.path` 的前缀，如 `range_m` / `layers`）：
+      返回该字段的**全部**底层路径（有别名就每个子键一条），由调用方取最弱的那个。
+
+    都取不到时返回空列表 —— 调用方据此判「纯派生 / 聚合值」（→ `assumed`），
+    **不猜**一个来源。
+    """
+    if l0_path == field.path:
+        if field.aliases:
+            return [target for _key, target in field.aliases]
+        return [field.source] if field.source is not None else []
+
+    prefix = f"{field.path}."
+    if not l0_path.startswith(prefix):
+        return []
+    child = l0_path[len(prefix):]
+    for alias, target in field.aliases:
+        if child == alias:
+            return [target]
+    if field.source is None:
+        return []
+    return [f"{field.source}.{child}"]
+
+
+def _field_state(field: IndexField, l0_path: str, provenance: Mapping[str, str]) -> str | None:
+    """一条字段在某个 L0 路径上的三态：**先查底层路径，查不到再看是不是合成值**。"""
+    states = [_state_of(provenance, path) for path in _underlying_paths(field, l0_path)]
+    weakest = _weakest(states)
+    if weakest is not None:
+        return weakest
+    if field.synthetic or field.source is None:
+        return DERIVED_PROVENANCE  # 聚合 / 纯派生 → 合成值（**不是** null）
+    return None
+
+
 def _field_provenance(
     view: str, l0_path: str, entry: Mapping[str, object]
 ) -> str | None:
-    """L0 路径 → 三态（**从 L1 的逐叶子表查**，不在 L0 里另存一份）。
+    """L0 路径 → 三态（**按底层路径查 L1 的逐叶子表**，不在 L0 里另存一份）。
 
-    三种情况：
+    匹配规则（T-40 修正的正是这里）：
 
-    - 请求的是**一条字段**（`range_m.max`）：有 `source` 就查 L1 的那条叶子；
-      派生字段（`weapons` / `thinnest` / `slots` …）记 `assumed`（合成值语义）；
+    - 请求的是**一条字段**（`dps_base` / `range_m.max`）：按该字段的底层路径查；
+    - 请求的是**字段下的子键**（`weapons.count` / `layers.shield` / `damage_split.em` /
+      `cpu.output`）：`l0_path` 以 `field.path + "."` 开头也算命中 —— T-39 只认「完全
+      相等」，于是 16 类别名路径一条都匹配不上，返回 `null`（缺陷 2 的根因）；
     - 请求的是**一个节点**（`range_m` / `layers` / `damage_split`）：聚合成最弱的那一项
       （`_weakest()`，与数组元素约定「不许比最弱的出现更自信」同口径）；
     - 不是 L0 的路径（真的没有）→ `None`（不猜）。
+
+    聚合 / 纯派生字段走 `DERIVED_PROVENANCE`（`assumed`），**绝不返回 `null`**。
     """
     fields = INDEX_SPEC.get(view, ())
-    matched = [
-        field for field in fields if field.path == l0_path or field.path.startswith(f"{l0_path}.")
-    ]
-    if not matched:
-        return None
     provenance = entry.get("provenance") if isinstance(entry.get("provenance"), dict) else {}
-    states: list[str] = []
-    for field in matched:
-        if field.synthetic or field.source is None:
-            states.append(DERIVED_PROVENANCE)
-            continue
-        states.append(_state_of(provenance, field.source))
+    states: list[str | None] = []
+    for field in fields:
+        if field.path == l0_path or l0_path.startswith(f"{field.path}."):
+            states.append(_field_state(field, l0_path, provenance))
+        elif field.path.startswith(f"{l0_path}."):
+            states.append(_field_state(field, field.path, provenance))
     return _weakest(states)
 
 
@@ -838,15 +1162,16 @@ def _get_view_path(ctx: ViewContext, view: str, text: str, rest: list[str]) -> d
 
 
 def _l1_path_of(view: str, l0_path: str) -> str | None:
-    """L0 路径 → L1 叶子路径（派生字段没有单一来源时给 `None`）。
+    """L0 路径 → L1 叶子路径（**用于 `unknown_reasons` 的查询**）。
 
-    只用于 `unknown_reasons` 的查询：派生值记 `assumed`，不会落到 `unknown` 分支，
-    所以 `None` 不影响答案。
+    与查三态走同一张别名表（`_underlying_paths()`），所以「三态说 unknown、原因却查不到」
+    这种自相矛盾不会出现。只有**唯一**底层路径时才返回（节点 / 聚合值返回 `None`：
+    没有单一原因可归）。
     """
+    paths: list[str] = []
     for field in INDEX_SPEC.get(view, ()):
-        if field.path == l0_path and field.source is not None:
-            return field.source
-    return None
+        paths.extend(_underlying_paths(field, l0_path))
+    return paths[0] if len(paths) == 1 else None
 
 
 def _get_simple_path(ctx: ViewContext, text: str, head: str, parts: list[str]) -> dict:
@@ -865,14 +1190,14 @@ def _get_simple_path(ctx: ViewContext, text: str, head: str, parts: list[str]) -
     if found:
         return _answer_value(value, None, None, None, None)
 
-    if head == "provenance_counts":
-        # 三态计数在 L0 里是位置三元组；按名字取（`.measured` / `.assumed` / `.unknown`）
-        # 也读得通——名字顺序就是 `PROVENANCE_STATES`，两种写法同一组数。
-        named = {view: dict(zip(PROVENANCE_STATES, triple))
-                 for view, triple in (body.get(head) or {}).items()}
-        found, value, _canonical = _resolve({head: named}, parts, "")
-        if found:
-            return _answer_value(value, None, None, None, None)
+    if head == "meta":
+        # 压缩形态的**还原通道**（T-40）：`meta.module_states` 在 L0 里是单值
+        # `"engine_default"`、`meta.damage_profile` 是 `"uniform"`，所以
+        # `meta.module_states.high` / `meta.damage_profile.em` 在 L0 上取不到 ——
+        # 按 `META_COMPRESSED_ALIASES` 翻到完整版（`meta.assumptions.*`）去取。
+        answer = _get_compressed_meta_path(ctx, parts)
+        if answer is not None:
+            return answer
 
     full = _full_block(ctx, head, entries)
     found, value, _canonical = _resolve({head: full}, parts, "")
@@ -887,6 +1212,29 @@ def _get_simple_path(ctx: ViewContext, text: str, head: str, parts: list[str]) -
     else:
         hint = f"{head} 是标量"
     return _miss(text, hint)
+
+
+def _get_compressed_meta_path(ctx: ViewContext, parts: list[str]) -> dict | None:
+    """`meta.<被压缩块>.<子键>` → 从**完整版** `meta.assumptions.<同路径>` 取（不可逆就不是压缩）。
+
+    只在「L0 取不到」时调用：`meta.module_states` 命中 L0 时返回的就是压缩值
+    （`"engine_default"`）——那是 L0 语义，agent 看到什么就拿到什么；
+    而 `meta.module_states.high` 这种**下钻**必须给原值，否则压缩就丢了信息。
+    """
+    if len(parts) < 2:
+        return None
+    head_key, bracket = _split_segment(parts[1])
+    if bracket is not None:  # `meta.module_states[0]` 不是这套压缩的形状
+        return None
+    alias = META_COMPRESSED_ALIASES.get(head_key)
+    if alias is None:
+        return None
+    target = _split_path(f"meta.{alias}") + parts[2:]
+    full = render._meta(ctx, "overview")
+    found, value, _canonical = _resolve(full, target[1:], "")
+    if not found:
+        return None
+    return _answer_value(value, None, None, None, None)
 
 
 def _full_block(ctx: ViewContext, head: str, entries: Mapping[str, dict]) -> object:
@@ -943,10 +1291,14 @@ def _miss(text: str, hint: str | None) -> dict:
 
 
 __all__ = [
+    "DAMAGE_PROFILE_UNIFORM",
     "DERIVED_PROVENANCE",
+    "HINT_MAX_CHARS",
+    "HINT_MIN_CHARS",
     "INDEX_BUDGET_CHARS",
     "INDEX_SPEC",
     "IndexField",
+    "META_COMPRESSED_ALIASES",
     "get_path",
     "render_index",
     "render_view",

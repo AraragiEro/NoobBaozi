@@ -1,4 +1,4 @@
-"""T-39 测试：输出分层第一阶段（L0 摘要 / L1 单视角 / 按路径取数）。
+"""T-39/T-40 测试：输出分层第一阶段（L0 摘要 / L1 单视角 / 按路径取数）。
 
 权威文档：`evefit/docs/输出分层与工具集-v1.md`。被测入口三个：
 
@@ -14,13 +14,16 @@ render.get_path(ctx, "mobility.speed_mps")
 
 本文件钉住的十条（每条都对应任务书/文档的一条红线）
 
-1. **L0 体量**：四个样本 `len(json.dumps(index))` 都 < 2,000，且 `budget.chars` 公式成立
-   （`chars` 量的是 L0 **正文**，不含 `budget` 自身）；
+1. **L0 体量**：四个样本 `len(json.dumps(index))` 都 < 2,500（T-40 上调，见
+   `summary.INDEX_BUDGET_CHARS`），且 `budget.chars` 公式成立（`chars` 量的是 L0 **正文**，
+   不含 `budget` 自身）；
 2. **L0 不含 `evidence`**：递归遍历断言没有 `evidence` 键，也没有逐叶子
    `provenance` / `unknown_reasons` / `confidence` 三张表（只有计数）；
 3. **L0 的每个数值都取得回来且逐位相同**：遍历 L0 全部叶子逐个 `get_path` 比对；
 4. **L0 / L1 对同一字段数值逐位相同**：按 `summary.INDEX_SPEC` 的 `source` 对照
    `render_view()` 的 L1 值（独立实现取值，不复用被测代码）；
+4b. **每条 L0 路径都带三态（T-40 缺陷 2）**：别名路径（`dps_base` / `layers.shield` /
+   `weapons.count` / `cpu.output` …）一个都不许 `provenance: null`；
 5. **`meta.skill_tier` 是 `{name, count, hash}`**：不含 512 条明细；hash 是技能档的稳定
    摘要（同输入同值、换一个等级就变、12 位十六进制）；
 6. **`render_view("mobility")` 与 `render_overview()["views"]["mobility"]` 逐字节相同**，
@@ -31,6 +34,20 @@ render.get_path(ctx, "mobility.speed_mps")
 9. **非永真**：把 L0 里一个数值改掉 → 第 3 条断言立刻变红；删掉一个叶子 → 遍历到的
    叶子数确实变少（证明断言真的在读 L0，而不是一张硬编码清单）；
 10. `degraded` 在 L0 里**显式出现**：预算调小时置位，且**一个数值都不被裁剪**。
+
+T-40 追加的四条（对应本轮四个增强，全部有独立断言）
+
+- **`flags` 带 `hint`**：`{id, hint}`，hint 是 **6–10 字**（或 `null`）、**从当次 evidence
+  生成**（同一 id 在不同样本上得到不同的真实数字，不是常量表）、每样本成本实测在
+  预算内（见表 `HINT_COST_LIMIT`）；
+- **两处压缩且可逆**：`meta.module_states` 四槽同值 → 单值；`meta.damage_profile`
+  四系全 `0.25` → `"uniform"`；两者都能用 `get_path` 取回**原值**
+  （`meta.module_states.high` 在压缩形态下必须给 `engine_default`）。
+  **`firepower.damage_split` 不压缩**：Lead 验收裁决「L0 字段形状恒定」，四系全 null 时
+  仍是四键 dict（本条用例反向钉住：谁把它压成 `null` 就红）；
+- **`provenance_counts` 是带标签对象** `{measured, assumed, unknown}`；
+- **`degraded=True` 分支真的被执行过**：monkeypatch 把预算调到「刚好不够」，断言数值/
+  字段一个字都没变。
 
 约束：无网络、无随机（红线 N1）；样本只读；只碰 `project/summary.py` 与
 `tests/test_summary.py`。
@@ -71,8 +88,25 @@ REACHABILITY_SAMPLES: tuple[str, ...] = (
 )
 """逐叶子可达性只跑三个（第三个已覆盖全部形状；再加 f1 只是重复同一批断言）。"""
 
-L0_LIMIT: int = 2000
-"""任务书的 L0 体量硬门限（文档 §1 的目标是 1,500，实测下界见 `INDEX_BUDGET_CHARS`）。"""
+L0_LIMIT: int = 2500
+"""任务书 / 文档 §1 的 L0 体量硬门限（T-40 从 2,000 上调到 2,500：
+
+验收实测 65 样本区间 1,722–1,987，加 `hint` 与带标签的 `provenance_counts` 之后必然
+越过 2,000；2,500 仍比旧 `render_overview` 的 23,256 低 89%）。"""
+
+HINT_MIN_CHARS: int = 6
+HINT_MAX_CHARS: int = 10
+"""`flags[].hint` 的字数区间（文档 §3：6–10 字，`null` 表示没有 evidence 可生成）。"""
+
+HINT_COST_LIMIT: int = 150
+"""四个样本上「每个样本的 hint 总开销」上限（字符）。
+
+口径：把 `[{id, hint}]` 与 `[{id}]` 两种序列化逐条相减后求和（含 `, "hint": "…"` 的
+键名开销）。实测：均 4.25 条 flag/样本、hint 正文均 7.9 字 → 均 86.5 字符/样本，
+最肥的样本（7 条 flag）146 字符。任务书给的「+80/样本」是按 12 字符/条估的，
+漏算了 JSON 键名（`"hint": ` 加引号共 12 字符/条）—— 所以这里钉的是**实测上限 150**
+（只拦「hint 失控变长」，不假装 80 成立），并在回报里作为偏离项说明。
+"""
 
 SKILL_COUNT: int = 512
 """全 4 + 补最低技能档的条数（`derive_skill_tier` 实测）。"""
@@ -80,6 +114,36 @@ SKILL_COUNT: int = 512
 PROVENANCE_STATES: tuple[str, ...] = ("measured", "assumed", "unknown")
 FORBIDDEN_TABLES: tuple[str, ...] = ("provenance", "unknown_reasons", "confidence")
 """L0 里**不允许**出现的逐叶子平行表（文档 §2 / 第七节红线）。"""
+
+ALIAS_PATHS: tuple[tuple[str, str, str | None], ...] = (
+    # (视角, L0 路径, 底层 L1 叶子；None = 聚合值，三态必须是 assumed)
+    ("firepower", "dps_base", "dps.base"),
+    ("firepower", "dph", "dph"),
+    ("firepower", "range_m.optimal", "range.optimal_m"),
+    ("firepower", "damage_split.em", "damage_split.em"),
+    ("firepower", "damage_split.explosive", "damage_split.explosive"),
+    ("firepower", "damage_split.kinetic", "damage_split.kinetic"),
+    ("firepower", "damage_split.thermal", "damage_split.thermal"),
+    ("firepower", "weapons.count", None),
+    ("firepower", "weapons.families", None),
+    ("survivability", "layers.shield", "layers.shield_hp"),
+    ("survivability", "layers.armor", "layers.armor_hp"),
+    ("survivability", "layers.hull", "layers.hull_hp"),
+    ("resources", "cpu.output", "cpu.output"),
+    ("resources", "cpu.load", "cpu.load"),
+    ("resources", "cpu.free", "cpu.free"),
+    ("resources", "powergrid.output", "powergrid.output"),
+    ("resources", "powergrid.load", "powergrid.load"),
+    ("resources", "powergrid.free", "powergrid.free"),
+    ("constraints", "hard_violations.count", None),
+    ("constraints", "tier_violations.count", None),
+)
+"""T-40 缺陷 2 点名的 **16 类别名路径**（验收报了 968 处 `provenance: null`）。
+
+`None` 的几条是**聚合值**（`weapons[]` 求和 / 违规清单条数）：没有单一底层叶子，
+三态必须是 `assumed`（合成值），**不许是 `null`**。其余几条必须与 L1 底层叶子的三态
+**逐一相等**（不是「有个值就行」——那会退化成 blanket assumed）。
+"""
 
 
 # ---- fixtures ----
@@ -256,7 +320,7 @@ def _assert_l0_fields_complete(doc: dict) -> None:
 
 @pytest.mark.parametrize("stem", SAMPLES)
 def test_l0_fits_the_hard_limit(docs: dict[str, dict], stem: str) -> None:
-    """四个样本的 L0 都 < 2,000 字符，且**默认预算下不降级**。"""
+    """四个样本的 L0 都 < 2,500 字符，且**默认预算下不降级**（T-40 上调后仍有余量）。"""
     doc = docs[stem]
     chars = len(json.dumps(doc, ensure_ascii=False))
 
@@ -308,10 +372,15 @@ def test_l0_has_no_per_leaf_tables(docs: dict[str, dict], stem: str) -> None:
 
 
 @pytest.mark.parametrize("stem", SAMPLES)
-def test_l0_flags_are_ids_only_and_never_dropped(
+def test_l0_flags_carry_id_and_a_short_hint_and_are_never_dropped(
     docs: dict[str, dict], ctxs: dict[str, ViewContext], stem: str
 ) -> None:
-    """L0 的 flag 清单 = L1 的全部 flag（**一条不丢**），但只留 `id`。"""
+    """L0 的 flag 清单 = L1 的全部 flag（**一条不丢**），形状是 `{id, hint}`（T-40）。
+
+    三条一起钉：① id 序列与 L1 完全一致（一条不丢、顺序不变）；② 形状只有两个键、
+    L0 里**没有** `evidence` / `message`（红线）；③ `hint` 要么是 `null`，要么落在
+    **6–10 字**——它是「要不要展开看」的提示，不是诊断正文。
+    """
     doc = docs[stem]
     full = [
         flag
@@ -320,8 +389,90 @@ def test_l0_flags_are_ids_only_and_never_dropped(
     ]
 
     assert [entry["id"] for entry in doc["flags"]] == [flag["id"] for flag in full]
-    for entry in doc["flags"]:
-        assert set(entry) == {"id"}, entry
+    for entry, flag in zip(doc["flags"], full):
+        assert set(entry) == {"id", "hint"}, entry
+        hint = entry["hint"]
+        if hint is None:
+            assert not (flag.get("evidence") or {}), (
+                f"{stem}.{entry['id']} 有 evidence 却给了 null hint"
+            )
+            continue
+        assert isinstance(hint, str)
+        assert HINT_MIN_CHARS <= len(hint) <= HINT_MAX_CHARS, (
+            f"{stem}.{entry['id']} 的 hint {hint!r} 有 {len(hint)} 字"
+            f"（要求 {HINT_MIN_CHARS}–{HINT_MAX_CHARS}）"
+        )
+        assert "evidence" not in entry and "message" not in entry
+
+
+@pytest.mark.parametrize("stem", SAMPLES)
+def test_l0_flag_hints_are_generated_from_the_evidence(
+    docs: dict[str, dict], ctxs: dict[str, ViewContext], stem: str
+) -> None:
+    """hint **跟着当次 evidence 走**（不是一张 `{flag_id: 文案}` 常量表）。
+
+    判据：同一个 id 在不同样本上必须能给出**不同的** hint，并且 hint 里的数字必须来自
+    该条 flag 的 evidence —— 常量表做不到这两件事。
+    """
+    by_id: dict[str, list[tuple[str, str]]] = {}
+    for name in SAMPLES:
+        for entry in docs[name]["flags"]:
+            if entry["hint"] is not None:
+                by_id.setdefault(entry["id"], []).append((name, entry["hint"]))
+
+    # ① 至少有 3 个 id 在四个样本上给出过 ≥2 种不同 hint
+    varied = {
+        flag_id: texts for flag_id, texts in by_id.items() if len({text for _n, text in texts}) >= 2
+    }
+    assert len(varied) >= 3, f"hint 不跟数据走（只有 {sorted(varied)} 有差异）"
+
+    # ② `resist_hole` 的 hint 必须带「层」的中文名（来自 evidence.layer），不是固定串
+    assert "resist_hole" in by_id, "四个样本都没有 resist_hole？样本或规则接错了"
+    for _name, text in by_id["resist_hole"]:
+        assert "最弱" in text and ":" in text, text
+        assert any(label in text for label in ("护盾", "装甲", "结构")), text
+
+    # ③ `resource_overflow` 的 hint 里那个数字必须是该样本 evidence 的 `*_deficit` 之一
+    def _fmt(number: object) -> str:
+        if isinstance(number, bool):
+            return str(int(number))
+        if isinstance(number, (int, float)):
+            return str(int(number)) if float(number).is_integer() else f"{float(number):g}"
+        return str(number)
+
+    assert docs[stem] and "resource_overflow" in [
+        entry["id"] for entry in docs[stem]["flags"]
+    ], "四个样本都该命中 resource_overflow"
+    deficits: list[str] = []
+    for view_name in available_views():
+        for flag in render.render_view(ctxs[stem], view_name)["flags"]:
+            if flag["id"] != "resource_overflow":
+                continue
+            evidence = flag.get("evidence") or {}
+            deficits = [
+                _fmt(value)
+                for key, value in evidence.items()
+                if key.endswith("_deficit") and isinstance(value, (int, float)) and value > 0
+            ]
+    assert deficits, f"{stem} 的 resource_overflow 没有正的缺口？"
+    hint = next(
+        entry["hint"] for entry in docs[stem]["flags"] if entry["id"] == "resource_overflow"
+    )
+    assert any(number in hint for number in deficits), (
+        f"{stem} 的 hint {hint!r} 与 evidence 的缺口 {deficits} 对不上"
+    )
+
+
+@pytest.mark.parametrize("stem", SAMPLES)
+def test_flag_hint_cost_stays_within_its_own_budget(docs: dict[str, dict], stem: str) -> None:
+    """`hint` 的成本上限：每样本总开销 ≤ `HINT_COST_LIMIT`（只拦失控，不假装 80 成立）。"""
+    extra = 0
+    for entry in docs[stem]["flags"]:
+        with_hint = len(json.dumps(entry, ensure_ascii=False))
+        without = len(json.dumps({"id": entry["id"]}, ensure_ascii=False))
+        extra += with_hint - without + 1  # +1 = 数组里的逗号
+
+    assert extra <= HINT_COST_LIMIT, f"{stem} 的 hint 花了 {extra} 字符（上限 {HINT_COST_LIMIT}）"
 
 
 @pytest.mark.parametrize("stem", SAMPLES)
@@ -335,16 +486,27 @@ def test_l0_view_blocks_keep_three_to_five_fields(docs: dict[str, dict], stem: s
 
 
 @pytest.mark.parametrize("stem", SAMPLES)
-def test_l0_provenance_counts_are_counts(docs: dict[str, dict], stem: str) -> None:
-    """`provenance_counts` 是 `[measured, assumed, unknown]` 三元组，且**等于 L1 的计数**。"""
+def test_l0_provenance_counts_are_labelled_counts(
+    docs: dict[str, dict], ctxs: dict[str, ViewContext], stem: str
+) -> None:
+    """`provenance_counts` 是 `{measured, assumed, unknown}` 对象，且**等于 L1 的计数**。
+
+    T-40 从「顺序三元组」改回带标签对象：未标序的数组对 agent 是隐藏契约。
+    计数本身独立复算（遍历 L1 的 `provenance` 表），不是拿 L0 和自己比。
+    """
     doc = docs[stem]
     counts = doc["provenance_counts"]
 
     assert set(counts) == set(available_views())
-    for view_name, triple in counts.items():
-        assert len(triple) == len(PROVENANCE_STATES)
-        assert all(isinstance(value, int) and value >= 0 for value in triple)
-        assert sum(triple) > 0, f"{view_name} 的计数全 0（该视角没有叶子？）"
+    for view_name, bucket in counts.items():
+        assert set(bucket) == set(PROVENANCE_STATES), f"{view_name} 的计数键不是三态"
+        assert all(isinstance(value, int) and value >= 0 for value in bucket.values())
+        assert sum(bucket.values()) > 0, f"{view_name} 的计数全 0（该视角没有叶子？）"
+
+        l1 = render.render_view(ctxs[stem], view_name)["provenance"]
+        for state in PROVENANCE_STATES:
+            expected = sum(1 for value in l1.values() if value == state)
+            assert bucket[state] == expected, f"{stem}.{view_name}.{state}"
 
 
 # =============================================================================
@@ -503,6 +665,167 @@ def test_get_path_echoes_exactly_what_l0_shows(
 
     assert answer["value"] == _pick(docs[stem], path)
     assert "hint" not in answer, f"取到值了却还带 hint：{answer['hint']}"
+
+
+# =============================================================================
+# 三·B、T-40 缺陷 2：别名路径的三态（不再有 `provenance: null`）
+# =============================================================================
+
+
+@pytest.mark.parametrize("stem", SAMPLES)
+def test_every_l0_path_carries_a_provenance_state(
+    ctxs: dict[str, ViewContext], docs: dict[str, dict], stem: str
+) -> None:
+    """**T-40 缺陷 2 的靶心**：L0 视角块里**每条路径**都带三态，`null` 一个都不许有。
+
+    验收实测 968 处 `provenance: null`（16 类别名路径），根因是 T-39 的匹配只认
+    「字段路径完全相等」：L0 用别名时一条都匹配不上。这里遍历 L0 视角块的**全部**叶子
+    （不只数值叶子，字符串 / `null` 也走），逐个 `get_path` 查三态。
+    """
+    doc = docs[stem]
+    nulls: list[str] = []
+    for view_name in available_views():
+        for path, _value in _l0_leaves(doc[view_name], view_name):
+            answer = render.get_path(ctxs[stem], path)
+            if answer.get("provenance") is None:
+                nulls.append(path)
+
+    assert nulls == [], f"{stem} 有 {len(nulls)} 条路径没有三态：{nulls[:8]}"
+
+
+@pytest.mark.parametrize("stem", SAMPLES)
+def test_alias_provenance_matches_the_underlying_leaf(
+    ctxs: dict[str, ViewContext], stem: str
+) -> None:
+    """16 类别名路径：**有底层叶子的逐一相等**，聚合值**必须是 `assumed`**。
+
+    不是「有个值就算过」——那等于把 `null` 换成 blanket `assumed`，可信度照样是假的。
+    """
+    mismatches: list[tuple[str, object, object]] = []
+    for view_name, l0_path, l1_path in ALIAS_PATHS:
+        answer = render.get_path(ctxs[stem], f"{view_name}.{l0_path}")
+        if l1_path is None:
+            if answer["provenance"] != summary.DERIVED_PROVENANCE:
+                mismatches.append(
+                    (f"{view_name}.{l0_path}", answer["provenance"], summary.DERIVED_PROVENANCE)
+                )
+            continue
+        expected = render.render_view(ctxs[stem], view_name)["provenance"][l1_path]
+        if answer["provenance"] != expected:
+            mismatches.append((f"{view_name}.{l0_path}", answer["provenance"], expected))
+
+    assert mismatches == [], f"{stem} 的别名三态与底层叶子不一致：{mismatches}"
+
+
+def test_alias_and_bottom_path_agree_on_value_and_state(
+    ctxs: dict[str, ViewContext],
+) -> None:
+    """`firepower.dps_base` 与 `firepower.dps.base` 取到**同一个值 + 同一个三态 + 同一个原因**。
+
+    文档 §9 的原文要求：两条路径都要能取到同一个值，且都带 `provenance`。
+    """
+    unknowns = 0
+    for stem in SAMPLES:
+        ctx = ctxs[stem]
+        alias = render.get_path(ctx, "firepower.dps_base")
+        bottom = render.get_path(ctx, "firepower.dps.base")
+
+        assert alias["value"] == bottom["value"], stem
+        assert alias["provenance"] == bottom["provenance"], stem
+        assert alias.get("reason") == bottom.get("reason"), stem
+        assert alias["provenance"] is not None, stem
+        unknowns += alias["provenance"] == "unknown"
+
+    # 非空转：f12/f34 这类配装上是 unknown + not_applicable（所以 work 的不是「两边都空」）
+    assert unknowns >= 1, "四个样本里没有一条 dps_base 是 unknown —— 断言可能空转"
+
+
+# =============================================================================
+# 三·C、T-40 增强 4：meta 的两处可逆压缩（`damage_split` 保持形状恒定）
+# =============================================================================
+
+
+@pytest.mark.parametrize("stem", SAMPLES)
+def test_damage_split_keeps_its_four_keys_even_when_all_null(
+    ctxs: dict[str, ViewContext], docs: dict[str, dict], stem: str
+) -> None:
+    """**形状恒定**（Lead 验收裁决）：`damage_split` 永远是四键 dict，值可以全是 `null`。
+
+    T-40 起草时曾把「四系全 `null` → 整块 `null`」当作压缩（省 30 字符），验收方否掉了：
+    L0 的**字段形状必须恒定**（对象永远对象、数组永远数组，可变的只有值）—— 形状一变，
+    下游按 `damage_split.em` 取数之前就得先判 `null`，契约就退化了。
+    """
+    value = docs[stem]["firepower"]["damage_split"]
+    l1 = render.render_view(ctxs[stem], "firepower")["overview"]["damage_split"]
+
+    assert isinstance(value, dict), f"{stem} 的 damage_split 被压成 {value!r} 了（形状必须恒定）"
+    assert set(value) == {"em", "explosive", "kinetic", "thermal"}
+    assert value == l1, "L0 与 L1 的四系值必须逐位相同"
+
+
+def test_all_null_damage_split_is_still_reachable(ctxs: dict[str, ViewContext]) -> None:
+    """四系全 `null` 时逐系仍取得到 `None` + `unknown` + `not_applicable`（值与原因都在）。"""
+    ctx = ctxs["f12-logistics-oneiros"]
+    split = render.render_index(ctx)["firepower"]["damage_split"]
+    assert set(split) == {"em", "explosive", "kinetic", "thermal"}
+    assert all(item is None for item in split.values()), "前提：f12 四系全 null"
+
+    for damage in ("em", "explosive", "kinetic", "thermal"):
+        answer = render.get_path(ctx, f"firepower.damage_split.{damage}")
+        assert answer["value"] is None, damage
+        assert answer["provenance"] == "unknown", damage
+        assert answer["reason"] == "not_applicable", damage
+
+    # 有值的样本（f1 炮船：动能 / 热能各 0.5）照样逐系可取
+    other = ctxs["f1-hecate-killmail"]
+    other_split = render.render_index(other)["firepower"]["damage_split"]
+    assert render.get_path(other, "firepower.damage_split.kinetic")["value"] == other_split["kinetic"]
+
+
+@pytest.mark.parametrize("stem", SAMPLES)
+def test_meta_compression_is_reversible(
+    ctxs: dict[str, ViewContext], docs: dict[str, dict], stem: str
+) -> None:
+    """`module_states` 四槽同值 → 单值；`damage_profile` 四系全 0.25 → `"uniform"`；
+    **两者在压缩形态下都能用 `get_path` 取回原值**（任务书的硬要求）。"""
+    ctx = ctxs[stem]
+    meta = docs[stem]["meta"]
+    assumptions = ctx.assumptions
+    states = assumptions["module_states"]
+    profile = assumptions["damage_profile"]
+
+    assert len(set(states.values())) == 1, "前提：引擎给的四个槽位状态来源同值"
+    assert meta["module_states"] == next(iter(states.values())), meta["module_states"]
+    assert meta["damage_profile"] == summary.DAMAGE_PROFILE_UNIFORM, meta["damage_profile"]
+
+    # 整块取到的是**压缩形态**（L0 语义：agent 看到什么就拿到什么）
+    assert render.get_path(ctx, "meta.module_states")["value"] == meta["module_states"]
+    assert render.get_path(ctx, "meta.damage_profile")["value"] == meta["damage_profile"]
+
+    # 可逆：逐槽位 / 逐系都取得到**原值**
+    for slot, expected in states.items():
+        answer = render.get_path(ctx, f"meta.module_states.{slot}")
+        assert answer["value"] == expected, f"{stem}.meta.module_states.{slot}"
+    for damage, expected in profile.items():
+        answer = render.get_path(ctx, f"meta.damage_profile.{damage}")
+        assert answer["value"] == expected, f"{stem}.meta.damage_profile.{damage}"
+        assert answer["provenance"] is None  # 元信息没有三态（与文档一致）
+
+
+def test_meta_compression_stays_off_when_values_differ(
+    ctxs: dict[str, ViewContext], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """压缩是**有条件**的：值不同就保留整张表（否则就是把不同的事实说成相同）。"""
+    ctx = ctxs["f67-spotcheck-139255942"]
+    states = {"high": "engine_default", "medium": "user", "low": "engine_default", "rig": "engine_default"}
+    profile = {"em": 0.5, "explosive": 0.5, "kinetic": 0.0, "thermal": 0.0}
+    monkeypatch.setitem(ctx.assumptions, "module_states", states)
+    monkeypatch.setitem(ctx.assumptions, "damage_profile", profile)
+
+    meta = render.render_index(ctx)["meta"]
+    assert meta["module_states"] == states
+    assert meta["damage_profile"] == profile
+    assert render.get_path(ctx, "meta.damage_profile.kinetic")["value"] == 0.0
 
 
 # =============================================================================
@@ -714,13 +1037,14 @@ def test_get_path_returns_provenance_and_reason(ctxs: dict[str, ViewContext]) ->
 
 
 def test_get_path_names_the_three_state_counts(ctxs: dict[str, ViewContext]) -> None:
-    """`provenance_counts` 既可整块取（顺序三元组），也可按名字取。"""
+    """`provenance_counts` 既可整块取（带标签对象），也可按名字取。"""
     ctx = ctxs["f47-random-raptor"]
-    triple = render.get_path(ctx, "provenance_counts.mobility")["value"]
-    assert triple == list(triple)
+    bucket = render.get_path(ctx, "provenance_counts.mobility")["value"]
+    assert set(bucket) == set(PROVENANCE_STATES)
+    assert bucket == render.render_index(ctx)["provenance_counts"]["mobility"]
 
     named = render.get_path(ctx, "provenance_counts.mobility.assumed")["value"]
-    assert named == triple[PROVENANCE_STATES.index("assumed")]
+    assert named == bucket["assumed"]
 
 
 # =============================================================================
@@ -785,19 +1109,53 @@ def test_reachability_walker_actually_reads_the_document(
 
 
 def test_degraded_is_reported_and_values_are_never_trimmed(
-    kill_ctx: ViewContext, monkeypatch: pytest.MonkeyPatch
+    kill_ctx: ViewContext,
+    ctxs: dict[str, ViewContext],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """预算调小 → `degraded=True` 显式出现，但**字段与数值一个都没少**（只上报不裁剪）。"""
+    """预算调小 → `degraded=True` 显式出现，但**字段与数值一个都没少**（只上报不裁剪）。
+
+    T-40 增强 5：`degraded` 分支此前**从未被任何真实样本执行过**（65 样本全部 < 2,500），
+    这条用例就是它的执行证据。两档预算各跑一次：
+
+    1. **「刚好不够」**（`body_chars - 1`）：最接近真实触发的形态 —— 证明判据是
+       `chars > INDEX_BUDGET_CHARS` 而不是「远远超出才置位」；
+    2. **10**：极端值 —— 证明确实**一个字符都没为省预算而丢**。
+
+    两次都断言「除 `budget` 外**逐键、逐字段、逐字节**相同」（不是只比长度）。
+    """
     baseline = render.render_index(kill_ctx)
-    monkeypatch.setattr(summary, "INDEX_BUDGET_CHARS", 10)
+    body_chars = baseline["budget"]["chars"]
+    body = {key: value for key, value in baseline.items() if key != "budget"}
+    dumped = json.dumps(body, ensure_ascii=False)
 
-    degraded = render.render_index(kill_ctx)
-    assert degraded["budget"]["degraded"] is True
     assert baseline["budget"]["degraded"] is False
+    assert dumped and len(dumped) == body_chars, "前提：budget.chars 量的是正文"
 
-    # 除了 budget 之外逐字节相同（红线：不得为省字符丢字段值）
+    # ① 刚好不够：body_chars - 1
+    monkeypatch.setattr(summary, "INDEX_BUDGET_CHARS", body_chars - 1)
+    edge = render.render_index(kill_ctx)
+    assert edge["budget"]["degraded"] is True, "差 1 个字符就该置位（判据不是「远超才报」）"
+    assert edge["budget"]["chars"] == body_chars, "降级不改正文体量（预算不是裁剪器）"
+    _assert_same_body(edge, body)
+
+    # ② 极端：10 字符
+    monkeypatch.setattr(summary, "INDEX_BUDGET_CHARS", 10)
+    tiny = render.render_index(kill_ctx)
+    assert tiny["budget"]["degraded"] is True
     assert json.dumps(
-        {key: value for key, value in degraded.items() if key != "budget"}, ensure_ascii=False
-    ) == json.dumps(
-        {key: value for key, value in baseline.items() if key != "budget"}, ensure_ascii=False
-    )
+        {key: value for key, value in tiny.items() if key != "budget"}, ensure_ascii=False
+    ) == dumped, "降级时丢字段/改数值了 —— 红线：不许为省字符丢数值"
+    _assert_same_body(tiny, body)
+
+    # ③ 四个真实样本同样成立（不是只有 Hecate 这个样本的形状如此）
+    for stem in SAMPLES:
+        before = render.render_index(ctxs[stem])
+        _assert_same_body(before, {k: v for k, v in before.items() if k != "budget"})
+
+
+def _assert_same_body(doc: dict, body: dict) -> None:
+    """`doc`（去掉 `budget`）与 `body` **逐键、逐子树**相等（`==`，不是比长度）。"""
+    assert set(doc) - {"budget"} == set(body)
+    for key, expected in body.items():
+        assert doc[key] == expected, f"{key} 在降级时被改了"
