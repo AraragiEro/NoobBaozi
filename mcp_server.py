@@ -1,0 +1,1100 @@
+"""L5 传输形态之二：**MCP over stdio**（文档 §10.5）。
+
+```
+python -m evefit.mcp_server
+```
+
+本文件**只做传输层**：每个工具都是一次 `evefit.api.<入口>()` 调用，返回的
+`content[0].text` 就是 api 的信封原样（`json.dumps` 的紧凑序列化），**不重写任何逻辑**
+（§10.5「三者共用同一个 Python 函数层」）。
+
+为什么是**手写**而不是官方 `mcp` SDK
+------------------------------------
+
+选路判据只有一条：**验收命令能不能跑起来**。
+
+```
+uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" \
+    python -m evefit.mcp_server
+```
+
+这条命令的临时环境里**只有** eveshipfit，`import mcp` 直接 `ModuleNotFoundError`
+（实测评测：`mcp` 在 PyPI 上能装、最新是 **2.3.0**，但 2.x 把 `FastMCP` 改成了
+`MCPServer`，且它不在本命令的 `--with` 里）。让服务依赖 `mcp` 会让验收命令直接死在
+导入阶段，所以服务侧**零第三方依赖**：stdio 传输就是「换行分隔的 JSON-RPC 2.0」，
+本文件按 JSON-RPC 2.0 与 MCP 的传输要求实现四个方法 + 协商 + 错误码。
+
+协议范围（够用即止，不多做）
+---------------------------
+
+- `initialize`（`protocolVersion` 协商 + `capabilities.tools` + `instructions`）；
+- `notifications/initialized`（通知，不回包）；`ping`；
+- `tools/list`、`tools/call`；
+- 未知方法 → `-32601`；坏 JSON → `-32700`；坏请求 → `-32600`；参数不合法 → `-32602`；
+- 本服务**从不主动发请求**（无采样 / 无 roots / 无 logging），只应答。
+
+三条纪律
+--------
+
+1. **stdout 只走 JSON-RPC**。任何日志一律 stderr（`_log()`）。更强的一层保险在
+   `_claim_stdout()`：启动时把 fd 1 **改指 stderr**，协议通道留在 `dup` 出来的私有
+   fd 上 —— 这样即使引擎 / SDE 库里有裸 `print()`，也污染不了协议流（这是 MCP 事故
+   的第一名成因：stdout 混进一行日志，客户端整段 JSON 解析崩）。
+2. **业务错误不是协议错误**。`api` 返回 `ok:false`（解析失败 / 路径不存在 / 模块名
+   拼错）时，JSON-RPC 层照样是**成功响应**，`content[0].text` 里放那份失败信封，并
+   置 `isError: true` —— agent 才能看到 `kind` / `candidates` / `hint` / `line`。
+   只有「参数本身不合法」（缺 `fit`、`fit` 是空串、超过 `MAX_FIT_CHARS`）才走
+   `-32602`。判据：**api 能给出更好的解释时，就不要抢在它前面拒绝**。
+3. **不崩**。请求处理路径上任何未预期异常都变成 `isError: true` +
+   `{"ok": false, "error": {"kind": "internal_error", ...}}`（§10.4），进程继续服务。
+
+`structuredContent`
+-------------------
+
+`2025-06-18` 起的协议版本在 `CallToolResult` 里加了 `structuredContent`。本服务在
+**协商到的版本 ≥ 该版本**时同时给出它（内容就是同一个信封对象），老版本只给
+`content` 里的文本。**不**声明 `outputSchema`：信封有两种形状（成功 / 失败），声明
+一个宽松 schema 只会多一层校验面，换个客户端的严格校验就可能把一次正常调用判成违约。
+
+单例与缓存
+----------
+
+`api` 的 `Engine` / `Index` 是**进程级单例**，这里直接复用（`_api()` 拿模块本身，
+不缓存任何结果）：同一份配装连续调五个工具，只有第一次付引擎 / 开库的成本。
+`evefit.api` 的 LRU 命中时一次引擎调用都不发生（见 `api.py` 模块 docstring）。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+import traceback
+from typing import Any, Callable
+
+# =============================================================================
+# 一、常量（协议 / 限额 / 顺序都集中在这里）
+# =============================================================================
+
+SERVER_NAME: str = "evefit"
+"""`serverInfo.name`：客户端列表里显示的名字。"""
+
+SERVER_VERSION: str = "1.0.0"
+"""`serverInfo.version`：本传输层的版本（与 `api.SPEC_VERSION` 无关，别混）。"""
+
+PROTOCOL_VERSIONS: tuple[str, ...] = (
+    "2026-07-28",
+    "2025-11-25",
+    "2025-06-18",
+    "2025-03-26",
+    "2024-11-05",
+)
+"""支持的 MCP 协议版本（新 → 旧）。
+
+本服务用到的四个方法（`initialize` / `tools/list` / `tools/call` / `ping`）在这几个
+版本之间**没有不兼容改动**，唯一的版本差异是 `structuredContent` 从 `2025-06-18`
+才有 —— 所以「声称支持哪些版本」这件事，这里说得起真话。客户端要的版本在列表里
+就原样回它，不在列表里就回 `PREFERRED_PROTOCOL_VERSION`（按规范，此时由客户端决定
+要不要断开）。
+"""
+
+PREFERRED_PROTOCOL_VERSION: str = PROTOCOL_VERSIONS[0]
+"""本服务最想用的版本（协商不上客户端那一个时回这个）。"""
+
+STRUCTURED_CONTENT_SINCE: str = "2025-06-18"
+"""`structuredContent` 从哪个版本开始有（ISO 日期串可以直接按字典序比较）。"""
+
+PARSE_ERROR: int = -32700
+INVALID_REQUEST: int = -32600
+METHOD_NOT_FOUND: int = -32601
+INVALID_PARAMS: int = -32602
+INTERNAL_ERROR: int = -32603
+
+MAX_FIT_CHARS: int = 256 * 1024
+"""`fit` 的长度上限（字符）。
+
+MCP 输入是**整条消息一次性**进来的，没法流式限制；正常 EFT / DNA / killmail 的
+JSON 文本都在几 KB 量级（实测 f1 的 killmail JSON ≈ 12 KB），256 KiB 已经比最大的
+真实输入大一个量级。超限直接 `-32602`：既不把巨型字符串塞进 `normalize_fit()`，
+也不让 `repr()` / 错误回显再复制一份（那是「吃满内存」的真正原因）。
+"""
+
+MAX_PATH_CHARS: int = 4096
+"""`path` 的长度上限（路径表达式是几百字符量级，4096 已极宽松）。"""
+
+_TOOL_ORDER: tuple[str, ...] = (
+    "fit_parse",
+    "fit_index",
+    "fit_view",
+    "fit_get",
+    "fit_detail",
+)
+"""工具在 `tools/list` 里的顺序：**就是推荐调用顺序**（§10.1 的表格顺序）。"""
+
+_COMMON_PARAMETERS: tuple[str, ...] = ("skill_tier", "damage_profile", "state_policy")
+"""五个工具共用的三个可选参数（§10.2）。"""
+
+_DEBUG: bool = os.environ.get("EVEFIT_MCP_DEBUG", "").strip().lower() not in (
+    "",
+    "0",
+    "false",
+    "no",
+)
+"""`EVEFIT_MCP_DEBUG=1` 时把每个进来的请求也打到 stderr（排查客户端行为用）。"""
+
+_LOG_PREFIX: str = "[evefit-mcp] "
+
+
+# =============================================================================
+# 二、日志（**只走 stderr**）
+# =============================================================================
+
+
+def _log(message: str) -> None:
+    """往 **stderr** 打一行日志（stdout 只有一个用途：JSON-RPC）。"""
+    try:
+        sys.stderr.write(f"{_LOG_PREFIX}{message}\n")
+        sys.stderr.flush()
+    except (OSError, ValueError):  # pragma: no cover - stderr 被关掉时无事可做
+        pass
+
+
+def _debug(message: str) -> None:
+    """`EVEFIT_MCP_DEBUG=1` 才打的日志（默认关：stdio 服务的 stderr 常被客户端收走）。"""
+    if _DEBUG:
+        _log(message)
+
+
+# =============================================================================
+# 三、api 的**懒加载**（延迟导入，只为两件事：启动更快、导入失败也能给出结构化错误）
+# =============================================================================
+
+_API_MODULE: Any = None
+_API_IMPORT_ERROR: BaseException | None = None
+_VIEWS_CACHE: tuple[str, ...] | None = None
+
+
+def _api() -> Any:
+    """拿 `evefit.api` 模块（单例；导入失败时**抛原异常**，由调用方转内部错误）。
+
+    为什么不写在文件顶部的 `from evefit import api`：那样 `import evefit.mcp_server`
+    就会连带加载引擎 / SDE 适配层，`tools/list` 之前的时间都花在导入上；更糟的是
+    **导入期的裸 print 会落在 `_claim_stdout()` 之前**（stdout 还没被保护起来）。
+    延迟到第一次真正需要时再导入，`_claim_stdout()` 就总是先手。
+    """
+    global _API_MODULE, _API_IMPORT_ERROR
+    if _API_MODULE is not None:
+        return _API_MODULE
+    if _API_IMPORT_ERROR is not None:
+        raise _API_IMPORT_ERROR
+    try:
+        from evefit import api as module
+    except BaseException as exc:  # noqa: BLE001 - 导入失败要能被转成 internal_error
+        _API_IMPORT_ERROR = exc
+        raise
+    _API_MODULE = module
+    return module
+
+
+def _view_names() -> tuple[str, ...]:
+    """六个视角名（**从注册表读**，不在本文件里再抄一份）。
+
+    抄一份的代价是「api 加了视角、MCP 的 enum 还是旧的」—— 那种漂移只有在客户端
+    被 enum 挡住时才暴露，排查成本极高。注册表为空时退回 `VIEW_ORDER`（规范顺序），
+    保证 enum 非空。
+    """
+    global _VIEWS_CACHE
+    if _VIEWS_CACHE is None:
+        _api()  # 导入 api 会连带导入 render → 六个视角完成注册
+        from evefit.project.views import VIEW_ORDER, available_views
+
+        registered = tuple(available_views())
+        _VIEWS_CACHE = registered or tuple(VIEW_ORDER)
+    return _VIEWS_CACHE
+
+
+# =============================================================================
+# 四、参数校验（**只校验「参数本身」**，业务判断一律留给 api）
+# =============================================================================
+
+
+class _InvalidParams(Exception):
+    """请求参数不合法 → JSON-RPC `-32602`（**不是** api 的业务错误）。"""
+
+    def __init__(
+        self, message: str, *, field: str | None = None, hint: object = None
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.field = field
+        self.hint = hint
+
+    def data(self) -> dict:
+        """`error.data`：把「哪个参数、可用值是什么」结构化地带出去。"""
+        payload: dict[str, object] = {}
+        if self.field is not None:
+            payload["field"] = self.field
+        if self.hint is not None:
+            payload["hint"] = self.hint
+        return payload
+
+
+class _MethodNotFound(Exception):
+    """未知方法 → `-32601`。"""
+
+
+class _UnknownTool(Exception):
+    """未知工具名 → `-32602`（MCP 规范：未知工具属于 invalid params）。"""
+
+
+def _fit_argument(arguments: dict) -> object:
+    """取出 `fit`（**四形态**：字符串三形态 + 对象 / 数组兜底）。
+
+    Args:
+        arguments: `tools/call` 的 `arguments`。
+
+    Returns:
+        原样交给 `api` 的 `fit`。字符串原样传（EFT / DNA / JSON 文本），字典 / 列表
+        **直接传对象**（`api` 会判成 `INPUT_JSON`，比先序列化成文本更保真：缓存 key
+        与 `meta.source_format` 都走对象那条路）。
+
+    Raises:
+        _InvalidParams: 缺参 / 类型不对 / 空串 / 超长。
+    """
+    if "fit" not in arguments:
+        raise _InvalidParams("缺少必填参数 fit", field="fit")
+
+    fit = arguments.get("fit")
+    if isinstance(fit, (dict, list)):
+        # 对象形式不在 schema 里（schema 声明 string），但真实客户端常把「读进来的
+        # killmail 对象」直接递过来 —— 多接一种不亏，大小仍按序列化后的长度卡。
+        try:
+            size = len(json.dumps(fit, ensure_ascii=False))
+        except (TypeError, ValueError) as exc:
+            raise _InvalidParams(
+                f"fit 对象无法序列化成 JSON：{exc}", field="fit"
+            ) from exc
+        if size > MAX_FIT_CHARS:
+            raise _InvalidParams(
+                f"fit 太大：序列化后 {size} 字符，上限 {MAX_FIT_CHARS}",
+                field="fit",
+                hint={"max_chars": MAX_FIT_CHARS},
+            )
+        return fit
+
+    if not isinstance(fit, str):
+        raise _InvalidParams(
+            "fit 必须是字符串（EFT 文本 / DNA / killmail JSON 文本）"
+            f"，收到 {type(fit).__name__}",
+            field="fit",
+        )
+    text = fit.strip()
+    if not text:
+        raise _InvalidParams(
+            "fit 不能为空：请传 EFT 文本、DNA 字符串或 killmail 的 JSON 文本",
+            field="fit",
+        )
+    if len(fit) > MAX_FIT_CHARS:
+        raise _InvalidParams(
+            f"fit 太长：{len(fit)} 字符，上限 {MAX_FIT_CHARS}"
+            "（正常 EFT / DNA / killmail JSON 都在 256 KiB 以内）",
+            field="fit",
+            hint={"max_chars": MAX_FIT_CHARS},
+        )
+    return fit
+
+
+def _path_argument(arguments: dict) -> str:
+    """取出 `fit_get` 的 `path`（必填、非空、有长度上限）。"""
+    if "path" not in arguments:
+        raise _InvalidParams("缺少必填参数 path", field="path")
+    path = arguments.get("path")
+    if not isinstance(path, str):
+        raise _InvalidParams(
+            f"path 必须是字符串，收到 {type(path).__name__}", field="path"
+        )
+    text = path.strip()
+    if not text:
+        raise _InvalidParams(
+            "path 不能为空：要传点路径，如 mobility.speed_mps", field="path"
+        )
+    if len(text) > MAX_PATH_CHARS:
+        raise _InvalidParams(
+            f"path 太长：{len(text)} 字符，上限 {MAX_PATH_CHARS}", field="path"
+        )
+    return text
+
+
+def _view_argument(arguments: dict, *, required: bool) -> str | None:
+    """取出 `view`（可选 / 必填按工具而定）。
+
+    **不认识的名字不在这里拒绝**：`api.fit_view` 的 `invalid_argument` 会把可用视角
+    一起带回来，比本层回一个 `-32602` 信息量更大（纪律 2）。
+    """
+    if "view" not in arguments or arguments.get("view") is None:
+        if not required:
+            return None
+        raise _InvalidParams(
+            "缺少必填参数 view（六个视角之一）",
+            field="view",
+            hint=list(_view_names()),
+        )
+    view = arguments.get("view")
+    if not isinstance(view, str):
+        raise _InvalidParams(
+            f"view 必须是字符串，收到 {type(view).__name__}", field="view"
+        )
+    if not view.strip():
+        raise _InvalidParams(
+            "view 不能为空（六个视角之一）", field="view", hint=list(_view_names())
+        )
+    return view
+
+
+def _common_arguments(arguments: dict) -> dict:
+    """三个共同参数（§10.2）：**只透传显式给了的**，缺省交给 `api` 自己的默认值。"""
+    params: dict[str, str] = {}
+    for name in _COMMON_PARAMETERS:
+        value = arguments.get(name)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise _InvalidParams(
+                f"{name} 必须是字符串，收到 {type(value).__name__}", field=name
+            )
+        params[name] = value
+    return params
+
+
+# =============================================================================
+# 五、五个工具的实现（每个都是一次 `api` 调用，**不做任何加工**）
+# =============================================================================
+
+
+def _tool_fit_parse(arguments: dict) -> dict:
+    """`fit_parse` → `api.parse_fit()`。"""
+    return _api().parse_fit(_fit_argument(arguments), **_common_arguments(arguments))
+
+
+def _tool_fit_index(arguments: dict) -> dict:
+    """`fit_index` → `api.fit_index()`。"""
+    return _api().fit_index(_fit_argument(arguments), **_common_arguments(arguments))
+
+
+def _tool_fit_view(arguments: dict) -> dict:
+    """`fit_view` → `api.fit_view()`。"""
+    return _api().fit_view(
+        _fit_argument(arguments),
+        _view_argument(arguments, required=True),
+        **_common_arguments(arguments),
+    )
+
+
+def _tool_fit_get(arguments: dict) -> dict:
+    """`fit_get` → `api.fit_get()`。"""
+    return _api().fit_get(
+        _fit_argument(arguments),
+        _path_argument(arguments),
+        **_common_arguments(arguments),
+    )
+
+
+def _tool_fit_detail(arguments: dict) -> dict:
+    """`fit_detail` → `api.fit_detail()`（`view` / `path` 都可选，口径照 api）。"""
+    return _api().fit_detail(
+        _fit_argument(arguments),
+        _view_argument(arguments, required=False),
+        _path_argument(arguments) if "path" in arguments and arguments.get("path") else None,
+        **_common_arguments(arguments),
+    )
+
+
+_HANDLERS: dict[str, Callable[[dict], dict]] = {
+    "fit_parse": _tool_fit_parse,
+    "fit_index": _tool_fit_index,
+    "fit_view": _tool_fit_view,
+    "fit_get": _tool_fit_get,
+    "fit_detail": _tool_fit_detail,
+}
+"""工具名 → 实现（键集合必须与 `_TOOL_ORDER` 一致，`_build_tool_specs()` 会核对）。"""
+
+
+# =============================================================================
+# 六、工具清单（JSON Schema）：名字 / 参数 / enum 全部照 §10
+# =============================================================================
+
+_FIT_DESCRIPTION: str = (
+    "配装输入。可传：EFT 文本（如 '[Hecate, x]\\nDamage Control II\\n...'）、"
+    "DNA 字符串（`fitting:` 前缀可有可无）、killmail 的 JSON 文本，"
+    "或 zkillboard / ESI 的 killmail 链接（后两种会联网取数，失败给 network_failed）。"
+    f"空串与超过 {MAX_FIT_CHARS} 字符的输入会被参数校验拒绝。"
+)
+
+_TOOL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
+    # 名字 → (title, description)
+    "fit_parse": (
+        "解析配装（确认读懂了没有）",
+        "把 EFT / DNA / killmail 归一化成结构，回显 source_format、船（type_id/name/group）、"
+        "模块件数（已装 / 货舱 / 逐槽位）、技能档与 warnings。"
+        "**推荐的第一步**：先确认这套配装被正确读懂了，再往下算。"
+        "返回里 result.fit 是引擎结构原样（不加工）。",
+    ),
+    "fit_index": (
+        "六维度摘要（L0，默认入口）",
+        "六维度摘要：firepower / survivability / mobility / resources / constraints / "
+        "stability 各 3–5 个数，加 flags（id + hint）、provenance_counts 与 budget。"
+        "实测约 2k 字符 —— **默认入口**，批量看战报、快速判断时用它，不要一上来就 detail。",
+    ),
+    "fit_view": (
+        "单视角全字段（L1）",
+        "单视角全字段：overview + provenance（measured/assumed/unknown 三态表）+ "
+        "unknown_reasons + confidence + flags + evidence，不降级、不裁剪（2–3k 字符）。"
+        "某个维度看起来可疑时用它展开。",
+    ),
+    "fit_get": (
+        "按路径取一个值 + provenance",
+        "按路径取一个值，附带 provenance（三态）与 source_view，极小（几百字符）。"
+        "路径表达式与 L0/L1 同一套，如 mobility.speed_mps、firepower.weapons[].name、"
+        "budget.chars。**value 为 null 是合法答案**（该值未知或不适用）——"
+        "这时看 provenance 与 reason，别当取数失败。路径真的不存在才给 invalid_path + hint。",
+    ),
+    "fit_detail": (
+        "列表型明细（深挖）",
+        "列表型明细：升级候选、逐模块电容、完整技能表（meta.assumptions.skill_tier，512 条）。"
+        "不指定 view 时返回**六个视角全部**，体量很大（实测 10 KB 起）——"
+        "先 fit_view 定位，再 fit_detail(view=\"...\")；path 走 '<视角>.<字段>'。",
+    ),
+}
+
+_TOOL_ANNOTATIONS: dict[str, Any] = {
+    "readOnlyHint": True,
+    "idempotentHint": True,
+    "openWorldHint": True,
+}
+"""`openWorldHint: true` 是真的：`fit` 传 killmail 链接 / id+hash 时会联网取数。"""
+
+
+def _common_properties() -> dict:
+    """五个工具共用的属性（§10.2）：`fit` 必填，其余可选并写明默认值。"""
+    api = _api()
+    return {
+        "fit": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_FIT_CHARS,
+            "description": _FIT_DESCRIPTION,
+        },
+        "skill_tier": {
+            "type": "string",
+            "enum": list(api.SKILL_TIERS),
+            "default": api.SKILL_TIER_ALL4,
+            "description": (
+                "技能档：默认 all4+min_required（全部已发布技能 4 级 + 逐模块补到 "
+                "max(4, required)）；all5 是它的单调提升。实际生效的档名与技能条数"
+                "会在返回的 meta.skill_tier 里回显。"
+            ),
+        },
+        "damage_profile": {
+            "type": "string",
+            "enum": list(api.DAMAGE_PROFILES),
+            "default": api.DAMAGE_PROFILE_UNIFORM,
+            "description": (
+                "伤害剖面。当前只支持 uniform（25/25/25/25）；其它剖面会返回 "
+                "invalid_argument，而不是静默按均匀剖面算。"
+            ),
+        },
+        "state_policy": {
+            "type": "string",
+            "enum": list(api.STATE_POLICIES),
+            "default": api.STATE_POLICY_ENGINE_DEFAULT,
+            "description": "模块状态推定策略（当前只支持 engine_default）。",
+        },
+    }
+
+
+def _input_schema(*, view: str = "none", path: str = "none") -> dict:
+    """拼一个 `inputSchema`：公共属性 + 该工具自己的 `view` / `path`。
+
+    Args:
+        view: `"none"`（无此参数）/ `"required"` / `"optional"`。
+        path: 同 `view`（`fit_get` 必填，`fit_detail` 可选）。
+    """
+    properties = _common_properties()
+    required = ["fit"]
+    if view != "none":
+        properties["view"] = {
+            "type": "string",
+            "enum": list(_view_names()),
+            "description": (
+                "视角名（六个视角之一）：firepower 火力 / survivability 生存 / "
+                "mobility 机动 / resources 资源 / constraints 约束 / stability 不稳定。"
+            ),
+        }
+        if view == "required":
+            required.append("view")
+    if path != "none":
+        properties["path"] = {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_PATH_CHARS,
+            "description": (
+                "点路径 / 下标路径表达式，与 L0/L1 同一套：mobility.speed_mps、"
+                "firepower.weapons[].name、flags[0].id、budget.chars。"
+            ),
+        }
+        if path == "required":
+            required.append("path")
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+    }
+
+
+_SPECS_CACHE: tuple[dict, ...] | None = None
+
+
+def _build_tool_specs() -> tuple[dict, ...]:
+    """构建 `tools/list` 的 `tools`（**懒构建 + 缓存**：enum 要等 api 导入后才准）。"""
+    global _SPECS_CACHE
+    if _SPECS_CACHE is not None:
+        return _SPECS_CACHE
+    if set(_HANDLERS) != set(_TOOL_ORDER):  # pragma: no cover - 结构自检
+        raise RuntimeError(
+            f"_HANDLERS 与 _TOOL_ORDER 不一致：{sorted(_HANDLERS)} vs {sorted(_TOOL_ORDER)}"
+        )
+    specs: list[dict] = []
+    for name in _TOOL_ORDER:
+        title, description = _TOOL_DESCRIPTIONS[name]
+        specs.append(
+            {
+                "name": name,
+                "title": title,
+                "description": description,
+                "inputSchema": _input_schema(
+                    view={"fit_view": "required", "fit_detail": "optional"}.get(
+                        name, "none"
+                    ),
+                    path={"fit_get": "required", "fit_detail": "optional"}.get(
+                        name, "none"
+                    ),
+                ),
+                "annotations": dict(_TOOL_ANNOTATIONS),
+            }
+        )
+    _SPECS_CACHE = tuple(specs)
+    return _SPECS_CACHE
+
+
+INSTRUCTIONS: str = (
+    "evefit 配装分析（EVE Online）。典型顺序："
+    "① fit_parse —— 先确认这套配装被正确读懂了（船 / 模块件数 / warnings）；"
+    "② fit_index —— 默认入口，六维度摘要（约 2k 字符）；"
+    "③ fit_view / fit_get —— 某维度可疑就展开它，或按路径精确取一个数；"
+    "④ fit_detail —— 深挖（升级候选、完整技能表），只在需要时调，返回很大。"
+    "返回统一信封：成功 {ok:true, result, meta}，失败 {ok:false, error:{kind, ...}}。"
+    "业务失败时 isError=true 但仍是正常响应：读 error.kind（parse_failed / "
+    "ambiguous_ship / unknown_module / invalid_path / invalid_argument / "
+    "network_failed / internal_error）以及 candidates / hint / line / raw。"
+    "数值一律来自投影层，工具不做换算、不做评分与判词；"
+    "provenance 有三种状态（measured / assumed / unknown），unknown 不是 0，别当 0 用。"
+)
+
+
+# =============================================================================
+# 七、JSON-RPC 消息构造
+# =============================================================================
+
+
+def _error_response(
+    request_id: object,
+    code: int,
+    message: str,
+    *,
+    data: dict | None = None,
+) -> dict:
+    """JSON-RPC 2.0 错误响应（`data` 可选，用来带 `field` / `hint`）。"""
+    error: dict[str, Any] = {"code": code, "message": message}
+    if data:
+        error["data"] = data
+    return {"jsonrpc": "2.0", "id": request_id, "error": error}
+
+
+def _success_response(request_id: object, result: object) -> dict:
+    """JSON-RPC 2.0 成功响应。"""
+    return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+# =============================================================================
+# 八、会话（唯一的状态：协商到的协议版本）
+# =============================================================================
+
+
+class _Session:
+    """一次 stdio 连接的会话状态（服务本身**无业务状态**，见 §10.6）。"""
+
+    __slots__ = ("protocol_version", "initialized", "client_info", "calls")
+
+    def __init__(self) -> None:
+        self.protocol_version: str | None = None
+        self.initialized: bool = False
+        self.client_info: dict = {}
+        self.calls: int = 0
+
+    def supports_structured_content(self) -> bool:
+        """协商到的版本是否支持 `structuredContent`（未协商 → 按老版本处理）。"""
+        version = self.protocol_version
+        return bool(version) and version >= STRUCTURED_CONTENT_SINCE
+
+
+# =============================================================================
+# 九、工具结果（信封 → content / structuredContent / isError）
+# =============================================================================
+
+
+def _internal_error_envelope(message: str, exc: BaseException) -> dict:
+    """内部异常 → §10.4 形状的**失败信封**（`kind=internal_error`）。"""
+    return {
+        "ok": False,
+        "error": {
+            "kind": "internal_error",
+            "message": message,
+            "detail": f"{type(exc).__name__}: {exc}",
+        },
+    }
+
+
+def _tool_result(envelope: dict, session: _Session) -> dict:
+    """信封 → `CallToolResult`。
+
+    - `content[0].text`：信封的紧凑 JSON（**老客户端也能拿到全部信息**）；
+    - `structuredContent`：同一个信封对象（协商版本 ≥ 2025-06-18 时才加）；
+    - `isError`：`ok` 不是 `true` 时为 `True`（成功时**不写**这个键，保持最小）。
+    """
+    try:
+        text = json.dumps(envelope, ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        # 理论上 api 的结果都是 JSON 可序列化的；真出事也要给出结构化原因。
+        envelope = _internal_error_envelope("结果无法序列化成 JSON", exc)
+        text = json.dumps(envelope, ensure_ascii=False)
+
+    result: dict[str, Any] = {"content": [{"type": "text", "text": text}]}
+    if session.supports_structured_content():
+        result["structuredContent"] = envelope
+    if envelope.get("ok") is not True:
+        result["isError"] = True
+    return result
+
+
+# =============================================================================
+# 十、方法实现
+# =============================================================================
+
+
+def _initialize(params: dict, session: _Session) -> dict:
+    """`initialize`：协商协议版本 + 声明 `capabilities.tools`。
+
+    协商规则（规范要求）：客户端要的版本本服务支持 → **原样回它**；不支持 → 回
+    本服务最想用的那个，由客户端决定继续还是断开。`protocolVersion` 缺失 / 不是字符
+    串时按「客户端没提要求」处理，回 `PREFERRED_PROTOCOL_VERSION`。
+    """
+    requested = params.get("protocolVersion")
+    client_info = params.get("clientInfo")
+    if isinstance(client_info, dict):
+        session.client_info = client_info
+    if isinstance(requested, str) and requested in PROTOCOL_VERSIONS:
+        agreed = requested
+    else:
+        agreed = PREFERRED_PROTOCOL_VERSION
+    session.protocol_version = agreed
+    session.initialized = True
+    _log(
+        "initialize: client="
+        f"{(session.client_info.get('name') or '?')}"
+        f"/{(session.client_info.get('version') or '?')}"
+        f" requested={requested!r} agreed={agreed}"
+    )
+    return {
+        "protocolVersion": agreed,
+        "capabilities": {"tools": {"listChanged": False}},
+        "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+        "instructions": INSTRUCTIONS,
+    }
+
+
+def _list_tools() -> dict:
+    """`tools/list`：五个工具 + 完整 JSON Schema（顺序 = 推荐调用顺序）。"""
+    return {"tools": list(_build_tool_specs())}
+
+
+def _call_tool(params: dict, session: _Session) -> dict:
+    """`tools/call`：校验 → 一次 api 调用 → 信封包成 `CallToolResult`。
+
+    Raises:
+        _InvalidParams: 参数本身不合法（→ `-32602`）。
+        _UnknownTool: 工具名不存在（→ `-32602`）。
+    """
+    name = params.get("name")
+    if not isinstance(name, str) or not name:
+        raise _InvalidParams(
+            "缺少 tools/call 的 name", field="name", hint=list(_TOOL_ORDER)
+        )
+    handler = _HANDLERS.get(name)
+    if handler is None:
+        raise _UnknownTool(
+            f"未知工具 {name!r}；可用工具：{list(_TOOL_ORDER)}"
+        )
+    raw_arguments = params.get("arguments")
+    if raw_arguments is None:
+        arguments: dict = {}
+    elif isinstance(raw_arguments, dict):
+        arguments = raw_arguments
+    else:
+        raise _InvalidParams(
+            f"arguments 必须是对象，收到 {type(raw_arguments).__name__}", field="arguments"
+        )
+
+    session.calls += 1
+    started = time.perf_counter()
+    try:
+        envelope = handler(arguments)
+    except _InvalidParams:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 边界层：任何异常都不得让进程倒下
+        _log(f"tools/call {name} 内部异常：\n{traceback.format_exc()}")
+        return _tool_result(
+            _internal_error_envelope("MCP 服务内部异常，本次没有可用结果", exc), session
+        )
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+
+    if not isinstance(envelope, dict):  # pragma: no cover - api 契约保证是 dict
+        envelope = _internal_error_envelope(
+            "接口层返回了非信封对象", TypeError(f"got {type(envelope).__name__}")
+        )
+    ok = envelope.get("ok") is True
+    if _DEBUG:  # 关着的时候连 json.dumps 都不做：detail 的信封动辄 10 KB
+        _debug(
+            f"tools/call {name} ok={ok} {elapsed_ms:.1f}ms "
+            f"chars={len(json.dumps(envelope, ensure_ascii=False))}"
+        )
+        if not ok:
+            # 业务失败（解析失败 / 路径不存在）是**正常操作**，不是服务异常：
+            # 只有打开调试日志时才落 stderr，免得 agent 试错时把 stderr 刷满。
+            _debug(
+                f"tools/call {name} 业务失败："
+                f"{json.dumps(envelope.get('error'), ensure_ascii=False)[:300]}"
+            )
+    return _tool_result(envelope, session)
+
+
+_KNOWN_METHODS: tuple[str, ...] = (
+    "initialize",
+    "ping",
+    "tools/list",
+    "tools/call",
+)
+
+
+def _handle_request(method: str, params: object, session: _Session) -> object:
+    """请求方法分发（只认四个；其余 `-32601`）。
+
+    Raises:
+        _MethodNotFound: 未知方法。
+        _InvalidParams: 参数不合法。
+    """
+    if method == "initialize":
+        if params is not None and not isinstance(params, dict):
+            raise _InvalidParams("initialize 的 params 必须是对象", field="params")
+        return _initialize(params or {}, session)
+    if method == "ping":
+        return {}
+    if method == "tools/list":
+        return _list_tools()
+    if method == "tools/call":
+        if not isinstance(params, dict):
+            raise _InvalidParams("tools/call 的 params 必须是对象", field="params")
+        return _call_tool(params, session)
+    raise _MethodNotFound(
+        f"未实现的方法 {method!r}；本服务只支持 {list(_KNOWN_METHODS)}"
+    )
+
+
+def _handle_notification(method: str, params: object, session: _Session) -> None:
+    """通知（无 `id`）：**一定不回包**（回了就是协议违规，客户端会当成错位的响应）。"""
+    if method == "notifications/initialized":
+        session.initialized = True
+        _debug("notifications/initialized")
+        return
+    _debug(f"忽略通知 {method!r}（params={json.dumps(params, ensure_ascii=False)[:120] if params else None}）")
+
+
+def dispatch(message: object, session: _Session) -> dict | None:
+    """一条 JSON-RPC 消息 → 一条响应（通知返回 `None`）。
+
+    Args:
+        message: 已经从 JSON 解出来的对象（可能是任何东西）。
+        session: 会话状态。
+
+    Returns:
+        响应 dict；**通知返回 `None`**（调用方不许写任何东西出去）。
+    """
+    if not isinstance(message, dict):
+        return _error_response(
+            None,
+            INVALID_REQUEST,
+            f"请求必须是 JSON 对象，收到 {type(message).__name__}",
+        )
+
+    request_id = message.get("id")
+    has_id = "id" in message
+    method = message.get("method")
+
+    if message.get("jsonrpc") != "2.0":
+        # MCP 只用 JSON-RPC 2.0；别的版本一律拒绝（不猜）。
+        return _error_response(
+            request_id if has_id else None,
+            INVALID_REQUEST,
+            "jsonrpc 必须是 '2.0'",
+        )
+
+    if method is None:
+        # 没有 method：这可能是客户端对我们**从未发出的请求**的响应。本服务不主动
+        # 发请求，所以静默忽略，绝不回一个 id 对不上的错包。
+        _debug(f"忽略无 method 的消息：{json.dumps(message, ensure_ascii=False)[:200]}")
+        return None
+    if not isinstance(method, str) or not method:
+        return _error_response(
+            request_id if has_id else None,
+            INVALID_REQUEST,
+            "method 必须是非空字符串",
+        )
+
+    params = message.get("params")
+    if not has_id:
+        _handle_notification(method, params, session)
+        return None
+
+    _debug(f"→ {method}")
+    try:
+        result = _handle_request(method, params, session)
+    except _InvalidParams as exc:
+        _log(f"{method} 参数不合法：{exc.message}")
+        return _error_response(request_id, INVALID_PARAMS, exc.message, data=exc.data())
+    except _MethodNotFound as exc:
+        return _error_response(request_id, METHOD_NOT_FOUND, str(exc))
+    except _UnknownTool as exc:
+        return _error_response(
+            request_id, INVALID_PARAMS, str(exc), data={"hint": list(_TOOL_ORDER)}
+        )
+    except Exception as exc:  # noqa: BLE001 - 最后一层兜底：不让进程倒下
+        _log(f"{method} 内部异常：\n{traceback.format_exc()}")
+        return _error_response(
+            request_id,
+            INTERNAL_ERROR,
+            "MCP 服务内部异常",
+            data={"detail": f"{type(exc).__name__}: {exc}"},
+        )
+    return _success_response(request_id, result)
+
+
+# =============================================================================
+# 十一、stdio 传输（读行 / 写行；**stdout 独占**）
+# =============================================================================
+
+
+def _claim_stdout() -> Any:
+    """独占 stdout：协议通道拿一份私有副本，**fd 1 改指 stderr**。
+
+    这样做的收益：即使 `eveshipfit` / 引擎里存在裸 `print()`（第三方库的常见毛病），
+    它写的也是 stderr，不可能把一行人话塞进 JSON-RPC 流 —— 那种污染会让客户端在
+    解析某个响应时拿到一行非 JSON，整条连接报废，而且现象是「客户端说服务没响应」，
+    极难定位。
+
+    实现：`os.dup(1)` 留一份私有 fd 专写协议；`os.dup2(2, 1)` 把进程级 stdout 接到
+    stderr 上（`sys.stdout` 仍指向 fd 1，于是所有 `print()` 自动改道 stderr）。
+
+    Returns:
+        写协议用的流：通常是 `wb`（无缓冲）的二进制流；测试替身（没有 fileno 的
+        `StringIO`）时原样返回该替身。
+    """
+    stream = sys.stdout
+    try:
+        fd = stream.fileno()
+    except (AttributeError, OSError, ValueError):  # pragma: no cover - 测试替身
+        return stream
+
+    writer = os.fdopen(os.dup(fd), "wb", buffering=0)
+    try:
+        os.dup2(2, fd)
+    except OSError as exc:  # pragma: no cover - 极端环境（stderr 也关了）
+        _log(f"把 fd 1 接到 stderr 失败（{exc}），stdout 保护降级")
+    return writer
+
+
+def _configure_streams() -> None:
+    """stdout / stderr 统一 UTF-8：Windows 控制台默认代码页会把中文日志写崩。"""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):  # pragma: no cover - 受限流
+            continue
+
+
+def _is_binary(stream: Any) -> bool:
+    """流是不是二进制（决定写 bytes 还是 str）。"""
+    mode = getattr(stream, "mode", None)
+    if isinstance(mode, str):
+        return "b" in mode
+    return not hasattr(stream, "encoding")
+
+
+def emit(writer: Any, payload: dict) -> None:
+    """写一条 JSON-RPC 消息：**紧凑 JSON + 单个 `\\n`**（协议要求：消息内不含换行）。
+
+    Raises:
+        BrokenPipeError / OSError: 客户端已经关了管道（调用方按正常退出处理）。
+    """
+    line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+    if _is_binary(writer):
+        writer.write(line.encode("utf-8"))
+    else:  # pragma: no cover - 测试替身
+        writer.write(line)
+    flush = getattr(writer, "flush", None)
+    if callable(flush):
+        flush()
+
+
+def _iter_stdin_lines() -> Any:
+    """逐行产出 stdin 的原始行（bytes 优先：不走 Windows 控制台代码页）。"""
+    reader = getattr(sys.stdin, "buffer", None)
+    if reader is None:  # pragma: no cover - 测试替身
+        reader = sys.stdin
+    return iter(reader)
+
+
+def _decode_line(raw: object) -> str | None:
+    """一行原始字节 → 文本；不是 UTF-8 时给 `None`（调用方回 `-32700`）。
+
+    顺带剥掉行首的 **UTF-8 BOM**（`\\ufeff`）。这不是洁癖：Windows 上不少工具（含
+    PowerShell 的管道）写文件 / 管道默认带 BOM，而 JSON 规范不允许文档前面有 BOM
+    ——`json.loads` 会直接报 `Unexpected UTF-8 BOM`，表现为「服务连上了但第一句话就
+    报 -32700」，看起来像协议不兼容。宽容一个字节，省掉一整类误报。
+    """
+    if isinstance(raw, bytes):
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    else:  # pragma: no cover - 测试替身给的是 str
+        text = str(raw)
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    return text
+
+
+def serve(reader: Any = None, writer: Any = None) -> int:
+    """主循环：读一行 → 分发 → 写一行。`reader` / `writer` 可注入（便于测试）。
+
+    Returns:
+        进程退出码（正常 EOF → `0`）。
+    """
+    session = _Session()
+    if reader is None:
+        reader = _iter_stdin_lines()
+    if writer is None:  # pragma: no cover - 只在直接调用 serve() 时发生
+        writer = sys.stdout
+    for raw in reader:
+        text = _decode_line(raw)
+        if text is None:
+            _log("收到非 UTF-8 的输入，已丢弃这一行")
+            emit(writer, _error_response(None, PARSE_ERROR, "消息不是 UTF-8 文本"))
+            continue
+        line = text.strip()
+        if not line:
+            continue
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError as exc:
+            _log(f"JSON 解析失败：{exc}")
+            emit(writer, _error_response(None, PARSE_ERROR, f"JSON 解析失败：{exc}"))
+            continue
+        response = dispatch(message, session)
+        if response is not None:
+            emit(writer, response)
+    _debug(f"EOF：本会话共处理 {session.calls} 次工具调用")
+    return 0
+
+
+# =============================================================================
+# 十二、入口
+# =============================================================================
+
+
+def main(argv: list[str] | None = None) -> int:
+    """`python -m evefit.mcp_server` 的入口（stdio 服务，阻塞到 stdin EOF）。
+
+    注意：`--help` / `--version` 也写 **stderr** —— 这个进程的 stdout 只有一个用途，
+    即使被误用也不能破例（否则「`--help` 之后客户端解析崩」又是一次事故）。
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    writer = _claim_stdout()
+    _configure_streams()
+
+    if "--version" in args:
+        _log(f"{SERVER_NAME} {SERVER_VERSION} (protocols {list(PROTOCOL_VERSIONS)})")
+        return 0
+    if "--help" in args or "-h" in args:
+        _log(
+            "用法：python -m evefit.mcp_server\n"
+            "  stdio 上的 MCP 服务（换行分隔 JSON-RPC 2.0）；"
+            "stdout 只写协议消息，日志一律 stderr。\n"
+            "  环境变量：EVEFIT_MCP_DEBUG=1 打开请求级调试日志。"
+        )
+        return 0
+    if args:
+        _log(f"忽略未知参数：{args}（本服务不需要参数）")
+
+    started = time.perf_counter()
+    _log(f"{SERVER_NAME} {SERVER_VERSION} 启动（stdio）")
+    try:
+        _api()
+        _build_tool_specs()
+        _log(f"工具就绪：{list(_TOOL_ORDER)}（{(time.perf_counter() - started) * 1000:.0f}ms）")
+    except BaseException as exc:  # noqa: BLE001 - **不在这里退出**：让客户端看到结构化错误
+        _log(
+            "预热失败（服务继续，调用时返回 internal_error）："
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    try:
+        return serve(writer=writer)
+    except (BrokenPipeError, KeyboardInterrupt):
+        _log("客户端断开 / 被中断，正常退出")
+        return 0
+    except OSError as exc:
+        _log(f"stdio 读写失败，退出：{exc}")
+        return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - 进程入口
+    raise SystemExit(main())
+
+
+__all__ = [
+    "INSTRUCTIONS",
+    "MAX_FIT_CHARS",
+    "MAX_PATH_CHARS",
+    "PROTOCOL_VERSIONS",
+    "PREFERRED_PROTOCOL_VERSION",
+    "SERVER_NAME",
+    "SERVER_VERSION",
+    "STRUCTURED_CONTENT_SINCE",
+    "dispatch",
+    "emit",
+    "main",
+    "serve",
+]
