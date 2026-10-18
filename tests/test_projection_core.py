@@ -11,6 +11,9 @@
    （否则 `RuntimeError`），且 `1367/281/1272/-14/-55…-62` 这 12 个属性不得再落 `unknown`；
 2c. **T-27 实例级覆盖**：`provenance.resolve(id, value)` 在值为 `None` 时强制 `unknown`
    （覆盖静态表），值存在时逐条等于 `tag()`；`audit()` 必须自报这条口径；
+2d. **T-30 第二条实例规则（状态敏感性）**：`resolve(..., state_sensitive=True)` 只把
+   `measured` 升格成 `assumed`（`assumed` 不降级、`unknown` 不改判），缺值规则仍优先；
+   不传标志时行为与 T-27 逐条相同；`audit()` 必须自报这条口径；
 3. **默认 unknown 红线（N4）**：随便造一个不存在的属性 ID，必须 `unknown`；
 4. `provenance.typed` 的 `TypedValue` 字段齐全、value 去噪；
 5. `ViewContext.attrs("base")` 的 key 是 int、value 是 float（且已是物理单位）；
@@ -36,6 +39,7 @@ from evefit.engine.adapter import Engine
 from evefit.engine.assumptions import default_assumptions, derive_skill_tier
 from evefit.project import diagnostics as D
 from evefit.project import provenance as P
+from evefit.project import reasons as R
 from evefit.project import units as U
 from evefit.project.views.base import (
     BASE,
@@ -422,6 +426,68 @@ def test_audit_reports_the_instance_rule() -> None:
     assert audit["consistent"] is True
 
 
+# ---- T-30：第二条实例规则（状态敏感性 ⇒ assumed，只升格、不降级）----
+
+
+def test_resolve_state_sensitive_promotes_measured_to_assumed() -> None:
+    """**状态敏感 ⇒ `assumed`**：本次配装里值随模块状态变，静态表的 `measured` 便不成立。
+
+    这就是 PROGRESS §3 第 166/167 条要的那条规则：同一属性（护盾共振率）在**没有**盾抗
+    模块的船上可以是 `measured`，在**有**盾抗模块的船上必须是 `assumed` —— 所以它是按配装
+    的性质，只能由实例级探测（`render.state_sensitive_attrs()`）提供这个布尔标记。
+    """
+    # 静态表判 measured 的对照属性（12 lowSlots）
+    assert P.tag(A.ATTR_LOW_SLOTS) == "measured"
+    assert P.resolve(A.ATTR_LOW_SLOTS, 6.0, state_sensitive=True) == "assumed"
+
+    # **不传标志 = 完全走旧逻辑**（默认行为不得漂移）
+    assert P.resolve(A.ATTR_LOW_SLOTS, 6.0) == "measured"
+    assert P.resolve(A.ATTR_LOW_SLOTS, 6.0, state_sensitive=False) == "measured"
+
+    # 271 shieldEmDamageResonance：第 14 轮的静态表已把它保守判成 assumed，所以
+    # 无论探测结论如何，三态都只能是 assumed（不能"因为这次不敏感"就变成 measured）
+    assert P.tag(A.ATTR_SHIELD_EM_RESONANCE) == "assumed"
+    assert P.resolve(A.ATTR_SHIELD_EM_RESONANCE, 0.2969, state_sensitive=True) == "assumed"
+    assert P.resolve(A.ATTR_SHIELD_EM_RESONANCE, 0.5, state_sensitive=False) == "assumed"
+
+
+def test_resolve_state_sensitive_never_downgrades_or_rescues_unknown() -> None:
+    """只允许**升格** `measured → assumed`：`assumed` 不降级，`unknown` 也不改判。
+
+    `unknown` 被这条"救"成 `assumed` 同样是撒谎（把「不可知」说成「有假设支撑」），
+    与红线 N4 同一条精神。
+    """
+    assert P.tag(A.ATTR_EHP) == "assumed"
+    assert P.resolve(A.ATTR_EHP, 9102.577816, state_sensitive=True) == "assumed"  # 不降级
+    assert P.resolve(P.ATTR_MAX_TARGETS_UNVERIFIED, 0.0, state_sensitive=True) == "unknown"
+    assert P.resolve(UNKNOWN_ATTR_ID, 1.0, state_sensitive=True) == "unknown"
+    # 合成值（指不到单一来源属性）与状态敏感性无关，仍是 assumed
+    assert P.resolve(None, 1.0, state_sensitive=True) == "assumed"
+
+
+def test_missing_value_rule_still_wins_over_state_sensitivity() -> None:
+    """**第一条实例规则优先**：值 `None` → `unknown`，`state_sensitive` 不产生任何作用。
+
+    否则「值都没有」会被说成「依赖假设」，把那句 `dph` 的教训（T-27）又丢回去。
+    """
+    assert P.resolve(A.ATTR_LOW_SLOTS, None, state_sensitive=True) == "unknown"
+    assert P.resolve(A.ATTR_SHIELD_EM_RESONANCE, None, state_sensitive=True) == "unknown"
+    assert P.resolve(None, None, state_sensitive=True) == "unknown"
+
+
+def test_audit_reports_the_state_sensitivity_rule() -> None:
+    """`audit()` 必须自报第二条实例规则（排查「静态表说 measured 却报 assumed」的人口）。"""
+    audit = P.audit()
+
+    assert audit["instance_state_rule"] == P.INSTANCE_STATE_RULE
+    assert "状态" in audit["instance_state_rule"]
+    assert "assumed" in audit["instance_state_rule"]
+    assert "measured" in audit["instance_state_rule"]
+    # 第一条规则的文案与表都没被第二条挤掉
+    assert audit["instance_missing_rule"] == P.INSTANCE_MISSING_RULE
+    assert audit["consistent"] is True
+
+
 def test_typed_returns_full_contract_fields() -> None:
     """I6：任何数值都带 provenance；字段集合与契约逐字一致。
 
@@ -722,3 +788,77 @@ def test_cap_sensitive_hit_path(ctx_from_eft) -> None:
     assert evidence["stable_pct_after"] > 0.0
     assert "Microwarpdrive" in evidence["module"]
     assert evidence["candidates_checked"] >= 1
+
+
+# =============================================================================
+# 六、unknown 的原因（T-32：`project/reasons.py` 的纯函数判定）
+# =============================================================================
+
+REASON_PRIORITY_CASES: tuple[tuple[str, str, int | None, tuple[str, ...], str], ...] = (
+    # (路径, 视角, 来源属性, flag id 序列, 期望 reason)
+    # ---- 规则①：flag 直接解释该字段（最高优先级）----
+    ("dph", "firepower", A.ATTR_DAMAGE_ALPHA, ("weapon_damage_zero",), "input_incomplete"),
+    # ---- 规则②：条件字段（命中即停；即使来源是「引擎永不提供」的属性也不改判）----
+    ("dph", "firepower", A.ATTR_DAMAGE_ALPHA, (), "not_applicable"),
+    ("application.tracking_rad_s", "firepower", A.ATTR_MAX_TARGETS, (), "not_applicable"),
+    ("tier_violations[].rule.available", "constraints", None, (), "not_applicable"),
+    ("consumables.paste_endurance_s", "stability", None, (), "not_applicable"),
+    # ---- 规则③：来源属性在「引擎永不提供」清单（**优先于**规则④）----
+    ("thinnest.hull.damage_type", "survivability", A.ATTR_MAX_TARGETS, (), "engine_omits"),
+    # ---- 规则④：多值并列，无唯一答案 ----
+    ("thinnest.hull.damage_type", "survivability", None, (), "ambiguous"),
+    ("thinnest.shield.ehp", "survivability", None, (), "ambiguous"),
+    ("some.future.damage_type", "firepower", None, (), "ambiguous"),
+    # ---- 规则⑤：兜底（出现即缺陷）----
+    ("no.such.path", "firepower", None, (), "unclassified"),
+    ("no.such.path", "firepower", A.ATTR_DAMAGE_ALPHA, (), "unclassified"),
+)
+"""判定优先级的**逐条**对照表（命中即停：顺序错了这里立刻红）。
+
+刻意把「同一路径、不同输入 → 不同结论」的成对用例都放进来：
+`dph` 有无 flag、`thinnest.hull.damage_type` 的来源是 `None` 还是 `-70` ——
+只测单向的话，「规则没接上」和「规则接反了」这两种缺陷分不开。
+"""
+
+
+@pytest.mark.parametrize(("path", "view", "source", "flags", "expected"), REASON_PRIORITY_CASES)
+def test_reason_priority_is_hit_and_stop(
+    path: str, view: str, source: int | None, flags: tuple[str, ...], expected: str
+) -> None:
+    """`reasons.reason_for()` 按规格 §0.2.1 的顺序「命中即停」。"""
+    reason = R.reason_for(path, view=view, source=source, flags=flags)
+
+    assert reason == expected, (
+        f"{view}.{path}（source={source} flags={flags}）应为 {expected}，实为 {reason}"
+    )
+    assert reason in R.UNKNOWN_REASONS
+
+
+def test_engine_omits_list_is_pinned_to_the_static_table() -> None:
+    """「引擎永不提供」清单必须与常量表 / 三态表**同源**（三处不得漂移）。"""
+    from evefit.project import provenance as P
+
+    assert R.ENGINE_OMITS_ATTRS == frozenset({A.ATTR_MAX_TARGETS})
+    for attribute_id in R.ENGINE_OMITS_ATTRS:
+        assert attribute_id in A.ATTRIBUTES, f"{attribute_id} 没进常量表（红线 N12）"
+        assert attribute_id in P.UNKNOWN_ATTRS, f"{attribute_id} 在静态表里不是 unknown"
+        # 派生负 ID 取证：SDE 属性表里查不到（`Index.attribute()` 返回 None）
+        assert AD.name_of(attribute_id) == "maxTargets", (
+            "名字必须来自常量表（SDE 无记录），不能是 attr_<id> 兜底名"
+        )
+
+
+def test_reason_helpers_on_sparse_tables() -> None:
+    """`unclassified()` / `distribution()`：守门与报表的判据（空表也要给满键）。"""
+    table = {"a": "not_applicable", "b": "ambiguous", "c": "unclassified"}
+
+    assert R.unclassified(table) == ["c"]
+    assert R.unclassified({}) == []
+    assert R.distribution(table) == {
+        "input_incomplete": 0,
+        "not_applicable": 1,
+        "engine_omits": 0,
+        "ambiguous": 1,
+        "unclassified": 1,
+    }
+    assert R.distribution({}) == {reason: 0 for reason in R.UNKNOWN_REASONS}

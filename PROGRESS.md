@@ -267,6 +267,36 @@
 194. **`-57` 是「载机舱容占用」，含已发射的中队**：把 Templar 移进 `fighter_tube` 后 `-57` 仍为 14000 → `capacity_used_m3` **不能**改成按机库条目累加体积（两者在「有中队发射中」时会不同）。
 195. **覆盖盲区**：`fighter_bay.types` 是字符串列表，渲染层把非空标量列表当一个叶子 → 必须登记 `FIELD_SOURCES`。Hecate 样本机库为空，既有守卫测试**校验不到**这条，已在 f26 上补「叶子全覆盖 + 字符串白名单」断言。
 196. **可靠性自检的写法值得推广**：临时把 `classify_weapon` 的 bay 分支改回旧行为 → 新测试立刻 **2 failed** → 证明断言不是永真，然后还原。**每个关键断言都该能被一次故意篡改打红。**
+197. **T-31 常量覆盖守护上线**：`tools/check_attr_coverage.py`（A=FieldSources 覆盖 / B=AST 裸 ID 扫描 / B2=project 其它模块 / C=常量表自洽）+ `tests/test_attr_coverage.py`（18 条，全部带变异自检）。实测 A 171 条登记（int 91 / None 80）、C 146 常量 = 146 行、缩放 11、`audit consistent=True`。
+198. **四个历史缺口（281/56/1272/1367）全部已登记** → 「六视角缺常量」这个前提当前不成立，`config/attributes.py` 无需补。
+199. **真实缺口 1**：`project/provenance.py:112` 的 `ATTR_MAX_TARGETS_UNVERIFIED = -70` **裸写在 project/ 里、常量表没有它**（`Index.attribute(-70)` = None → 派生负 ID）。补登会撞 `tests/test_attribute_dict.py` 三处硬编码「常量数 = 146」。
+200. **真实缺口 2**：`project/render.py:482/485/488` 的 `MODE_EHP_ATTR = -43` / `MODE_DPS_ATTR = -12` / `MODE_ALIGN_ATTR = -1` 是**真实 N12 违规**（裸写派生 ID）。已进 `ALLOWED_BARE_IDS` 白名单，且白名单**带过期检测**——修好后测试会要求销账。
+201. **`tests/test_attribute_dict.py` 把常量总数硬编码成 `146`（三处）** —— 任何人补常量都会让它变红。**这正是 `-70` 迁移被挡住的真实原因**，也是「补常量」与「守护测试」两类任务的隐性冲突点。→ 应改成相对基线（`>= 146` + 显式增量断言）或完全由表推导。
+202. **白名单必须会过期**（T-31 的设计）：`ALLOWED_BARE_IDS` 里的条目一旦被修好，测试会**主动要求销账**。这比「永久豁免」强得多 —— 豁免不免除债务，只推迟还款。
+203. **沙箱拒绝 `tmp_path`（`WinError 5`）** → T-31 把扫描器拆成 `scan_source_for_bare_ids(source, display)`，测试改用**内存字符串**做变异自检，顺带让扫描器零 IO。**这条技巧可用于所有需要"读文件做静态分析"的测试。**
+204. **T-30 完成第二条实例规则**（447 passed）：`resolve(*, state_sensitive)` + `state_sensitive_attrs(ctx)` —— **全 online vs 全 active 各算一次，逐属性比对，值变即 `assumed`**。不枚举模块族，只升格（`measured→assumed`），不降格；值 `None` 仍优先 `unknown`。
+205. **敏感性集合实测**：f4 **18** 个（含 `271–274` 与 `-43/-30/-27/-47/-50/-52/-72/-6/-5/-4/-39…-42`）、f1 **15** 个（不含 `271–274`，是 MWD 族 `4/552/37/-1`）；36 样本中 35 个非空（7–46 个 ID），仅 `f6-minimal-fit` 空集。
+206. **成本实测**：最多 +2 次计算，f4 只 **+1**（`mobility` 视角本来就算 active 变体，命中引擎 LRU）；纯被动配装 **0 次**；同 ctx 二次渲染 **0 次**。
+207. **36 样本探测开/关，views 逐字节相同（0 处 provenance 变化）** —— 因为 `survivability.FIELD_SOURCES` 今天**没有字段直接以 `271–274` 为来源**（`ehp_by_damage`/`thinnest` 都是合成值）。→ **规则接好了线，但今天无字段可作用**。T-30 用「模拟静态表把 271 收紧回 measured」的补丁把接线两个方向都钉住。
+208. **关键发现**：静态表判 `measured` 的 `109–113`（结构）与 `267–270`（装甲）**在 11 个 KB 样本上实测随状态变化**（f7/f9/f12/f14/f17/f18/f24/f25/f30/f34/f36；来源 `Assault Damage Control II`、`Armor Command Burst II`、主动抗性模块）→ **它们的 `measured` 只是「样本稳定」，不是「配装稳定」**。第三次印证第 167 条。
+209. **验收侧契约冲突**：`run_acceptance.py::check_provenance_instances()` 断言「有值 ⇒ == 静态表 tag」，会**把正确的实例级升格判成 medium 缺陷**（今天 0 升格所以没炸）。已通知验收员改为「必须是静态表结论，或比它更保守」。
+210. **T-33 完成回归一键化**（38 条测试）：`tools/regress.py` —— 四门（`pytest` / `attr-coverage` / `snapshot` / `acceptance`），**依赖在代码里显式声明**（`Gate.requires`；pytest 未过时 acceptance 标 SKIPPED 且**执行器一次都不被调用**），`--json` 机器可读，成功只留一行摘要、失败只打尾部 30 行，子进程强制 UTF-8。
+211. **「跳过 ≠ 通过」写进退出码**：有 SKIPPED 且无 FAIL → 仍返回 **1**；全 SKIPPED → 2。**这防住了「可跳过就不算失败」的软门禁**——那是比漏检更隐蔽的假绿。
+212. 实测：快速门 3/3 PASS（**485 passed**）；`--full` 4/4 PASS（acceptance 3.5s）。
+213. **验收侧冲突已修**：`check_provenance_instances` 改成按**保守度排序**判定 —— `measured(0) < assumed(1) < unknown(2)`，写进代码而非散落 if。规则：值 `None`→要求 `unknown`；**升格合法**；**降格（`assumed→measured`）禁止**；其余等于 `tag()`。自证：升格 0 缺陷、降格命中 `provenance 错误`。
+214. **旧断言会误报 260 条**：扫描 36 样本「有值却标 `unknown`」的叶子共 **260 条**，全是静态表未登记的路径（`tier_violations[].rule.used`、`cap_sensitivity[].depletes_in_s` 等）。→ 「或更保守」不是宽容，是**唯一可行解**。
+215. **这 260 条暴露一个新缺口**：`FIELD_SOURCES` 覆盖率只保证**数值**叶子，**字符串 / 枚举 / 嵌套路径没有 provenance 归属** → 落到 `tag()` 的 `unknown` 默认分支。合成值与枚举值本质是「我们自己算的」，至少应是 `assumed`。→ 记为欠账 66。
+216. **T-32 完成（522 passed）**：新建 `project/reasons.py`（纯函数判定）+ `render.py::_reason_block()`；36 样本 reason 分布 **not_applicable 744 / ambiguous 40 / input_incomplete 1 / engine_omits 0 / unclassified 0**。
+217. **修正第 199–200 条**：四个待迁常量里 `-43/-12/-1` **早已在表里**（`ATTR_EHP` / `ATTR_DAMAGE_DPS` / `ATTR_ALIGN_TIME`，`unit=None` 即派生），真正缺的只有 **`-70`** → 实际动作是「新增 1 个常量（146→147）+ 3 处改引用 + 白名单销账」。**我任务书里"四个都要新增"的判断是错的。**
+218. **预算判断值得记**：`unknown_reasons` 花 **+979 chars** → 16,001；按公式该重定为 20,000，但 T-32 **主动没上调**，理由「抬阈值会削弱护栏」，改为在 docstring 记录「余量从 20% 掉到 6.2%，下次再加出口必须重定」。→ **护栏阈值不该为了让新功能装得下而上调。**
+219. **`not_applicable` 有污染**：`tier_violations[].kind/message/resource/rule.*` 属「有值但未登记 `FIELD_SOURCES`」（N4 兜底），被归成 `not_applicable`。更干净是给 `views/constraints.py` 补登记（→ `assumed`）。→ 欠账 66，T-34 处理。
+220. **T-34 完成（538 passed）**：`constraints` 补登记**容器** + 6 条元素字段 → `not_applicable` **744→600**、`unknown` **785→641**、reason 路径种类 **52→44**。
+221. **144 条是纯污染**：18 个「有资源类档位违规」样本 × 7 条元素字段（126）+ 18 个「`tier_violations` 为空」样本 × 容器本身（18）。迁到 `assumed` 的独立路径 8 条。
+222. **「逐键枚举 `rule.*`」是错的解法**：resource 分支给 `type/resource/used/available`，skill 分支给 `type/type_id/required/level` —— 登记**容器**能让两种形状都继承，**且引擎新增违规类型时不会静默退回 `unknown`**。
+223. **`hard_violations` 此前零覆盖**：36 样本一条硬违规都没有 → 该字段族没有任何断言。T-34 用合成样本（Rifter + 大号弹药）补上覆盖。→ **「样本里没出现」不等于「不用验」。**
+224. **未登记 ≠ 一定落 `unknown`**：容器登记（`weapons: None`）会让元素路径提前 `assumed`。**判断污染必须看「路径 → 有没有任何登记」，不能只看精确键。**
+225. 新守门判据的额外落点：`resources.upgrade_space.{slots_checked,upgradeable_count,blocked_by_resource}` 是 `OVERVIEW_DOWNGRADES` 产出的**摘要叶子**，天然不在 `FIELD_SOURCES`（三态由 `SUMMARY_PROVENANCE` 覆盖）—— 覆盖率断言必须认它，否则误报。
+226. 预算：主样本 **16,001 → 15,657（−344）**，余量回到 7.3%，`BUDGET_CHARS = 17,000` 未上调。
 
 ---
 
@@ -329,7 +359,7 @@
 | 5 | `-58 fighterDps` 未复测 | T-06 | ✅ 完成（13 例；`-58` = 519.5687 实测） |
 | 6 | `docs/回归快照-changelog.md` 未建 | Lead | 等第一次 SDE 变更 |
 | 7 | `PostDiv` 算子（模式抗性）未落成表 | P2 之后 | 待办 |
-| 8 | 引擎升级回归未固化成单条命令 | Lead | P3 前 |
+| 8 | 引擎升级回归未固化成单条命令 | T-33 | ✅ 完成（`python -m evefit.tools.regress [--full]`） |
 | 9 | 可疑点"同类船聚合"需要索引支持 | 后置 | 低 |
 | 10 | `-70 maxTargets` 实测恒 0，标记为不可用字段 | 已在 §3 记录 | ✅ |
 | 11 | **模糊名称候选**：`search_types` 无编辑距离，`Damage Controll II` 这类错位拿不到候选 | 待立项 | 新增 |
@@ -383,7 +413,11 @@
 | 59 | 常量清单靠人工穷举必漏（281 / 56 / 1272 都是事后补的）→ 需「视角用到的 ID 必须全在常量表」的自动检查 | 待立项 | 中 |
 | 60 | **`unknown` 同时承载「未知」与「不适用」**（如纯炮台配装的 `application.explosion_radius_m`）→ 需评估第 4 态 `not_applicable` | 待评估 | 中 |
 | 61 | 数组元素粒度：一条路径一个标签，混装时任一元素缺值即整条 `unknown` | 待评估 | 低 |
-| 62 | 第二条实例规则（按配装检测状态敏感族 → 271–274）未做，当前靠静态表保守判 `assumed` | 下一轮 | 中 |
+| 62 | 第二条实例规则（按配装检测状态敏感族 → 271–274）未做，当前靠静态表保守判 `assumed` | T-30 进行中 | 中 |
+| 63 | `ATTR_MAX_TARGETS_UNVERIFIED = -70` 裸写在 `provenance.py`，常量表无；且 `test_attribute_dict.py` 硬编码「146 常量」 | T-32 | ✅ 完成（146→147，三处硬编码改成由表推导） |
+| 64 | `render.py` 三个 `MODE_*_ATTR` 裸写派生 ID（N12 违规） | T-32 | ✅ 完成（本就已登记，改为引用；白名单销账） |
+| 65 | `unknown` 需带 `reason`（方案 A） | T-32 | ✅ 完成（36 样本 `unclassified` = 0） |
+| 66 | **字符串/枚举/嵌套路径没有 provenance 归属**（260 条落 `unknown` 默认分支） | T-34 | ✅ 完成（not_applicable 744→600，unknown 785→641） |
 
 ---
 

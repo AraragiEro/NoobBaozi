@@ -41,27 +41,53 @@
     （`None`）必须是 `unknown`，f1/f5 的 `dph`（有数值）保持静态表结论；任意视角里值为
     `None` 的叶子一律 `unknown`（通用断言遍历全部叶子）；值存在的叶子仍与 `tag()`
     逐条一致（抽 7 个对照，含数组元素 / 整数键容器 / 合成值来源）。
+14. **T-30 第二条实例规则（状态敏感性）**：`render.state_sensitive_attrs(ctx)` 用
+    「全 online vs 全 active」两次实测探测出 `set[int]`——f4（盾抗模块）必须含
+    `271`–`274`，f1（Hecate，无盾抗模块）不得含；探测**最多多算 2 次**且进 ctx 缓存
+    （引擎 `misses` 差值断言），纯被动配装直接空集**零额外计算**；集合交给
+    `provenance.resolve(..., state_sensitive=…)`，只把 `measured` 升格成 `assumed`
+    （用「静态表把 271 收紧回 measured」的补丁模拟两种走向），缺值规则仍然优先。
+15. **T-32 `unknown_reasons`（字段规格 §0.2.1 方案 A）**：三态不变，每个 `unknown` 叶子
+    额外带一条原因，输出为**稀疏平行表**——键集合**恰好**等于 `provenance` 里值为
+    `unknown` 的路径集合（不多不少），空表是 `{}`。判定优先级 flag → 条件字段 →
+    引擎永不提供 → 多值并列 → 兜底（规则表在 `project/reasons.py`）：
+    f4 的 `dph`（有 `weapon_damage_zero` flag）→ `input_incomplete`；炮船的
+    `application.explosion_radius_m` → `not_applicable`；并列的
+    `thinnest.*.damage_type` → `ambiguous`；以 `-70 maxTargets` 为来源的字段 →
+    `engine_omits`。**守门**：f1/f4/f5/f26 四个样本上 `unclassified` 必须为 **0**
+    （出现即缺陷），并用「抹掉一条规则 → 守门断言变红」证明它不是永真的。
+16. **T-34 结构性叶子补登记**：`tier_violations` / `hard_violations` 的元素字段
+    （`kind` / `message` / `resource` / `rule.*` / `target.*`）是**我们自己算出来的合成 /
+    枚举值** → `FIELD_SOURCES` 登记 `None` → `assumed`（不再是 `unknown` + `not_applicable`）。
+    覆盖率守门断言从「数值叶子必须有映射」（`test_views_a/b`）扩展成「**所有有值叶子都必须
+    有来源登记**」，并把 `not_applicable` 桶钉成**全量清单**（只剩真条件字段）；
+    白名单带过期检测（照 `test_attr_coverage.py::ALLOWED_BARE_IDS` 的做法），
+    并用「注入一个未登记的有值叶子 → 守门断言变红」证明它不是永真的。
 
 约束：无网络、无随机（红线 N1）；样本只读；只碰本任务写入范围内的文件。
 """
 
 from __future__ import annotations
 
+import copy
 import json
+import math
 from pathlib import Path
 
 import esf_dogma_engine as dogma
 import pytest
 
 from evefit import contracts
+from evefit.config import attributes as A
 from evefit.config.paths import db_path
 from evefit.engine.adapter import Engine
 from evefit.engine.assumptions import default_assumptions, derive_skill_tier
 from evefit.project import confidence as C
 from evefit.project import diagnostics as D
+from evefit.project import reasons as R
 from evefit.project import render
 from evefit.project.views import VIEW_ORDER, available_views, build_view
-from evefit.project.views.base import ViewContext
+from evefit.project.views.base import BASE, ViewContext
 from evefit.project.views.loader import VIEW_MODULES, load_views
 from evefit.sde.index import Index
 
@@ -178,6 +204,18 @@ def _load_instance_fit(engine: Engine, index, stem: str) -> dict:
         fit = dogma.load_killmail(raw)
     fit["character"] = {"skills": derive_skill_tier(fit, engine, index=index)}
     return fit
+
+
+def _make_ctx(engine: Engine, index, stem: str) -> ViewContext:
+    """按样本名造一个**缓存是空的**新上下文（状态敏感性探测的成本断言要干净的 ctx）。"""
+    fit = _load_instance_fit(engine, index, stem)
+    return ViewContext(
+        engine=engine,
+        index=index,
+        fit=fit,
+        assumptions=default_assumptions(fit, engine, index=index),
+        meta=engine.meta(),
+    )
 
 
 @pytest.fixture(scope="module")
@@ -372,11 +410,18 @@ def test_render_overview_returns_six_views_in_view_order(overview: dict) -> None
 
 
 def test_each_view_entry_has_overview_provenance_and_flags(overview: dict) -> None:
-    """每个视角条目 = `{overview, provenance, confidence, flags}`，类型都对。"""
+    """每个视角条目 = `{overview, provenance, unknown_reasons, confidence, flags}`，类型都对。"""
     for name, entry in overview["views"].items():
-        assert set(entry) == {"overview", "provenance", "confidence", "flags"}, name
+        assert set(entry) == {
+            "overview",
+            "provenance",
+            "unknown_reasons",
+            "confidence",
+            "flags",
+        }, name
         assert isinstance(entry["overview"], dict) and entry["overview"], name
         assert isinstance(entry["provenance"], dict), name
+        assert isinstance(entry["unknown_reasons"], dict), name
         assert isinstance(entry["confidence"], dict), name
         assert isinstance(entry["flags"], list), name
 
@@ -483,17 +528,28 @@ def test_provenance_covers_string_leaves(overview: dict, ctx: ViewContext) -> No
         assert resources_detail[path] == "assumed", f"{path} 应为 assumed"
 
 
-def test_provenance_marks_unmapped_and_unknowable_as_unknown(overview: dict) -> None:
-    """没有映射 / 映射到不可知属性 → `unknown`（红线 N4：默认兜底，不猜、不拿默认值冒充）。"""
+def test_provenance_marks_unmapped_and_unknowable_as_unknown(
+    ctx: ViewContext, overview: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没有映射 → `unknown`（红线 N4：默认兜底，不猜、不拿默认值冒充）。
+
+    T-34 起六个视角里**已经找不到「有值却没登记」的字段**（那是本任务还清的欠账），
+    所以这里**取消一条真实登记**（`damage_split.em`：样本里是 `measured` 的实测值）
+    来证明缺映射时确实兜底 `unknown` —— 不这么做，这条断言会随欠账还清而空转。
+    """
     firepower = overview["views"]["firepower"]
     # 已装填弹药的 114/116/117/118 会出现在装备级 attributes 里（发射器并入装填弹药属性）
     # → 属性级 measured；旧结论「弹药属性不在 calculate 输出」对已装填弹药不成立
     assert firepower["provenance"]["damage_split.em"] == "measured"
 
-    # 未登记字段同样兜底 unknown（`tier_violations[].kind` 还没被 FIELD_SOURCES 收编）
-    constraints = overview["views"]["constraints"]
-    assert constraints["overview"]["tier_violations"], "样本应带档位违规（CPU/PG 超载）"
-    assert constraints["provenance"]["tier_violations[].kind"] == "unknown"
+    monkeypatch.delitem(VIEW_MODULES["firepower"].FIELD_SOURCES, "damage_split.em")
+    monkeypatch.setattr(render, "BUDGET_CHARS", BIG_BUDGET)
+
+    mutated = render.render_overview(ctx)["views"]["firepower"]
+    assert isinstance(mutated["overview"]["damage_split"]["em"], (int, float)), "前提：这个叶子有值"
+    assert mutated["provenance"]["damage_split.em"] == "unknown", (
+        "没有 FIELD_SOURCES 映射时必须兜底 unknown（不能因为碰巧有值就冒充实测）"
+    )
 
 
 def test_provenance_expands_int_key_dict_per_level(overview: dict) -> None:
@@ -651,6 +707,200 @@ def test_present_values_still_follow_the_static_table(
 
 
 # =============================================================================
+# 三·C、状态敏感性探测（T-30：第二条实例规则，按配装实测）
+# =============================================================================
+
+SHIELD_RESONANCE_ATTRS: tuple[int, ...] = (271, 272, 273, 274)
+"""护盾四系共振率（`271`–`274`）。f4 有盾抗模块（`Pithum C-Type Multispectrum Shield
+Hardener`）→ 状态敏感；f1（Hecate）没有 → 不敏感（PROGRESS §3 第 166/167 条）。"""
+
+PASSIVE_EFT = "[Rifter, 纯被动]\nDamage Control II\nGyrostabilizer II\nReactor Control Unit II"
+"""纯被动配装（三件 `online`-only 模块）：全 online 与全 active **逐键相等**。
+
+用来钉住「没有 active 能力的模块 → 空集 + 零额外计算」：这艘船上把 `state` 写成
+`active` 也会被引擎按 `max_state` 夹回 `online`（实测）。
+"""
+
+
+def _render_misses(engine: Engine, ctx: ViewContext) -> int:
+    """清空引擎缓存后渲染一次 overview，返回这一次真正发生的计算次数（`misses`）。"""
+    engine.clear_cache()
+    render.render_overview(ctx)
+    return engine.cache_stats()["misses"]
+
+
+def test_state_sensitivity_set_contains_shield_resonances_on_f4(
+    engine: Engine, index
+) -> None:
+    """**f4（有盾抗模块）**：状态敏感性集合必须包含 `271`–`274`（探针命中路径）。
+
+    这是本轮的靶心：盾抗模块 `active` 才给抗性（`271` 从 `0.5` → `0.2969`），所以这套
+    配装的护盾共振率**依赖模块状态** —— 不靠任何模块清单，靠「两次算出来的值不一样」。
+    """
+    sensitive = render.state_sensitive_attrs(_make_ctx(engine, index, "f4-non-hecate"))
+
+    assert 271 in sensitive, f"f4 的敏感性集合里没有 271：{sorted(sensitive)}"
+    assert set(SHIELD_RESONANCE_ATTRS) <= sensitive, sorted(sensitive)
+    # 同一份探测还自动覆盖了主动盾修 / 分层 EHP 这类"没被点名"的状态敏感属性
+    assert {A.ATTR_EHP, A.ATTR_SHIELD_BOOST_RATE} <= sensitive
+    # 集合是 set[int]，不是路径 / 名称 / 模块族黑名单
+    assert all(isinstance(attribute_id, int) for attribute_id in sensitive)
+
+
+def test_state_sensitivity_set_excludes_shield_resonances_on_f1(engine: Engine, index) -> None:
+    """**f1（Hecate，无盾抗模块）**：`271`–`274` 不得进集合（静态表结论原样生效）。
+
+    Hecate 样本上也有状态敏感属性（MWD 的 `4 mass` / `552 signatureRadius`），所以这条
+    断言不是"整船都不敏感"，而是"**这一份配装**没有护盾共振率敏感性"——同一属性在不同
+    配装上结论不同，正是这条规则存在的理由。
+    """
+    sensitive = render.state_sensitive_attrs(_make_ctx(engine, index, "f1-hecate-killmail"))
+
+    assert not (set(SHIELD_RESONANCE_ATTRS) & sensitive), sorted(sensitive)
+    assert {A.ATTR_MASS, A.ATTR_SIGNATURE_RADIUS} <= sensitive, sorted(sensitive)
+
+
+def test_state_sensitivity_probe_costs_at_most_two_calculations(
+    engine: Engine, index, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**成本护栏**：探测最多多算 2 次（online / active），与视角数无关。
+
+    口径：同一份 f4 配装，一次开着探测渲染、一次把 `state_sensitive_attrs` 换成直接返回
+    空集，比较引擎 `misses`。上下界都要卡：
+
+    - 上界 **2**：六个视角各算一遍会是 6+，这里是 1（实测）——因为 `mobility` 视角本来
+      就会算「全 active」那一份（`ACTIVE_VARIANT = "mobility:active"`），探测那一次直接命中
+      引擎 LRU；于是真正新增的只有「全 online」一次。这正是「不重复算」的期望行为，
+      所以断言是 `<= 2` 而不是 `== 2`；
+    - 下界 **> 0**：等于 0 说明探测器根本没跑（这条断言就变成了空转）。
+    """
+    with_probe = _render_misses(engine, _make_ctx(engine, index, "f4-non-hecate"))
+
+    monkeypatch.setattr(render, "state_sensitive_attrs", lambda _ctx: set())
+    without_probe = _render_misses(engine, _make_ctx(engine, index, "f4-non-hecate"))
+
+    delta = with_probe - without_probe
+    assert delta > 0, "状态敏感性探测一次引擎调用都没发生（探测器没接上）"
+    assert delta <= 2, f"状态敏感性探测多算了 {delta} 次（上限 2 次）"
+
+
+def test_state_sensitivity_set_is_cached_on_the_context(engine: Engine, index) -> None:
+    """同一份 ctx 再渲染一次：**一次引擎调用都不多**（online/active 留在 ctx 缓存里）。"""
+    ctx = _make_ctx(engine, index, "f4-non-hecate")
+    render.render_overview(ctx)
+
+    engine.clear_cache()
+    render.render_overview(ctx)
+
+    assert engine.cache_stats()["misses"] == 0, "第二次渲染又碰了引擎（缓存没复用）"
+
+
+def test_passive_fit_gets_empty_set_and_no_extra_calculations(
+    engine: Engine, index, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**全 online == 全 active 的配装 → 空集、零额外计算**（成本控制的第二条）。"""
+    fit = engine.load_eft(PASSIVE_EFT)
+    fit["character"] = {"skills": derive_skill_tier(fit, engine, index=index)}
+
+    def factory() -> ViewContext:
+        return ViewContext(
+            engine=engine,
+            index=index,
+            fit=fit,
+            assumptions=default_assumptions(fit, engine, index=index),
+            meta=engine.meta(),
+        )
+
+    assert render.state_sensitive_attrs(factory()) == set()
+
+    with_probe = _render_misses(engine, factory())
+    monkeypatch.setattr(render, "state_sensitive_attrs", lambda _ctx: set())
+    without_probe = _render_misses(engine, factory())
+
+    assert with_probe == without_probe, (
+        f"纯被动配装上多算了 {with_probe - without_probe} 次引擎调用（应当为 0）"
+    )
+
+
+def test_state_sensitive_field_is_assumed_only_where_the_value_moves(
+    engine: Engine, index, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**升格只在「值真的变了」的那份配装上发生**（规则②的两种走向）。
+
+    今天静态表已把 `271`–`274` 保守判成 `assumed`，所以真实样本上这条规则**没有可见变化**
+    ——为了把「探测器确实接到了 provenance 判定上」钉死，这里**模拟**静态表收紧回
+    `measured` 的形态（T-14 之前的表），并把 `survivability` 的一个真实叶子临时指到 `271`：
+
+    - f4（有盾抗模块）：`271` 在敏感性集合里 → 该叶子 `assumed`（静态表被覆盖）；
+    - f1（无盾抗模块）：`271` 不在集合里 → 该叶子 `measured`（静态表原样生效）。
+
+    两个方向都验，才能同时排除「没接上」与「不分配装一律升格」。
+    """
+    from evefit.project import provenance as P
+
+    attribute_id = A.ATTR_SHIELD_EM_RESONANCE  # 271
+    monkeypatch.setattr(P, "MEASURED_ATTRS", P.MEASURED_ATTRS | {attribute_id})
+    monkeypatch.setattr(P, "ASSUMED_ATTRS", P.ASSUMED_ATTRS - {attribute_id})
+    monkeypatch.setitem(
+        VIEW_MODULES["survivability"].FIELD_SOURCES, "layers.shield_hp", attribute_id
+    )
+    monkeypatch.setattr(render, "BUDGET_CHARS", BIG_BUDGET)
+
+    assert P.tag(attribute_id) == "measured", "补丁没生效：静态表里 271 仍是 assumed"
+
+    f4 = render.render_overview(_make_ctx(engine, index, "f4-non-hecate"))
+    f1 = render.render_overview(_make_ctx(engine, index, "f1-hecate-killmail"))
+
+    assert f4["views"]["survivability"]["overview"]["layers"]["shield_hp"] is not None
+    assert f4["views"]["survivability"]["provenance"]["layers.shield_hp"] == "assumed", (
+        "f4 有盾抗模块、值随状态变，静态表的 measured 必须被覆盖成 assumed"
+    )
+    assert f1["views"]["survivability"]["overview"]["layers"]["shield_hp"] is not None
+    assert f1["views"]["survivability"]["provenance"]["layers.shield_hp"] == "measured", (
+        "f1 没有盾抗模块，静态表的 measured 不该被这条规则改动"
+    )
+
+
+def test_f4_shield_resonance_fields_are_assumed(rendered_samples: dict[str, dict]) -> None:
+    """**f4 的 survivability 字段里，凡是来源为 `271`–`274` 的必须是 `assumed`。**
+
+    现状：`survivability` 的护盾共振率**没有**直接登记成来源（`ehp_by_damage.*` /
+    `thinnest.*` 是三层共振率 + 三层 HP 的合成值 → `FIELD_SOURCES` 里是 `None`），
+    所以这条循环今天扫不到任何字段 —— 它是给「以后有视角直接登记 `271`–`274`」准备的护栏，
+    真正证明探测器接上了的是
+    `test_state_sensitive_field_is_assumed_only_where_the_value_moves()`。
+    下面同时钉住「承载护盾抗性的字段当前确实是 assumed」（合成值 + 静态表双重保证）。
+    """
+    f4 = rendered_samples["f4-non-hecate"]["views"]["survivability"]
+    sources = VIEW_MODULES["survivability"].FIELD_SOURCES
+
+    for path, attribute_id in sources.items():
+        if attribute_id not in SHIELD_RESONANCE_ATTRS or path not in f4["provenance"]:
+            continue
+        assert f4["provenance"][path] == "assumed", (
+            f"f4.{path} 来源是状态敏感的 {attribute_id}，必须 assumed"
+        )
+
+    for path in ("ehp_mixed", "ehp_by_damage.em", "thinnest.shield.ehp", "layer_ehp.shield"):
+        assert f4["provenance"][path] == "assumed", f"f4.{path} 依赖护盾共振率，必须 assumed"
+
+
+def test_missing_value_rule_still_wins_while_state_sensitivity_is_on(
+    rendered_samples: dict[str, dict], engine: Engine, index
+) -> None:
+    """**缺值规则仍然优先**：f4 的敏感性集合非空，但值 `None` 的叶子照样是 `unknown`。
+
+    没有这条，第二条规则会把「不可知」包成「有假设支撑」（`dph` 的教训）。前提断言
+    （集合非空）保证这不是空转：f4 上确实探测出了状态敏感属性。
+    """
+    assert render.state_sensitive_attrs(_make_ctx(engine, index, "f4-non-hecate"))
+
+    firepower = rendered_samples["f4-non-hecate"]["views"]["firepower"]
+    assert firepower["overview"]["dph"] is None
+    assert firepower["provenance"]["dph"] == "unknown"
+
+
+# =============================================================================
 # 四、诊断：只算一次 + 归位 + 顶层兜底
 # =============================================================================
 
@@ -693,12 +943,12 @@ def test_flags_are_attributed_to_their_view(ctx: ViewContext, overview: dict) ->
 
 def test_subset_views_keeps_other_flags_in_top_level_bucket(ctx: ViewContext) -> None:
     """只渲染一个视角时，其它视角的 flag 进顶层兜底桶（**不丢诊断**）。"""
-    monkeypatch_budget = render.BUDGET_CHARS
+    original_budget = render.BUDGET_CHARS
     render.BUDGET_CHARS = BIG_BUDGET
     try:
         subset = render.render_overview(ctx, views=("mobility",))
     finally:
-        render.BUDGET_CHARS = monkeypatch_budget
+        render.BUDGET_CHARS = original_budget
 
     assert tuple(subset["views"]) == ("mobility",)
     own = set(_flag_ids(subset["views"]["mobility"]["flags"]))
@@ -840,9 +1090,13 @@ def test_tiny_budget_degrades_but_keeps_numbers(
             overview["views"][name]["overview"]
         ), f"{name} 的数值被降级改动了"
 
-    # ④ provenance / confidence 不因降级而变（叶子键空间与档位都不该动）
+    # ④ provenance / unknown_reasons / confidence 不因降级而变（三张表的键空间与取值都不该动）
     for name in VIEW_ORDER:
         assert degraded["views"][name]["provenance"] == overview["views"][name]["provenance"]
+        assert (
+            degraded["views"][name]["unknown_reasons"]
+            == overview["views"][name]["unknown_reasons"]
+        )
         assert degraded["views"][name]["confidence"] == overview["views"][name]["confidence"]
 
 
@@ -866,7 +1120,8 @@ def test_degradation_never_adds_or_drops_flags(
 
 
 def test_render_detail_returns_full_single_view(overview: dict, ctx: ViewContext) -> None:
-    """不带 `fields` 时返回该视角完整 overview + provenance + confidence + flags。"""
+    """不带 `fields` 时返回该视角完整 overview + provenance + unknown_reasons + confidence
+    + flags。"""
     detail = render.render_detail(ctx, view="stability")
     entry = overview["views"]["stability"]
 
@@ -875,6 +1130,7 @@ def test_render_detail_returns_full_single_view(overview: dict, ctx: ViewContext
         "view",
         "overview",
         "provenance",
+        "unknown_reasons",
         "confidence",
         "flags",
         "missing",
@@ -883,6 +1139,7 @@ def test_render_detail_returns_full_single_view(overview: dict, ctx: ViewContext
     assert detail["meta"]["scope"] == "detail"
     assert detail["overview"] == entry["overview"]
     assert detail["provenance"] == entry["provenance"]
+    assert detail["unknown_reasons"] == entry["unknown_reasons"]
     assert detail["confidence"] == entry["confidence"]
     assert _flag_ids(detail["flags"]) == _flag_ids(entry["flags"])
     assert detail["missing"] == []
@@ -1393,3 +1650,826 @@ def test_detail_confidence_matches_overview(ctx: ViewContext, overview: dict) ->
 
     assert detail["confidence"] == overview["views"]["firepower"]["confidence"]
     assert set(detail["confidence"]) <= set(detail["provenance"])
+
+
+# =============================================================================
+# 十、T-32：unknown_reasons（`unknown` 必须带原因，字段规格 §0.2.1「方案 A」）
+# =============================================================================
+
+REASON_SAMPLES: tuple[str, ...] = (
+    "f1-hecate-killmail",
+    "f4-non-hecate",
+    "f5-no-mwd",
+    "f26-carrier-fighter",
+)
+"""T-32 的四个守门样本（`unclassified` 必须为 0 的那四个）。
+
+`f1/f4/f5` 与 T-27 的实例级样本同源（炮船 / 突变导弹船 / 导弹船）；`f26` 是**航母**：
+`weapons` 空清单、载机停在机库（`fighters_in_bay_only`）、`damage_split` 四系全 `None`、
+`consumables.ammo_*` 全 `None` —— 条件字段这一类原因在它身上最密集，也最容易漏。
+"""
+
+
+@pytest.fixture(scope="module")
+def reason_samples(engine: Engine, index) -> dict[str, dict]:
+    """四个守门样本各渲染一次 overview（预算调大，排除降级对结构的干扰）。"""
+    original = render.BUDGET_CHARS
+    render.BUDGET_CHARS = BIG_BUDGET
+    try:
+        return {
+            stem: render.render_overview(_make_ctx(engine, index, stem)) for stem in REASON_SAMPLES
+        }
+    finally:
+        render.BUDGET_CHARS = original
+
+
+def _unknown_paths(entry: dict) -> set[str]:
+    """该视角里 `provenance == "unknown"` 的路径集合（独立实现，不抄渲染层私有函数）。"""
+    return {path for path, state in entry["provenance"].items() if state == "unknown"}
+
+
+def _unclassified(rendered: dict) -> list[str]:
+    """**独立实现**的守门检查：所有视角里 `reason == "unclassified"` 的路径。
+
+    刻意不复用 `reasons.unclassified()`：守门判据不能由被测实现自己提供，否则把兜底值
+    改个名字就能骗过测试。这里只认字面量 `"unclassified"`（契约写死的兜底值）。
+    """
+    return sorted(
+        f"{view_name}.{path}"
+        for view_name, entry in rendered["views"].items()
+        for path, reason in entry["unknown_reasons"].items()
+        if reason == "unclassified"
+    )
+
+
+@pytest.mark.parametrize("view_name", VIEW_ORDER)
+def test_unknown_reasons_is_a_sparse_parallel_table(overview: dict, view_name: str) -> None:
+    """**稀疏 + 全覆盖**：键集合恰好是 `provenance` 里值为 `unknown` 的路径集合。
+
+    三个方向一起钉住（与 `confidence` 的稀疏口径同构）：
+    ① 每个 `unknown` 都**有**原因（少了就是「静默的 unknown」）；
+    ② 非 `unknown` 的路径**不出现**（稀疏：默认情况不需要被写出来）；
+    ③ 取值只允许 `reasons.UNKNOWN_REASONS` 里的五个字符串。
+    """
+    entry = overview["views"][view_name]
+    table = entry["unknown_reasons"]
+    unknown = _unknown_paths(entry)
+    known = set(entry["provenance"]) - unknown
+
+    assert isinstance(table, dict), f"{view_name} 的 unknown_reasons 必须是 dict"
+    assert unknown <= set(table), f"{view_name} 有 unknown 没写原因：{sorted(unknown - set(table))}"
+    assert not (set(table) & known), f"{view_name} 给非 unknown 路径写了原因：{sorted(set(table) & known)}"
+    assert set(table) == unknown, f"{view_name} 的原因表与 unknown 路径不吻合"
+    assert set(table.values()) <= set(R.UNKNOWN_REASONS), (
+        f"{view_name} 出现了非法 reason：{sorted(set(table.values()) - set(R.UNKNOWN_REASONS))}"
+    )
+
+    # 非空转前置：样本上确实有 unknown（否则上面全是空断言）
+    assert any(entry["unknown_reasons"] for entry in overview["views"].values()), (
+        "样本一个 unknown 都没有，这条断言退化成空转"
+    )
+
+
+def test_reason_vocabulary_is_closed_and_documented() -> None:
+    """取值域是**封闭**的五项，且每一项都有文档；兜底就在优先级末尾。"""
+    assert R.UNKNOWN_REASONS == (
+        "input_incomplete",
+        "not_applicable",
+        "engine_omits",
+        "ambiguous",
+        "unclassified",
+    )
+    assert set(R.REASON_DOCS) == set(R.UNKNOWN_REASONS)
+    assert R.FALLBACK_REASON == "unclassified" == R.UNKNOWN_REASONS[-1]
+    assert R.distribution({}) == {reason: 0 for reason in R.UNKNOWN_REASONS}
+
+
+def test_reason_tables_only_point_at_real_field_paths() -> None:
+    """规则表不得打错字：每条规则都要能在**真实的** `FIELD_SOURCES` / 诊断规则表里找到落点。
+
+    打错一个字的后果是**静默退化**：那条规则永不命中，对应路径悄悄掉进 `unclassified`，
+    而「守门测试通过」这件事看上去仍然成立（因为样本里恰好没出现那条路径）。
+    所以规则表必须被反查钉住 —— 表是在这里被「真实数据」校验的，不是在注释里自我保证的。
+    """
+    for view_name, paths in R.CONDITIONAL_LEAVES.items():
+        sources = VIEW_MODULES[view_name].FIELD_SOURCES
+        missing = sorted(
+            path
+            for path in paths
+            # 叶子级登记有两种合法落点：**整条路径**，或「容器路径 + `[]` 元素登记」
+            # （`weapons` 就是这样：列表非空时叶子是 `weapons[].family`，空列表时整块
+            # 折叠成容器键 `weapons` —— 两种形态都要能匹配上，见 PROGRESS §3 第 106 条）
+            if path not in sources and not any(key.startswith(f"{path}[]") for key in sources)
+        )
+        assert missing == [], f"{view_name} 的条件字段不在 FIELD_SOURCES 里（打错字？）：{missing}"
+
+    for view_name, prefixes in R.CONDITIONAL_SUBTREES.items():
+        sources = list(VIEW_MODULES[view_name].FIELD_SOURCES)
+        for prefix in prefixes:
+            matched = [
+                path
+                for path in sources
+                if path == prefix or path.startswith(f"{prefix}.") or path.startswith(f"{prefix}[")
+            ]
+            assert matched, f"{view_name} 的条件子树 {prefix!r} 一条 FIELD_SOURCES 都覆盖不到"
+
+    for suffix in R.AMBIGUOUS_SUFFIXES:
+        assert any(
+            path.endswith(suffix) for path in VIEW_MODULES["survivability"].FIELD_SOURCES
+        ), f"并列语义的后缀 {suffix!r} 在 survivability 的 FIELD_SOURCES 里找不到"
+    for prefix in R.AMBIGUOUS_SUBTREES:
+        assert any(
+            path.startswith(f"{prefix}.") for path in VIEW_MODULES["survivability"].FIELD_SOURCES
+        ), f"并列语义的子树 {prefix!r} 在 survivability 的 FIELD_SOURCES 里找不到"
+
+    # 规则①：flag 必须是**真实存在**的诊断规则，且它解释的字段在视角里真有登记
+    for flag_id, paths in R.FLAG_REASONS.items():
+        assert flag_id in D._HANDLERS, f"{flag_id} 不是 diagnostics 里注册的规则"
+        for path in paths:
+            assert path in VIEW_MODULES["firepower"].FIELD_SOURCES, path
+
+    # 规则③：「引擎永不提供」的 ID 必须同时是常量表登记项与静态表的 unknown（三处同源）
+    from evefit.project import provenance as P
+
+    for attribute_id in R.ENGINE_OMITS_ATTRS:
+        assert attribute_id == A.ATTR_MAX_TARGETS
+        assert attribute_id in A.ATTRIBUTES, f"{attribute_id} 未登记常量表（红线 N12）"
+        assert attribute_id in P.UNKNOWN_ATTRS, (
+            f"{attribute_id} 判 engine_omits，静态表却没把它判 unknown（两表漂移）"
+        )
+
+
+def test_f4_dph_reason_is_input_incomplete(rendered_samples: dict[str, dict]) -> None:
+    """**靶心**：f4 的 `dph` → `input_incomplete`，依据是**同一视角的 flag**。
+
+    三件事必须同时成立，缺一条就说明链路断了：
+    ① `weapon_damage_zero` flag 真在 `views.firepower.flags` 里（规则①的依据）；
+    ② `dph` 的值是 `None`、三态是 `unknown`（T-27 的实例级覆盖）；
+    ③ 原因落在 `input_incomplete`，而不是「没有武器」这类路径推断。
+
+    另外钉住**稀疏**：f1/f5 的 `dph` 有值 → 原因表里**不该有**这一条。
+    """
+    firepower = rendered_samples["f4-non-hecate"]["views"]["firepower"]
+
+    assert "weapon_damage_zero" in _flag_ids(firepower["flags"]), (
+        "f4 的 firepower 视角里必须带 weapon_damage_zero flag（规则①的唯一依据）"
+    )
+    assert firepower["overview"]["dph"] is None
+    assert firepower["provenance"]["dph"] == "unknown"
+    assert firepower["unknown_reasons"]["dph"] == "input_incomplete", (
+        f"有 flag 却报了 {firepower['unknown_reasons']['dph']!r}"
+    )
+
+    for stem in ("f1-hecate-killmail", "f5-no-mwd"):
+        entry = rendered_samples[stem]["views"]["firepower"]
+        assert isinstance(entry["overview"]["dph"], (int, float)), f"{stem}.dph 应有数值"
+        assert "dph" not in entry["unknown_reasons"], f"{stem}.dph 有值却写了原因（不稀疏）"
+
+
+def test_gun_ship_application_fields_are_not_applicable(
+    rendered_samples: dict[str, dict],
+) -> None:
+    """炮船的 `application.explosion_*` → `not_applicable`（这套配装没有导弹）。
+
+    f1（Hecate + 5 门中子炮）有 `tracking_rad_s` / `optimal_signature_radius_m`，但
+    `explosion_radius_m` / `explosion_velocity_mps` 是 `None` —— 那不是「不可知」，
+    而是「没有导弹，这两个参数对本配装不适用」（字段规格 §1 的 application 行）。
+    """
+    f1 = rendered_samples["f1-hecate-killmail"]["views"]["firepower"]
+
+    assert f1["overview"]["application"]["tracking_rad_s"] is not None
+    assert "application.tracking_rad_s" not in f1["unknown_reasons"]
+
+    for path in ("application.explosion_radius_m", "application.explosion_velocity_mps"):
+        assert f1["overview"]["application"][path.rsplit(".", 1)[1]] is None, path
+        assert f1["unknown_reasons"][path] == "not_applicable", path
+
+
+def test_tied_thinnest_damage_type_is_ambiguous(
+    rendered_samples: dict[str, dict], engine: Engine, index
+) -> None:
+    """四系并列的 `thinnest.*.damage_type` → `ambiguous`（不是「不知道」）。
+
+    两个样本各钉一个侧面：
+    - **f1 结构层**：一块 `Damage Control II` 把四系共振率压成同一个值 → 没有「最薄系」；
+      但该层 `ehp` 照给（四系同值，这个数是对的）→ 证明是**并列**而不是缺数据；
+    - **f4 护盾层**：同样的并列（本样本四系抗性相等）。
+
+    并列这件事**独立复算**：直接读 `ctx.attrs(BASE)` 的四个共振率，断言它们相等
+    （`math.isclose`，容差 1e-9；红线 N11 不用 `float ==`）。
+    """
+    ctx = _make_ctx(engine, index, "f1-hecate-killmail")
+    resonances = [ctx.attrs(BASE)[attribute_id] for attribute_id in (
+        A.ATTR_HULL_EM_RESONANCE,
+        A.ATTR_HULL_EXPLOSIVE_RESONANCE,
+        A.ATTR_HULL_KINETIC_RESONANCE,
+        A.ATTR_HULL_THERMAL_RESONANCE,
+    )]
+    assert all(
+        math.isclose(value, resonances[0], rel_tol=1e-9, abs_tol=0.0) for value in resonances
+    ), f"f1 结构层四系共振率本应并列，实测 {resonances}"
+
+    f1 = rendered_samples["f1-hecate-killmail"]["views"]["survivability"]
+    assert f1["overview"]["thinnest"]["hull"]["damage_type"] is None
+    assert f1["overview"]["thinnest"]["hull"]["ehp"] is not None, (
+        "ehp 有值说明数据齐全，damage_type 的 None 只能来自并列"
+    )
+    assert f1["unknown_reasons"]["thinnest.hull.damage_type"] == "ambiguous"
+
+    f4 = rendered_samples["f4-non-hecate"]["views"]["survivability"]
+    assert f4["overview"]["thinnest"]["shield"]["damage_type"] is None
+    assert f4["overview"]["thinnest"]["shield"]["ehp"] is not None
+    assert f4["unknown_reasons"]["thinnest.shield.damage_type"] == "ambiguous"
+    # 非并列的层照常给系名，不该出现在原因表里
+    assert f4["overview"]["thinnest"]["armor"]["damage_type"] == "explosive"
+    assert "thinnest.armor.damage_type" not in f4["unknown_reasons"]
+
+
+def test_fields_sourced_from_max_targets_are_engine_omits(
+    ctx: ViewContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """以 `-70 maxTargets` 为**来源**的字段 → `engine_omits`（规则③）。
+
+    现状：六个视角都没有字段直接以 `-70` 为来源（`confidence.FIELDS_FROM_MAX_TARGETS`
+    也是空的），所以这里把 survivability 的一个**真实 unknown 叶子**临时指到 `-70`：
+
+    - 若规则③没接上，这条会退回 `ambiguous`（它是 `*.damage_type`，规则④）；
+    - 因此这条同时钉住**优先级 ③ 在 ④ 之前**（规格 §0.2.1 的顺序）。
+    """
+    path = "thinnest.hull.damage_type"
+    monkeypatch.setitem(
+        VIEW_MODULES["survivability"].FIELD_SOURCES, path, A.ATTR_MAX_TARGETS
+    )
+    monkeypatch.setattr(render, "BUDGET_CHARS", BIG_BUDGET)
+
+    entry = render.render_overview(ctx)["views"]["survivability"]
+
+    assert entry["overview"]["thinnest"]["hull"]["damage_type"] is None
+    assert entry["provenance"][path] == "unknown", "前提：这条路径仍是 unknown"
+    assert entry["unknown_reasons"][path] == "engine_omits", (
+        f"来源是 -70 maxTargets，应为 engine_omits，实为 {entry['unknown_reasons'][path]!r}"
+    )
+
+
+@pytest.mark.parametrize("stem", REASON_SAMPLES)
+def test_no_unclassified_on_the_guard_samples(
+    reason_samples: dict[str, dict], stem: str
+) -> None:
+    """**本任务的守门测试**：四个真实样本上 `unclassified` 必须为 **0**。
+
+    `unclassified` 是「还没有规则能解释这个 unknown」的兜底 —— 出现即缺一条规则。
+    这条测试红了只有一种正确修法：**去 `project/reasons.py` 补规则/补表**，
+    不能把兜底值改名、也不能在断言里放宽成「允许少量」。
+    """
+    rendered = reason_samples[stem]
+
+    assert _unclassified(rendered) == [], (
+        "这些 unknown 没有规则能解释（去 project/reasons.py 补）：\n"
+        + "\n".join(f"  {stem}.{path}" for path in _unclassified(rendered))
+    )
+
+    # 非空转前置：该样本确实产出了若干带原因的 unknown（否则上面是空断言）
+    total = sum(len(entry["unknown_reasons"]) for entry in rendered["views"].values())
+    assert total >= 5, f"{stem} 只有 {total} 条 unknown 原因，样本或规则接错了"
+
+
+def test_unclassified_guard_catches_a_synthetic_unexplained_path(
+    reason_samples: dict[str, dict],
+) -> None:
+    """**注入一个「没有原因」的 unknown 路径**：守门检查必须认出它。
+
+    与下一条（抹掉一条规则）互补：这条证明判据认得出 `unclassified`，那条证明规则缺失
+    真的会产出 `unclassified`。两条都不做，守门断言就可能因为「表里永远没有这个值」而空转。
+    """
+    rendered = copy.deepcopy(reason_samples["f1-hecate-killmail"])
+    rendered["views"]["firepower"]["unknown_reasons"]["__mutation_probe__"] = "unclassified"
+
+    assert _unclassified(rendered) == ["firepower.__mutation_probe__"]
+
+
+def test_unclassified_guard_turns_red_when_a_rule_is_removed(
+    ctx: ViewContext, overview: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**变异自检**：抹掉一条规则（firepower 的 `application` 子树），守门断言必须变红。
+
+    这是「`unclassified == 0` 不是永真」的证明（PROGRESS §3 第 196 条的做法）：把
+    `CONDITIONAL_SUBTREES` 里的 `application` 去掉，f1 的
+    `application.explosion_radius_m` / `..._velocity_mps` 就**没有规则能解释**了 ——
+    守门检查必须报出来，而不是静默通过。
+    """
+    monkeypatch.setitem(
+        R.CONDITIONAL_SUBTREES, "firepower", ("damage_split", "range", "overload")
+    )
+    monkeypatch.setattr(render, "BUDGET_CHARS", BIG_BUDGET)
+
+    mutated = render.render_overview(ctx)
+    found = _unclassified(mutated)
+
+    assert found, "抹掉了一条规则，守门断言却说通过 —— 它是永真的"
+    assert any(path.endswith("application.explosion_radius_m") for path in found), found
+    # 对照：未变异时同一份 ctx 是干净的（证明 redness 来自这处变异，不是环境问题）
+    assert _unclassified(overview) == []
+
+
+def test_detail_unknown_reasons_matches_overview_and_is_clipped(ctx: ViewContext) -> None:
+    """`render_detail` 的 `unknown_reasons`：全量时与 overview 逐条相同，带 `fields` 时同口径裁剪。"""
+    full = render.render_detail(ctx, view="firepower")
+    assert full["unknown_reasons"] == {
+        path: reason
+        for path, reason in render.render_overview(ctx)["views"]["firepower"][
+            "unknown_reasons"
+        ].items()
+    }
+    assert set(full["unknown_reasons"]) <= _unknown_paths(full)
+
+    clipped = render.render_detail(ctx, view="firepower", fields=["dps.drone"])
+    assert clipped["missing"] == []
+    assert clipped["unknown_reasons"] == {"dps.drone": "not_applicable"}, (
+        f"裁剪后应只剩被请求字段下的原因，实为 {clipped['unknown_reasons']}"
+    )
+
+
+# =============================================================================
+# 十一、T-34：**有值的叶子必须有来源登记**（`not_applicable` 不得收留有值字段）
+# =============================================================================
+
+VALUE_LEAF_UNREGISTERED_ALLOWLIST: dict[str, str] = {}
+"""「有值却查不到任何来源登记」的**白名单**：`"视角.路径" → 为什么允许`（当前**为空**）。
+
+T-34 把这批欠账还清了，所以一个都不留。白名单**必须会过期**（照
+`tests/test_attr_coverage.py::ALLOWED_BARE_IDS` 的做法）：条目一旦不再被命中，
+`test_value_leaf_allowlist_has_no_stale_entries()` 会要求销账 —— 豁免不免债，只推迟还款。
+"""
+
+HARD_VIOLATION_EFT = "[Rifter, probe]\nLight Neutron Blaster II,Antimatter Charge L"
+"""**现场造一条硬违规**的配装：小船上装「大号弹药」→ `charge_size`（与技能无关）。
+
+36 个 KB 样本里 `hard_violations` 恒为 `[]`（一条硬违规都没有），所以
+`hard_violations[].rule.*` / `.target.*` / `.message` 这条路**此前从未被任何断言走到过**。
+"""
+
+SKILL_VIOLATION_EFT = "[Rifter, probe]\n200mm AutoCannon II,EMP S"
+"""**现场造一条技能类档位违规**的配装：把技能档换成「一个技能都没有」。
+
+同一套 `tier_violations` 条目在**技能分支**下的形状（`rule.type`/`rule.type_id`/
+`rule.required`/`rule.level`）与资源分支（`rule.used`/`rule.available`）不同 ——
+容器登记必须把两种形状都接住，这也是「逐键枚举 `rule.*` 会漏」的实证。
+"""
+
+
+def _container_of(path: str) -> str | None:
+    """`cap_by_module[].cap_use_gj_s` → `cap_by_module`（不含 `[]` 时没有容器）。"""
+    head, marker, _rest = path.partition(ARRAY_MARKER)
+    return head if marker else None
+
+
+def _int_key_container_of(path: str) -> str | None:
+    """`skill_floor.count_by_level.4` → `skill_floor.count_by_level`（尾段必须是整数）。"""
+    head, _dot, tail = path.rpartition(".")
+    return head if head and tail.isdigit() else None
+
+
+def _source_registration_of(path: str, sources: dict[str, int | None]) -> str | None:
+    """叶子路径 → 命中的那条 `FIELD_SOURCES` 登记（**独立实现**，不复用 `render._source_of()`）。
+
+    四条命中关系，与渲染层 `_tag()` 的查表顺序一一对应，外加**容器方向**的回退：
+
+    1. 整条路径登记（`damage_split.em`）；
+    2. 元素路径退回**容器**登记（`weapons[].name` ← `weapons`）—— `_tag()` 第 2 步；
+    3. 整数键字典的元素路径退回容器（`count_by_level.4` ← `count_by_level`）—— 第 3 步；
+    4. **容器叶子**退回它的**元素登记**（`weapons` ← `weapons[].name`）。渲染层没有这条
+       （空列表容器照旧 `unknown` = 「这里没有数据」），但**登记覆盖率**必须接受它：
+       对象数组只有在**空**的时候才是一个叶子（`_leaf_paths()` 同一口径），此时它的来源
+       就是那些元素登记 —— 本任务书明确要求「容器 + `[]` 元素两种落点」，否则
+       `weapons: []` / `cap_by_module: []` 会被误判成漏登记。
+    """
+    if path in sources:
+        return path
+    container = _container_of(path)
+    if container is not None and container in sources:
+        return container
+    int_key_container = _int_key_container_of(path)
+    if int_key_container is not None and int_key_container in sources:
+        return int_key_container
+    if any(key.startswith(f"{path}{ARRAY_MARKER}") for key in sources):
+        return f"{path}{ARRAY_MARKER}"
+    return None
+
+
+def _has_no_value(occurrences: list[object]) -> bool:
+    """「没有值」：任一出现是 `None`，或是**空容器**。
+
+    - `None` = 实例级规则①（值缺失 ⇒ `unknown`，T-27）；
+    - 空容器（`weapons: []`）= 渲染层把空列表折叠成的容器叶子，表达「这里什么都没有」
+      （与 `tests/test_views_a.py::_numeric_leaf_paths` 同一口径：空列表不产生数值叶子）。
+      它不是可引用的值，所以判 `not_applicable` 是对的，**不属于**本任务要修的污染。
+    """
+    return any(
+        value is None or (isinstance(value, (dict, list, tuple)) and not value)
+        for value in occurrences
+    )
+
+
+def _is_summary_leaf(view_name: str, path: str) -> bool:
+    """该路径是不是**渲染层粒度改写**产出的摘要叶子（`resources.upgrade_space.slots_checked`）。
+
+    这是「来源登记」的第四种落点：摘要叶子由 `render.OVERVIEW_DOWNGRADES` 现场产出，
+    三态由 `render.SUMMARY_PROVENANCE`（= `assumed`）**覆盖**，所以它天然**不在**
+    `FIELD_SOURCES` 里 —— `views/resources.py` 的 `upgrade_space[].*` 登记的是 detail 层的
+    完整清单，与 overview 的三个计数字段不是同一批键。漏了这条，覆盖率断言会把
+    「由渲染层登记」误判成「漏登记」。
+    """
+    for base in render.OVERVIEW_DOWNGRADES.get(view_name) or {}:
+        if path == base or path.startswith(f"{base}."):
+            return True
+    return False
+
+
+def _uncovered_value_leaves(view_name: str, entry: dict) -> list[str]:
+    """该视角里「**有值**却查不到任何来源登记」的叶子路径（升序）。
+
+    这就是 T-34 的靶心：这些路径会落进 `render._tag()` 的 `unknown` 默认分支，再被
+    `reasons.reason_for()` 兜成 `not_applicable` / `unclassified` —— 把「我们自己算出来的
+    确定值」说成「不适用 / 不知道」（T-32 的 744 条 `not_applicable` 里混着这批）。
+    """
+    sources = VIEW_MODULES[view_name].FIELD_SOURCES
+    uncovered: list[str] = []
+    for path, occurrences in _leaf_values(entry["overview"]).items():
+        if _has_no_value(occurrences):
+            continue  # 值缺失 ⇒ unknown 是实例级规则①，与「有没有登记」无关
+        if _source_registration_of(path, sources) is not None:
+            continue
+        if _is_summary_leaf(view_name, path):
+            continue
+        uncovered.append(path)
+    return sorted(uncovered)
+
+
+def _uncovered_value_leaves_by_view(rendered: dict) -> list[str]:
+    """整个渲染结果里「有值却没登记」的叶子，形如 `"视角.路径"`（升序）。"""
+    return sorted(
+        f"{view_name}.{path}"
+        for view_name, entry in rendered["views"].items()
+        for path in _uncovered_value_leaves(view_name, entry)
+    )
+
+
+def _value_leaf_count(rendered: dict) -> int:
+    """「有值叶子」总数（守门断言的非空转前置：0 的话上面全是空断言）。"""
+    return sum(
+        1
+        for entry in rendered["views"].values()
+        for occurrences in _leaf_values(entry["overview"]).values()
+        if not _has_no_value(occurrences)
+    )
+
+
+@pytest.mark.parametrize("stem", REASON_SAMPLES)
+def test_every_value_bearing_leaf_has_a_field_source(
+    reason_samples: dict[str, dict], stem: str
+) -> None:
+    """**本任务的守门断言**：有值的叶子必须有来源登记（不只是数值叶子）。
+
+    为什么需要它：`test_views_a` / `test_views_b` 的覆盖率断言只守**数值**叶子，
+    字符串 / 枚举 / 结构性字段（`tier_violations[].kind`、`.message`、`rule.*`…）漏登记时
+    没人拦 —— 它们落进 `unknown` 默认分支，再被兜成 `not_applicable`（T-32 的 744 条里
+    混着这批）。**这条断言是「结构性字段不得再漏登记」的唯一门禁**，不许放宽成「跳过」。
+    """
+    reported = [
+        path
+        for path in _uncovered_value_leaves_by_view(reason_samples[stem])
+        if path not in VALUE_LEAF_UNREGISTERED_ALLOWLIST
+    ]
+    assert reported == [], (
+        f"{stem} 这些叶子**有值**却没在 FIELD_SOURCES 登记"
+        f"（会被兜成 not_applicable / unclassified）：{reported}"
+    )
+
+    # 非空转前置：该样本确实有大量「有值叶子」，否则上面是空断言
+    checked = _value_leaf_count(reason_samples[stem])
+    assert checked > 100, f"{stem} 只数到 {checked} 个有值叶子，样本或 walker 接错了"
+
+
+def test_every_value_bearing_leaf_has_a_field_source_on_the_spike_sample(overview: dict) -> None:
+    """同一守门断言跑主样本（`spike/kill.json`：172 个叶子，含 CPU 超载的档位违规）。"""
+    assert _uncovered_value_leaves_by_view(overview) == []
+    assert _value_leaf_count(overview) > 100
+
+
+def _stale_allowlist_entries(
+    rendered_by_stem: dict[str, dict], allowlist: dict[str, str]
+) -> list[str]:
+    """白名单里**已经不再被命中**的条目（= 该销账的债务），升序。
+
+    抽成函数是为了让「过期检测」本身可被变异自检（见
+    `test_allowlist_expiry_detector_is_not_vacuous`）—— 空表下的过期断言天生是永真的。
+    """
+    hit = {
+        path
+        for rendered in rendered_by_stem.values()
+        for path in _uncovered_value_leaves_by_view(rendered)
+    }
+    return sorted(set(allowlist) - hit)
+
+
+def test_value_leaf_allowlist_has_no_stale_entries(reason_samples: dict[str, dict]) -> None:
+    """白名单**必须会过期**：条目一旦不再被命中，要求销账。
+
+    做法与 `tests/test_attr_coverage.py::ALLOWED_BARE_IDS` 一致：豁免不免除债务，只推迟
+    还款 —— 没人销账的白名单会把守门断言悄悄变回空转（这条测试就是「还款提醒」）。
+    当前白名单为空，所以它同时证明「T-34 之后一个豁免都不需要」。
+    """
+    stale = _stale_allowlist_entries(reason_samples, VALUE_LEAF_UNREGISTERED_ALLOWLIST)
+    assert stale == [], f"这些白名单条目已经不再命中（销账）：{stale}"
+
+
+def test_allowlist_expiry_detector_is_not_vacuous(reason_samples: dict[str, dict]) -> None:
+    """**变异自检**：往白名单里塞一个「不再命中」的条目 → 过期检测必须报出来。
+
+    空表下的过期断言是**永真**的，所以必须证明检测器本身认得出过期条目
+    （与 `ALLOWED_BARE_IDS` 的 `test_b_whitelist_has_no_stale_entries` 同一思路）。
+    """
+    stale_entry = "firepower.dps.base"  # 真实存在、有值、有登记 —— 永远不会进白名单
+    bogus = {**VALUE_LEAF_UNREGISTERED_ALLOWLIST, stale_entry: "曾经以为需要豁免"}
+
+    assert _stale_allowlist_entries(reason_samples, bogus) == [stale_entry]
+    assert _stale_allowlist_entries(reason_samples, VALUE_LEAF_UNREGISTERED_ALLOWLIST) == []
+
+
+def test_container_and_element_registrations_are_both_accepted() -> None:
+    """**容器 + `[]` 元素两种落点都算「登记过」**（任务书点名：别把 `weapons` 误判成漏登记）。"""
+    # ① 元素路径由容器登记覆盖（渲染层 `_tag()` 的容器回退）
+    assert _source_registration_of("weapons[].name", {"weapons": None}) == "weapons"
+    # ② 空列表容器由元素登记覆盖（对象数组只在空的时候才是一个叶子）
+    assert (
+        _source_registration_of("weapons", {"weapons[].name": None, "weapons[].count": None})
+        == "weapons[]"
+    )
+    # ③ 整数键字典同理（等级集合由数据决定，只登记容器）
+    assert _source_registration_of("count_by_level.4", {"count_by_level": None}) == "count_by_level"
+    # ④ 真的没有对应登记 → 未登记（别靠「碰巧有值」蒙混）
+    assert _source_registration_of("weapons[].kind", {"weapons[].name": None}) is None
+    # ⑤ 反向也成立：`tier_violations[].rule.*` 由容器 `tier_violations` 接住
+    constraints_sources = VIEW_MODULES["constraints"].FIELD_SOURCES
+    hit = _source_registration_of("tier_violations[].rule.used", constraints_sources)
+    assert hit == "tier_violations"
+
+
+def test_value_leaf_guard_catches_an_injected_unregistered_leaf(overview: dict) -> None:
+    """**变异自检**：注入一个「有值但未登记」的叶子 → 守门断言必须变红（不是永真）。
+
+    与「抹掉一条规则」那条互为镜像：这条证明判据认得出「漏登记 + 有值」，
+    那条证明规则缺失真的会产出 `unclassified`。
+    """
+    sources = VIEW_MODULES["constraints"].FIELD_SOURCES
+    entry = copy.deepcopy(overview["views"]["constraints"])
+    entry["overview"]["__mutation_probe__"] = 1  # 新加字段却忘了登记 FIELD_SOURCES
+
+    assert _uncovered_value_leaves("constraints", entry) == ["__mutation_probe__"]
+    # 渲染层对它的判决就是 `unknown`（红线 N4 的默认分支）—— 正是本任务要堵的那一步
+    assert render._tag(sources, "__mutation_probe__", 1) == "unknown"
+    # 对照：未变异时同一视角是干净的（redness 来自这处注入，不是环境）
+    assert _uncovered_value_leaves("constraints", overview["views"]["constraints"]) == []
+
+
+def test_structural_violation_fields_are_assumed_not_not_applicable(overview: dict) -> None:
+    """**T-34 靶心**：`tier_violations[].kind/message/resource/rule.*` 有值 → `assumed`。
+
+    它们是「我们自己算出来的确定值」：`kind` 由 `_classify()` 二分得出、`message` 由本视角
+    拼出来、`rule.*` 是引擎规则的原样镜像 —— 此前因为没登记 `FIELD_SOURCES` 落 `unknown`，
+    再被 `reasons.py` 兜成 `not_applicable`（「把确定的事说成不适用」）。
+    """
+    constraints = overview["views"]["constraints"]
+    assert constraints["overview"]["tier_violations"], "样本应带档位违规（CPU/PG 超载）"
+
+    for path in (
+        "tier_violations[].kind",
+        "tier_violations[].message",
+        "tier_violations[].resource",
+        "tier_violations[].rule.type",
+        "tier_violations[].rule.resource",
+        "tier_violations[].rule.used",
+        "tier_violations[].rule.available",
+    ):
+        assert constraints["provenance"][path] == "assumed", (
+            f"{path} 应为 assumed（合成/枚举值），实为 {constraints['provenance'][path]!r}"
+        )
+        assert path not in constraints["unknown_reasons"], f"{path} 有值却写了原因（不稀疏）"
+
+    # 反向：分支互斥的空字段仍是 `unknown` + `not_applicable`（这是**真的**不适用）
+    for path in (
+        "tier_violations[].skill_type_id",
+        "tier_violations[].skill_name",
+        "tier_violations[].required",
+        "tier_violations[].level",
+        "tier_violations[].missing_levels",
+    ):
+        assert constraints["provenance"][path] == "unknown", path
+        assert constraints["unknown_reasons"][path] == "not_applicable", path
+
+
+def test_skill_branch_of_tier_violations_is_assumed_and_resource_fields_are_not_applicable(
+    engine: Engine, index
+) -> None:
+    """**另一分支**：技能类档位违规（`rule.type/type_id/required/level`）同样 → `assumed`。
+
+    这条钉住的是「逐键枚举 `rule.*` 会漏」：36 个 KB 样本里只有资源类违规
+    （`rule.used`/`rule.available`），技能类的 `rule.required`/`rule.level` 从未出现过 ——
+    容器登记让两种形状都被接住，而**资源那一组**在这条违规上才是真的「不适用」。
+    """
+    fit = engine.load_eft(SKILL_VIOLATION_EFT)
+    fit["character"] = {"skills": {}}  # 一个技能都没有 → 每条模块要求都成为技能违规
+    skill_ctx = ViewContext(
+        engine=engine,
+        index=index,
+        fit=fit,
+        assumptions=default_assumptions(fit, engine, index=index),
+        meta=engine.meta(),
+    )
+    original_budget = render.BUDGET_CHARS
+    render.BUDGET_CHARS = BIG_BUDGET
+    try:
+        entry = render.render_overview(skill_ctx)["views"]["constraints"]
+    finally:
+        render.BUDGET_CHARS = original_budget
+
+    kinds = {row["kind"] for row in entry["overview"]["tier_violations"]}
+    assert kinds == {"skill"}, f"前提：这套配装应只产生技能类档位违规，实为 {kinds}"
+
+    for path in (
+        "tier_violations[].kind",
+        "tier_violations[].message",
+        "tier_violations[].skill_type_id",
+        "tier_violations[].skill_name",
+        "tier_violations[].required",
+        "tier_violations[].level",
+        "tier_violations[].missing_levels",
+        "tier_violations[].rule.type",
+        "tier_violations[].rule.type_id",
+        "tier_violations[].rule.required",
+        "tier_violations[].rule.level",
+    ):
+        assert entry["provenance"][path] == "assumed", (
+            f"{path} 应为 assumed，实为 {entry['provenance'][path]!r}"
+        )
+
+    for path in (
+        "tier_violations[].resource",
+        "tier_violations[].used",
+        "tier_violations[].available",
+        "tier_violations[].shortfall",
+    ):
+        assert entry["provenance"][path] == "unknown", path
+        assert entry["unknown_reasons"][path] == "not_applicable", path
+
+
+def test_hard_violation_entries_are_assumed(engine: Engine, index) -> None:
+    """`hard_violations[].rule.*` / `.target.*` / `.message` → `assumed`（容器登记继承）。
+
+    36 个样本的 `hard_violations` 恒为 `[]`，所以这条路径此前**没有任何断言覆盖**；
+    这里现场造一条 `charge_size`（小船装大号弹药）把它钉住。
+    """
+    fit = engine.load_eft(HARD_VIOLATION_EFT)
+    fit["character"] = {"skills": derive_skill_tier(fit, engine, index=index)}
+    hard_ctx = ViewContext(
+        engine=engine,
+        index=index,
+        fit=fit,
+        assumptions=default_assumptions(fit, engine, index=index),
+        meta=engine.meta(),
+    )
+    original_budget = render.BUDGET_CHARS
+    render.BUDGET_CHARS = BIG_BUDGET
+    try:
+        rendered = render.render_overview(hard_ctx)
+    finally:
+        render.BUDGET_CHARS = original_budget
+
+    entry = rendered["views"]["constraints"]
+    assert entry["overview"]["hard_violations"], "前提：这套配装应产生一条硬违规（charge_size）"
+    assert entry["overview"]["tier_violations"] == [], "前提：硬违规不应被算成档位违规"
+
+    for path in (
+        "hard_violations[].rule.type",
+        "hard_violations[].rule.module",
+        "hard_violations[].rule.charge",
+        "hard_violations[].target.type",
+        "hard_violations[].target.index",
+        "hard_violations[].message",
+    ):
+        assert entry["provenance"][path] == "assumed", (
+            f"{path} 应为 assumed，实为 {entry['provenance'][path]!r}"
+        )
+    assert entry["unknown_reasons"] == {}, "硬违规视角不该有 unknown（空清单容器已是 assumed）"
+
+
+NOT_APPLICABLE_LEAVES: dict[str, tuple[str, ...]] = {
+    "f1-hecate-killmail": (
+        "constraints.tier_violations[].level",
+        "constraints.tier_violations[].missing_levels",
+        "constraints.tier_violations[].required",
+        "constraints.tier_violations[].skill_name",
+        "constraints.tier_violations[].skill_type_id",
+        "firepower.application.explosion_radius_m",
+        "firepower.application.explosion_velocity_mps",
+        "firepower.dps.drone",
+        "firepower.dps.fighter",
+        "firepower.range.max_range_m",
+    ),
+    "f4-non-hecate": (
+        "constraints.tier_violations[].level",
+        "constraints.tier_violations[].missing_levels",
+        "constraints.tier_violations[].required",
+        "constraints.tier_violations[].skill_name",
+        "constraints.tier_violations[].skill_type_id",
+        "firepower.dps.fighter",
+        "firepower.weapons[].ammo_name",
+        "stability.cap_sensitivity[].depletes_in_s",
+        "stability.capacitor.depletes_in_s",
+        "stability.consumables.paste_endurance_s",
+        "stability.consumables.paste_per_cycle",
+    ),
+    "f5-no-mwd": (
+        "constraints.tier_violations[].level",
+        "constraints.tier_violations[].missing_levels",
+        "constraints.tier_violations[].required",
+        "constraints.tier_violations[].skill_name",
+        "constraints.tier_violations[].skill_type_id",
+        "firepower.dps.fighter",
+        "firepower.weapons[].ammo_name",
+        "stability.cap_sensitivity[].depletes_in_s",
+        "stability.capacitor.depletes_in_s",
+        "stability.consumables.paste_endurance_s",
+        "stability.consumables.paste_per_cycle",
+    ),
+    "f26-carrier-fighter": (
+        "firepower.ammo_endurance_s",
+        "firepower.application.explosion_radius_m",
+        "firepower.application.explosion_velocity_mps",
+        "firepower.application.optimal_signature_radius_m",
+        "firepower.application.tracking_rad_s",
+        "firepower.damage_split.em",
+        "firepower.damage_split.explosive",
+        "firepower.damage_split.kinetic",
+        "firepower.damage_split.thermal",
+        "firepower.dph",
+        "firepower.dps.drone",
+        "firepower.overload.delta.range_m",
+        "firepower.overload.off.range_m",
+        "firepower.overload.on.range_m",
+        "firepower.range.max_range_m",
+        "firepower.range.optimal_m",
+        "firepower.range.optimal_plus_2falloff_m",
+        "firepower.range.optimal_plus_falloff_m",
+        "firepower.weapons",
+        "stability.cap_sensitivity[].depletes_in_s",
+        "stability.capacitor.depletes_in_s",
+        "stability.consumables.ammo_cycle_s",
+        "stability.consumables.ammo_endurance_s",
+        "stability.consumables.ammo_module",
+        "stability.consumables.ammo_rounds",
+        "stability.consumables.paste_endurance_s",
+        "stability.consumables.paste_per_cycle",
+    ),
+}
+"""四个守门样本上 `not_applicable` 桶的**全量预期清单**（T-34 之后的形状）。
+
+为什么钉死清单而不是只断言「⊆ 条件字段表」：`not_applicable` 的含义是**真的不适用**，
+所以清单里每一条都必须能被一句人话解释（没有导弹 / 没有无人机 / 没有 paste /
+电容稳定 / 违规条目缺的是另一分支的字段）。宽口径会把这批污染重新吞回去 ——
+T-32 的 744 条里就有 144 条是「有值却说不适用」的合成值（`tier_violations[].kind` 等）。
+
+清单只与 fixture 的**结构**绑定（哪套配装有没有导弹/无人机/paste、档位违规是哪一类），
+与 SDE 数值无关；fixture 是只读输入，所以它会一直成立。若某天真变了，正确的反应是
+**逐条重新解释**这份清单，而不是放宽断言。
+"""
+
+
+@pytest.mark.parametrize("stem", REASON_SAMPLES)
+def test_not_applicable_bucket_holds_only_conditional_fields(
+    reason_samples: dict[str, dict], stem: str
+) -> None:
+    """**`not_applicable` 桶里只剩真条件字段**（两个方向一起钉）。
+
+    方向一：清单**逐条相等**（多一条少一条都要有人解释）；
+    方向二：每条 `not_applicable` 的**值必须是「没有值」**（`None` 或空容器）——
+    「有值却说不知道 / 不适用」正是本任务要消灭的那类错误。
+    """
+    rendered = reason_samples[stem]
+    actual: list[str] = []
+    for view_name, entry in rendered["views"].items():
+        values = _leaf_values(entry["overview"])
+        for path, reason in entry["unknown_reasons"].items():
+            if reason != "not_applicable":
+                continue
+            actual.append(f"{view_name}.{path}")
+            assert _has_no_value(values[path]), (
+                f"{stem}.{view_name}.{path} 有值 {values[path]!r} 却判 not_applicable —— "
+                "该登记 FIELD_SOURCES（合成值 → None → assumed）"
+            )
+
+    assert sorted(actual) == list(NOT_APPLICABLE_LEAVES[stem]), (
+        f"{stem} 的 not_applicable 清单变了：\n"
+        f"  多：{sorted(set(actual) - set(NOT_APPLICABLE_LEAVES[stem]))}\n"
+        f"  少：{sorted(set(NOT_APPLICABLE_LEAVES[stem]) - set(actual))}"
+    )

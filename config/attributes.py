@@ -253,6 +253,21 @@ ATTR_SUPPORT_FIGHTER_SLOTS_USED: int = -61   # fighterSupportSlotsUsed —— �
 ATTR_FIGHTER_TUBES_USED: int = -62           # fighterTubesUsed —— 已占用的发射管（**按中队计**：1 个中队 = 1 管，不按架数）
 
 # =============================================================================
+# 九·附二、引擎**永不提供**的派生负 ID（T-32 补登，红线 N12）
+#
+#     这一类同样是 dogma pass 4 的派生值，但 **`Index.attribute(id)` 返回 None**
+#     （SDE 属性表里没有这条记录）→ 一律记作「派生，SDE 无记录」：
+#     单位列只给语义单位、`unit_id` 留空（不猜），名字取引擎侧语义名。
+#     判别方法只有一条：`Index.attribute(id)` 查不到 → 属这一类。
+#
+#     `-43 ehp` / `-12 damageDps` / `-1 alignTime` 已在第九节（同样 `unit_id = None`
+#     = 「派生，SDE 无记录」）。本组只补此前**未登记**的那个：
+#     `-70 maxTargets` —— 它被 `project/provenance.py`（手工覆盖 unknown）与
+#     `project/reasons.py`（`engine_omits` 清单）同时引用，裸写就是 N12 违规。
+# =============================================================================
+ATTR_MAX_TARGETS: int = -70    # maxTargets（**派生，SDE 无记录**）—— 实测三轴恒为 0：引擎没在算它
+
+# =============================================================================
 # 十、属性元数据表：attribute_id -> (SDE canon 名, 物理单位标签, ESI unit_id)
 #     - 名字取 ESI `name` 原样（大小写、复数都不改），负 ID 用引擎侧语义名。
 #     - 单位是**换算之后**的单位（秒 / 米 / hp / GJ ...）；`None` 表示 ESI 与
@@ -420,6 +435,8 @@ ATTRIBUTES: dict[int, tuple[str, str | None, int | None]] = {
     ATTR_LIGHT_FIGHTER_SLOTS_USED: ("fighterLightSlotsUsed", "count", None),
     ATTR_SUPPORT_FIGHTER_SLOTS_USED: ("fighterSupportSlotsUsed", "count", None),
     ATTR_FIGHTER_TUBES_USED: ("fighterTubesUsed", "count", None),
+    # ---- 引擎永不提供的派生负 ID（T-32 补登；Index.attribute(-70) = None）----
+    ATTR_MAX_TARGETS: ("maxTargets", "count", None),  # 派生，SDE 无记录（单位按同族 maxLockedTargets 取 count）
 }
 
 # =============================================================================

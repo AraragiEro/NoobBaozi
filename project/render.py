@@ -25,7 +25,8 @@ render_detail(ctx, *, view, fields=None) -> dict
    本身（同一个对象，不是副本、不是重新推导）。
 4. **provenance 逐字段打标**（红线 N3 / N4）：每个 overview 叶子都必须有一条三态，
    没有映射就是 `unknown`，不猜、不拿默认值冒充；**本次计算里值为 `None` 也是
-   `unknown`**（T-27 实例级覆盖，见下文「三个容易踩的点」第一条）。
+   `unknown`**（T-27 实例级覆盖）；**本次配装里值随模块状态（online ↔ active）变化的
+   属性也是 `assumed`**（T-30 实例级规则②，见下文「状态敏感性探测」）。
 
 provenance 的三条约定（六视角**同一套口径**）
 --------------------------------------------
@@ -45,8 +46,8 @@ provenance 的三条约定（六视角**同一套口径**）
   ——「值不可信，三态却说可信」是本轮实测的根因性缺陷（`f4` 的 `dph` 是 `None`，
   旧口径却报 `assumed`：`-11` 在表里是 `assumed`，与这一次有没有值无关）。
   provenance 本质上是**按配装**的性质，不是按属性的常量（PROGRESS §3 第 167 条）。
-  统一走 `provenance.resolve(来源属性, 值)`；数组元素路径上只要**任一元素**缺值就按缺值
-  处理（一条路径只有一个标签，不能比它最弱的那个出现更自信）。
+  统一走 `provenance.resolve(来源属性, 值, state_sensitive=…)`；数组元素路径上只要
+  **任一元素**缺值就按缺值处理（一条路径只有一个标签，不能比它最弱的那个出现更自信）。
 - **`FIELD_SOURCES` 里值为 `None` 且字段有值 → `assumed`**：那是「多属性合成值」
   （弹匣时长、耗时差、升级空间是否装得下…）。它不是「无法推断」（`unknown` 的定义），
   而是「建立在假设之上算出来的」，所以判 `assumed`。**注意与上一条的区别**：`None` 在
@@ -59,6 +60,32 @@ provenance 的三条约定（六视角**同一套口径**）
 - **provenance 的键空间会随数据形态变形**（PROGRESS §3 第 84 条）：同一条路径在空列表下
   是 `hard_violations`、非空时是 `hard_violations[].rule.type`——下游按路径取值前先确认
   形状，别把它当稳定 schema。
+
+状态敏感性探测（`state_sensitive_attrs()`，T-30 / 实例级规则②）
+--------------------------------------------------------------
+第一层静态表只能回答「同一属性在不同配装上是否稳定」，**按配装**的差异必须实测探测。
+本层不再枚举任何「模块族名单」（那会随版本过时），只做两次对照计算：
+
+1. **全 online**（`{"all": "online"}`）与 **全 active**（`{"all": "active"}`）各算一次，
+   走 `ctx.calculate_variant()` → **复用 `ViewContext` 的实例缓存**（同一份 ctx 再渲染
+   一次，一次引擎调用都不会多）；
+2. 逐属性比较两次的 `ship.attributes`：**值不同（或只在一侧出现）→ 该属性进入
+   `set[int]` 敏感性集合**；整船一次都没变 → **空集**；
+3. 集合交给 `provenance.resolve(..., state_sensitive=…)`：只把 `measured` 升格成
+   `assumed`，**不降级、不改判 `unknown`**，且「值缺失 ⇒ `unknown`」仍然优先。
+
+三条成本护栏：
+
+- **最多多算 2 次**（online / active），且这 2 次的结果留在 ctx 缓存里，不按视角重算；
+- **没有 active 能力的模块 → 直接空集、零额外计算**：判据是基础变体里引擎给的
+  `item.max_state`（`online`/`offline` 的模块即使把 `state` 写成 `active` 也会被夹回
+  `online`，实测差异恒为空）——这是**引擎数据**，不是模块名单；
+- 探测失败不吞异常：`fit` 缺 `ship` 之类的问题照常抛出（宁可炸，不要假装「没有敏感性」）。
+
+为什么必须这样（而不是「识别盾抗模块」）：`271`–`274` 只是**当前样本里**能观察到的
+一类；`4 mass` / `552 signatureRadius`（MWD 推力质量加成 / 信号膨胀）、`-47/-50`
+（主动盾修）、`-44`（装甲修）全都吃同一个状态轴。「值变了没有」这一条判据把整类问题
+一次性覆盖，且与模块清单解耦。
 
 overview 的粒度改写（`OVERVIEW_DOWNGRADES`，软件设计 §7.5）
 ----------------------------------------------------------
@@ -103,6 +130,26 @@ confidence 答「这个值的口径可信到什么程度（A / C / E）」——
 
 消费方必须先按叶子路径补齐默认值再查表（见 `project/confidence.py` 的稀疏表约定）。
 
+unknown 的原因（`views[<view>]["unknown_reasons"]`，T-32 / 字段规格 §0.2.1）
+----------------------------------------------------------------------------
+三态**不变**，但每个 `unknown` 叶子额外带一条原因（同一个 `unknown` 其实装着「输入不完整 /
+不适用 / 无唯一答案 / 引擎永不提供」四种完全不同的情况，处置方式相反）：
+
+```json
+"views": {"firepower": {"overview": {...},
+                        "provenance": {"dph": "unknown"},
+                        "unknown_reasons": {"dph": "input_incomplete"}}}
+```
+
+**稀疏平行表**（与 `confidence` 同构）：键集合恒等于 `provenance` 里值为 `unknown` 的路径
+集合——不多（非 unknown 不写）不少（每个 unknown 必有原因）；空表输出 `{}`，键恒在。
+判定优先级与全部规则在 `project/reasons.py`（flag → 条件字段 → 引擎永不提供 → 多值并列 →
+兜底 `unclassified`）；本层只负责**筛出 unknown 路径**、查出它的来源属性
+（`_source_of()`，与三态同一个查表路径）、并把本视角**归位后的 flag** 递过去。
+
+`unclassified` 是兜底且**出现即缺陷**：渲染层照实输出（不隐瞒），由
+`tests/test_render.py` 对四个真实样本断言数量为 0。
+
 预算护栏（软件设计 §7.5）
 -------------------------
 `budget.chars` = `len(json.dumps(views)) + len(json.dumps(modes))`（顶层
@@ -116,13 +163,16 @@ from __future__ import annotations
 
 import copy
 import json
-from typing import Callable, Mapping
+from typing import AbstractSet, Callable, Mapping
 
+from evefit.config import attributes as _a
+from evefit.engine import scenarios
 from evefit.project import confidence as _confidence
 from evefit.project import diagnostics as _diagnostics
 from evefit.project import provenance as _provenance
+from evefit.project import reasons as _reasons
 from evefit.project.views import ViewContext, available_views, build_view
-from evefit.project.views.base import ship_attributes
+from evefit.project.views.base import BASE, ship_attributes
 from evefit.project.views.loader import VIEW_MODULES, load_views
 
 BUDGET_CHARS: int = 17000
@@ -145,6 +195,13 @@ BUDGET_CHARS: int = 17000
   不能再省——能省掉的只是「重复声明这个是 A」的 4,870 chars；
 - 因此**默认路径 `degraded == False`**（14,083 < 17,000）；只有更大的配装才会触发降级。
   实测见 `tests/test_render.py::test_default_budget_fits_real_sample`。
+- **T-32 复测（本任务新增 `unknown_reasons` 之后，同一份样本 `spike/kill.json`）**：
+  `views` **14,681 chars**（T-18 之后又长出 `fighter_bay.*` / `feasible` / `over_budget.*`
+  等叶子，172 个叶子）→ 加上 `unknown_reasons`（18 条 `unknown`，**+979 chars**）为
+  **15,660**，再加 `modes` **341** → 合计 **16,001 chars**，仍 < 17,000（余 **999**，6.2%）。
+  **预算值本轮不上调**：17,000 依然装得下，抬阈值只会削弱护栏；但余量已从 20% 掉到 6%，
+  下一次「再加一个出口」时**必须重新按 `ceil(实测 × 1.2 ÷ 1000) × 1000` 重定**，
+  不要靠放宽断言过关。
 
 测试用 `monkeypatch` 把它调小来验证降级路径（所以函数里必须**在调用时**读这个模块常量）。
 """
@@ -282,12 +339,14 @@ def _tag(
     sources: Mapping[str, int | None],
     path: str,
     value: object = _VALUE_NOT_GIVEN,
+    state_sensitive: AbstractSet[int] = frozenset(),
 ) -> str:
     """一个叶子路径（+ 本次计算里的值）→ 三态。
 
     查表顺序：
     0. **没传值** → 旧口径（纯静态表，保持既有调用方语义不变）；**传了值** → 交
-       `provenance.resolve(来源, 值)` 判，于是「值缺失 ⇒ `unknown`」的实例级规则生效；
+       `provenance.resolve(来源, 值, state_sensitive=…)` 判，于是「值缺失 ⇒ `unknown`」
+       与「状态敏感 ⇒ `assumed`」两条实例级规则同时生效；
     1. 整条路径命中 `FIELD_SOURCES`（含 `[]` 元素约定路径）→ 用它的来源；
     2. 否则若路径在数组元素里，退回**容器**路径的来源（容器路径能覆盖整张列表，
        例如 `weapons: None` 指的是「整张武器清单都是合成值」）；
@@ -297,13 +356,18 @@ def _tag(
 
     **没有映射时永远 `unknown`，与值无关**：缺映射是「这个字段没登记来源」，比缺值更
     根本；不能因为碰巧有值就冒充实测。
+
+    `state_sensitive` 是**本次配装**状态敏感性探测的产物（`state_sensitive_attrs()`），
+    只有来源属性落在集合里才置位：`measured` 会被升格成 `assumed`，其它态不动
+    （见 `provenance.resolve()`）。
     """
     source = _source_of(sources, path)
     if source is _MISSING_SOURCE:
         return "unknown"
     if value is _VALUE_NOT_GIVEN:
         return _state_of(source)
-    return _provenance.resolve(source, value)
+    sensitive = source is not None and int(source) in state_sensitive
+    return _provenance.resolve(source, value, state_sensitive=sensitive)
 
 
 def _field_sources(view: str) -> dict[str, int | None]:
@@ -313,16 +377,22 @@ def _field_sources(view: str) -> dict[str, int | None]:
     return dict(sources) if isinstance(sources, dict) else {}
 
 
-def _provenance_block(overview: dict, view: str) -> dict[str, str]:
+def _provenance_block(
+    overview: dict, view: str, state_sensitive: AbstractSet[int] = frozenset()
+) -> dict[str, str]:
     """逐字段打标：**每个 overview 叶子**都有一条（覆盖率 100%）。
 
     T-27 起把**该路径本次的值**一并交给 `_tag()` → `provenance.resolve()`：值缺失的叶子
-    强制 `unknown`，覆盖静态表的结论（实例级规则）。数组元素路径的「缺值」口径见
+    强制 `unknown`，覆盖静态表的结论（实例级规则①）。数组元素路径的「缺值」口径见
     `_occurrence_value()`。
+
+    T-30 起再把**本次配装的状态敏感性集合**传下去（实例级规则②）：来源属性在集合里的
+    叶子，`measured` 升格成 `assumed`。集合由 `state_sensitive_attrs(ctx)` 在每次渲染里
+    **只算一次**，六个视角共用，不按视角重算。
     """
     sources = _field_sources(view)
     return {
-        path: _tag(sources, path, _occurrence_value(occurrences))
+        path: _tag(sources, path, _occurrence_value(occurrences), state_sensitive)
         for path, occurrences in _leaf_values(overview, "", {}).items()
     }
 
@@ -349,17 +419,150 @@ def _confidence_block(overview: dict, view: str) -> dict[str, str]:
 
 
 # =============================================================================
+# 一·C、unknown 的原因（T-32：稀疏平行表，只在 unknown 路径上出现）
+# =============================================================================
+
+
+def _reason_block(
+    view: str,
+    provenance: Mapping[str, str],
+    flags: list[dict],
+) -> dict[str, str]:
+    """`unknown_reasons` **稀疏表**：只给 `provenance == "unknown"` 的叶子写原因。
+
+    口径（与 `_confidence_block()` 的稀疏约定同构，见 `project/reasons.py`）：
+
+    - **键集合 == `provenance` 里值为 `unknown` 的路径集合**（不多不少）：每个 `unknown`
+      都必须有原因，非 `unknown` 的路径**不出现**（默认情况不需要被写出来）；
+    - 判定顺序由 `reasons.reason_for()` 负责（flag → 条件字段 → 引擎永不提供 → 并列 → 兜底），
+      本层只负责把三样输入递过去：**路径**、**该路径在 `FIELD_SOURCES` 里的来源属性**
+      （与 `_tag()` 用同一个 `_source_of()`，所以容器 / 整数键回退也一致）、
+      **本视角归位后的 flag id**（`weapon_damage_zero` 这类 flag 直接解释某字段）；
+    - `_MISSING_SOURCE`（没登记映射）与 `None`（合成值）都按「没有来源属性」传下去，
+      于是这类路径只能靠路径规则或兜底，不会凭空得到 `engine_omits`。
+
+    空表输出 `{}`——**键恒在**，schema 稳定；消费方按 `provenance` 的 unknown 路径查表。
+    """
+    sources = _field_sources(view)
+    flag_ids = [str(flag["id"]) for flag in flags if isinstance(flag, dict) and flag.get("id")]
+    reasons: dict[str, str] = {}
+    for path, state in provenance.items():
+        if state != "unknown":
+            continue  # 稀疏：只有 unknown 才需要原因
+        source = _source_of(sources, path)
+        attribute_id = None if source is _MISSING_SOURCE or source is None else int(source)
+        reasons[path] = _reasons.reason_for(path, view=view, source=attribute_id, flags=flag_ids)
+    return reasons
+
+
+# =============================================================================
+# 一·B、状态敏感性探测（T-30：实例级规则②，按配装实测，不枚举模块族）
+# =============================================================================
+
+STATE_ONLINE: str = "online"
+"""`{"all": "online"}` 变体的状态名（`engine/scenarios.py` 的合法 `state`）。"""
+
+STATE_ACTIVE: str = "active"
+"""`{"all": "active"}` 变体的状态名（同上）。"""
+
+STATE_VARIANT_PREFIX: str = "state:"
+"""临时变体的缓存 key 前缀（`ViewContext.calculate_variant` 的槽名）。
+
+**不能**与 `views.base.VARIANTS` 的预置名冲突（`base`/`overload`/`offline`），
+`calculate_variant()` 会直接 `ValueError` 拒绝重名。
+"""
+
+ACTIVE_CAPABLE_MAX_STATES: frozenset[str] = frozenset({"active", "overload"})
+"""引擎回 `item.max_state` 落在这些值上，模块才**可能**受 active 状态影响。
+
+实测依据（本 SDE）：`state` 会被引擎按 `max_state` 夹住——一块 `Damage Control II`
+在输入里写 `active`，计算结果里仍是 `online`；而 `online`-only 配装的
+「全 online」与「全 active」两次属性表**逐键相等**。所以这是「有没有 active 能力」
+的**引擎数据判据**，不是模块族名单（名单会随版本过时，这条不会）。
+"""
+
+
+def _state_variant_attrs(ctx: ViewContext, state: str) -> dict[int, float]:
+    """「所有已装模块统一设为 `state`」这一次计算的船体属性（物理值）。
+
+    - 变体由 `engine/scenarios.build_variant()` 造（`{"all": state}` 语义只在 L2 定义，
+      本层不另写一套状态改写规则）；
+    - 结果走 `ctx.calculate_variant()` → **留在 `ViewContext` 的实例缓存里**，同一份 ctx
+      再渲染一次不会重算；也正因为如此，六个视角共用这一次结果。
+    """
+    key = f"{STATE_VARIANT_PREFIX}{state}"
+    spec = {"name": key, "states": {scenarios.ALL_KEY: state}, "mode_id": None}
+    fit = scenarios.build_variant(ctx.fit, spec)
+    return ship_attributes(ctx.calculate_variant(key, fit))
+
+
+def _has_active_capable_module(ctx: ViewContext) -> bool:
+    """整船有没有「可能受 active 影响」的模块（只看引擎回的 `max_state`）。
+
+    基础变体本来就会被视角算出来（`ctx.variant(BASE)` 命中同一份缓存），所以这个前置
+    检查**不产生额外引擎调用**；它挡掉的是「纯被动配装上还去算 online/active」这种
+    纯浪费。返回 `False` 时敏感性集合必然是空集（模块被 `max_state` 夹住，两次结果相同）。
+    """
+    calculation = ctx.variant(BASE)
+    for item in calculation.get("items") or []:
+        if isinstance(item, dict) and item.get("max_state") in ACTIVE_CAPABLE_MAX_STATES:
+            return True
+    return False
+
+
+def state_sensitive_attrs(ctx: ViewContext) -> set[int]:
+    """本次配装里「值随模块状态（online ↔ active）变化」的属性 ID 集合（T-30）。
+
+    做法就是**实测探测**，不含任何模块族名单：
+
+    1. 全 online / 全 active 各算一次（最多 **2** 次额外计算，且进 ctx 缓存）；
+    2. 逐属性比较：两次的值不同（**或只在一侧出现**——例如护盾回充 `-47` 只在 active
+       那一侧存在）→ 该属性在**这次配装**里是状态敏感的；
+    3. 整船一次都没变 → **空集**（静态表结论原样生效）。
+
+    比较用精确不等（不做容差）：判「敏感」只会把 `measured` 推向更保守的 `assumed`，
+    所以宁可多判；反过来才是有害的方向。
+
+    整船没有 active 能力的模块 → 前置检查直接返回空集，**零额外计算**
+    （见 `_has_active_capable_module()`）。
+
+    **已知范围**：只比较**船体**属性（`ship.attributes`），装备条目级属性不参与。实测
+    36 个 KB 样本里「只在装备条目里变」的属性只有 `-45/-47/158/160`，**四个都是
+    `assumed`**，所以当前不漏判任何 `measured`；要覆盖到「装备条目级 measured 属性」时，
+    把 `items[*].attributes` 一起并进比较即可（不增加引擎调用）。
+
+    Returns:
+        属性 ID 集合（`set[int]`）。空集 = 本次配装看不到任何状态敏感性。
+    """
+    if not _has_active_capable_module(ctx):
+        return set()
+
+    online = _state_variant_attrs(ctx, STATE_ONLINE)
+    active = _state_variant_attrs(ctx, STATE_ACTIVE)
+    return {
+        attribute_id
+        for attribute_id in set(online) | set(active)
+        if online.get(attribute_id) != active.get(attribute_id)
+    }
+
+
+# =============================================================================
 # 二、顶层 modes 块（T3D/T3C 的横切能力）
 # =============================================================================
 
-MODE_EHP_ATTR: int = -43
-"""`-43` 混合 EHP（与 `survivability.ehp_mixed` 同一个派生值）。"""
+MODE_EHP_ATTR: int = _a.ATTR_EHP
+"""`-43` 混合 EHP（与 `survivability.ehp_mixed` 同一个派生值；常量表 `ATTR_EHP`）。"""
 
-MODE_DPS_ATTR: int = -12
-"""`-12` 秒伤（与 `firepower.dps.base` 同一个派生值）。"""
+MODE_DPS_ATTR: int = _a.ATTR_DAMAGE_DPS
+"""`-12` 秒伤（与 `firepower.dps.base` 同一个派生值；常量表 `ATTR_DAMAGE_DPS`）。"""
 
-MODE_ALIGN_ATTR: int = -1
-"""`-1` 对齐时间（秒；与 `mobility.align_time_s` 同一个派生值）。"""
+MODE_ALIGN_ATTR: int = _a.ATTR_ALIGN_TIME
+"""`-1` 对齐时间（秒；与 `mobility.align_time_s` 同一个派生值；常量表 `ATTR_ALIGN_TIME`）。
+
+三条都是**派生负 ID**（引擎 pass 4 输出，`Index.attribute()` 查不到 → 「派生，SDE 无记录」）。
+T-32 起不再裸写数字（红线 N12），一律从 `config/attributes.py` 引用；这里保留具名常量，
+是因为它们表达的是「`modes` 块取哪三个数」这件事，比在字典字面量里写 `_a.ATTR_EHP` 更好读。
+"""
 
 MODE_DIGITS: int = 3
 """模式数值的小数位（字段规格 §10.2：对比看趋势，3 位足够且省预算）。"""
@@ -554,17 +757,28 @@ def _collect_flags(
 
 
 def _view_entry(
-    name: str, ctx: ViewContext, attributed: dict[str, list[dict]], *, scope: str
+    name: str,
+    ctx: ViewContext,
+    attributed: dict[str, list[dict]],
+    *,
+    scope: str,
+    state_sensitive: AbstractSet[int] = frozenset(),
 ) -> dict:
-    """一个视角的 `{overview, provenance, confidence, flags}`。
+    """一个视角的 `{overview, provenance, unknown_reasons, confidence, flags}`。
 
     视角自己回 `flags`（契约允许，当前六视角恒为空）；这里与归位来的诊断合并，
     视角自己的在前——诊断只在渲染层算一次，视角层不许重复算。
 
     `scope="overview"` 时先按 `OVERVIEW_DOWNGRADES` 把逐条明细换成摘要，**再**按改写过
-    的 overview 打 provenance / confidence（provenance 的键空间必须与返回的 overview
-    逐叶子一致；confidence 是**稀疏表**，只含其中非 A 的项）；摘要叶子用
+    的 overview 打 provenance / unknown_reasons / confidence（三张表的键空间必须与返回的
+    overview 逐叶子一致；后两张都是**稀疏表**，只含其中非默认 / 非全量的项）；摘要叶子用
     `SUMMARY_PROVENANCE` 覆盖三态。`scope="detail"` 时原样返回完整列表。
+
+    `unknown_reasons` 必须**在 flags 归位之后**算：`weapon_damage_zero` 这类 flag 是
+    `dph` 判 `input_incomplete` 的**唯一**依据（规则 1 优先），拿不到它就只剩路径推断。
+
+    `state_sensitive` 是**本次配装**的状态敏感性属性集合（`state_sensitive_attrs()`），
+    由调用方算一次后传给每个视角（T-30 实例级规则②）。
     """
     view = build_view(name, ctx)
     overview = view.get("overview") or {}
@@ -574,14 +788,16 @@ def _view_entry(
     if scope == "overview":
         overview, overrides = _apply_overview_downgrades(overview, name)
 
-    provenance = _provenance_block(overview, name)
+    provenance = _provenance_block(overview, name, state_sensitive)
     provenance.update(overrides)
+    flags = own_flags + attributed.get(name, [])
 
     return {
         "overview": overview,
         "provenance": provenance,
+        "unknown_reasons": _reason_block(name, provenance, flags),
         "confidence": _confidence_block(overview, name),
-        "flags": own_flags + attributed.get(name, []),
+        "flags": flags,
     }
 
 
@@ -760,11 +976,12 @@ def render_overview(ctx: ViewContext, *, views: tuple[str, ...] | None = None) -
 
         - `meta`：`sde_build` / `engine_version` / `spec_version` /
           `assumptions`（= `ctx.assumptions`）/ `scope="overview"`；
-        - `views`：`{视角名: {"overview", "provenance", "confidence", "flags"}}`，
-          顺序 = 传入顺序（默认 `VIEW_ORDER`）；overview 里的逐条明细按
+        - `views`：`{视角名: {"overview", "provenance", "unknown_reasons", "confidence",
+          "flags"}}`，顺序 = 传入顺序（默认 `VIEW_ORDER`）；overview 里的逐条明细按
           `OVERVIEW_DOWNGRADES` 换成**摘要**（如 `resources.upgrade_space`），
-          完整清单走 `render_detail`；`confidence` 是**稀疏表**（缺省 `A`，只含非 A 项，
-          键集是 `provenance` 的子集）；
+          完整清单走 `render_detail`；`unknown_reasons` 与 `confidence` 都是**稀疏表**
+          （前者只在 `provenance == "unknown"` 的路径上出现，后者缺省 `A`、只含非 A 项，
+          键集都是 `provenance` 的子集）；
         - `modes`：T3D/T3C 的三模式对比（**恒存在**，无模式时 `[]`）；每项
           `{mode_id, mode_name, ehp_mixed, dps_base, align_time_s}`；
         - `flags`：**不属于本次渲染视角**的诊断兜底桶（通常为空；不丢诊断）；
@@ -780,7 +997,12 @@ def render_overview(ctx: ViewContext, *, views: tuple[str, ...] | None = None) -
         raise KeyError(f"这些视角未注册：{unknown}；已注册：{list(available_views())}")
 
     attributed, residual = _collect_flags(ctx, targets)
-    rendered = {name: _view_entry(name, ctx, attributed, scope="overview") for name in targets}
+    # T-30：状态敏感性只探测一次（最多多算 2 次），六个视角共用同一个集合。
+    state_sensitive = state_sensitive_attrs(ctx)
+    rendered = {
+        name: _view_entry(name, ctx, attributed, scope="overview", state_sensitive=state_sensitive)
+        for name in targets
+    }
     modes = _modes_block(ctx)
     budget = _apply_budget(rendered, residual, modes)
 
@@ -809,7 +1031,8 @@ def render_detail(
             `confidence` 同口径裁剪（confidence 只保留被请求字段下的**非 A 项**）。
 
     Returns:
-        `{"meta", "view", "overview", "provenance", "confidence", "flags", "missing"}`。
+        `{"meta", "view", "overview", "provenance", "unknown_reasons", "confidence", "flags",
+        "missing"}`。
         `missing` 恒存在（没有缺字段时是空列表），便于调用方稳定解析。
 
     Raises:
@@ -819,10 +1042,17 @@ def render_detail(
         raise KeyError(f"视角 {view!r} 未注册；已注册：{list(available_views())}")
 
     attributed, _residual = _collect_flags(ctx, (view,))
-    entry = _view_entry(view, ctx, attributed, scope="detail")
+    entry = _view_entry(
+        view,
+        ctx,
+        attributed,
+        scope="detail",
+        state_sensitive=state_sensitive_attrs(ctx),
+    )
 
     overview = entry["overview"]
     provenance = entry["provenance"]
+    unknown_reasons = entry["unknown_reasons"]
     confidence = entry["confidence"]
     missing: list[str] = []
 
@@ -831,6 +1061,11 @@ def render_detail(
         overview, missing = _select(overview, requested)
         provenance = {
             path: state for path, state in provenance.items() if _covered(path, requested)
+        }
+        unknown_reasons = {
+            path: reason
+            for path, reason in unknown_reasons.items()
+            if _covered(path, requested)
         }
         confidence = {
             path: level for path, level in confidence.items() if _covered(path, requested)
@@ -841,6 +1076,7 @@ def render_detail(
         "view": view,
         "overview": overview,
         "provenance": provenance,
+        "unknown_reasons": unknown_reasons,
         "confidence": confidence,
         "flags": entry["flags"],
         "missing": missing,
@@ -856,4 +1092,5 @@ __all__ = [
     "TRUNCATE_TO",
     "render_detail",
     "render_overview",
+    "state_sensitive_attrs",
 ]

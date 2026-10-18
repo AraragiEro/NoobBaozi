@@ -20,6 +20,10 @@
    真名 + `unit_id` + displayName 对拍（`Subsystem Slots` / `Maximum Flight Time`），
    `281` 进缩放表（毫秒，`7000.0 → 7.0`），`1367` **不缩放**（槽位件数），
    常量数 144 → 146、缩放 10 → 11、毫秒 8 → 9。
+9. T-32 补登 1 个常量（`-70 maxTargets`，**派生，SDE 无记录**：`Index.attribute(-70)=None`），
+   并把「常量数」从三处硬编码（`== 146`）改成**由表推导**：`audit()` 计数 ==
+   `len(CONSTANT_NAMES)` == `len(ATTRIBUTES)` 自洽断言 + `CONSTANT_COUNT_LEDGER` 显式增量台账
+   （129 → 141 → 144 → 146 → 147）。以后补常量只需在台账里加一行。
 
 测试规范：无网络、无磁盘 fixture；只用标准库 + pytest（开发规范 §1 / §5.1 T1）。
 """
@@ -533,12 +537,8 @@ def test_audit_constant_count_grew_by_exactly_the_new_fighter_ids() -> None:
     report = attribute_dict.audit()
     assert report["consistent"] is True
     assert report["attribute_count"] == report["constant_count"]
-    assert report["constant_count"] == (
-        BASELINE_CONSTANT_COUNT
-        + T07_ADDED_CONSTANT_COUNT
-        + T13_ADDED_CONSTANT_COUNT
-        + T23_ADDED_CONSTANT_COUNT
-    )
+    # 常量总数**由表推导**（不再硬编码数字）：自洽 + 显式增量台账，见第 10 节。
+    assert_constant_count_is_derived_from_the_table()
     # T-07 补的全是"不缩放"的项；T-13 / T-23 之后缩放表 = 9 毫秒 + 2 ×1000
     assert report["scaled_count"] == 11
     assert report["milli_count"] == 9
@@ -683,7 +683,8 @@ def test_t13_scale_table_grew_by_two_millisecond_entries() -> None:
 def test_t13_audit_counts_and_consistency() -> None:
     report = attribute_dict.audit()
     assert report["consistent"] is True
-    assert report["constant_count"] == T13_TOTAL_CONSTANT_COUNT + T23_ADDED_CONSTANT_COUNT == 146
+    # 常量总数由表推导（T-32 起不再写 `== 146`：那个数字每补一个常量就要改三处）
+    assert_constant_count_is_derived_from_the_table()
     assert report["attribute_count"] == report["constant_count"]
     # T-13 增量：常量 +3（1272 / 56 / 73）、缩放 +2（73 / -3）；T-23 再 +1 缩放（281）
     assert report["scaled_count"] == 11
@@ -792,7 +793,8 @@ def test_t23_explosion_delay_is_milliseconds_and_subsystems_are_not_scaled() -> 
 def test_t23_audit_counts_and_consistency() -> None:
     report = attribute_dict.audit()
     assert report["consistent"] is True
-    assert report["constant_count"] == report["attribute_count"] == 146
+    # 常量总数由表推导（T-32 起不再写 `== 146`）
+    assert_constant_count_is_derived_from_the_table()
     assert report["scaled_count"] == 11
     assert report["milli_count"] == 9
     assert report["kilo_count"] == 2
@@ -800,4 +802,126 @@ def test_t23_audit_counts_and_consistency() -> None:
     assert report["duplicate_values"] == []
     assert report["orphan_constants"] == []
     assert report["orphan_rows"] == []
+
+
+# ---------------------------------------------------------------------------
+# 10. T-32：补 1 个常量（-70 `maxTargets`）+ **常量总数改由表推导**
+#
+# 为什么不再硬编码数字（PROGRESS §3 第 201 条）：此前有三处断言写着「常量数 = 146」，
+# 于是「补常量」与「守护测试」互相卡住 —— 补一个常量要同时改三处，忘一处就红；那正是
+# `-70` 迁移被挡住整整两轮的直接原因。现在改成两条互补的断言：
+#
+# ① **自洽**：`audit()` 的计数 == `len(CONSTANT_NAMES)` == `len(ATTRIBUTES)`（表推导）；
+# ② **显式增量台账**：`CONSTANT_COUNT_LEDGER` 把每轮补登一条条写出来（可审计的增量说明）。
+#
+# 补常量时只需在台账里加一行，断言自动跟着走；**忘了加**会让总数对不上 —— 那正是我们要的
+# （「多出来的常量」不该被静默接受）。
+# ---------------------------------------------------------------------------
+
+T32_CONSTANTS: dict[str, int] = {"ATTR_MAX_TARGETS": -70}
+"""T-32 补登的 1 个常量：`-70 maxTargets`（**派生，SDE 无记录**；`Index.attribute(-70)` = None）。"""
+
+T32_ADDED_CONSTANT_COUNT = 1
+"""T-32 补进 `-70` 一个常量（147 = 146 + 1）。"""
+
+CONSTANT_COUNT_LEDGER = (
+    BASELINE_CONSTANT_COUNT  # 129  P0-3 台账
+    + T07_ADDED_CONSTANT_COUNT  # +12 战斗机族（T-07）
+    + T13_ADDED_CONSTANT_COUNT  # +3  droneBandwidthUsed / chargeRate / duration（T-13）
+    + T23_ADDED_CONSTANT_COUNT  # +2  maxSubSystems / explosionDelay（T-23）
+    + T32_ADDED_CONSTANT_COUNT  # +1  maxTargets（T-32）
+)
+"""各轮补登的**显式增量台账**（129 → 141 → 144 → 146 → 147）。
+
+这条链是「常量总数」的**唯一**书面依据：数字不再散落在三处断言里，而是集中在台账 + 表。
+"""
+
+
+def assert_constant_count_is_derived_from_the_table() -> None:
+    """三项断言：表自身自洽（不写死数字）、`audit()` 与表一致、总数 == 增量台账。
+
+    抽成函数供三处引用（T-07 / T-13 / T-23 的计数测试），避免又出现「同一个数字抄三份」。
+    """
+    report = attribute_dict.audit()
+
+    # ① 表自洽：常量名 → 值 → 元数据行三方一致（其余用例单独钉，这里只钉计数口径）
+    assert report["constant_count"] == len(CONSTANT_NAMES) > 0
+    assert report["attribute_count"] == len(attributes.ATTRIBUTES)
+    assert report["constant_count"] == report["attribute_count"]
+    assert report["consistent"] is True
+
+    # ② 增量台账：总数必须与「基线 + 各轮补登」逐项对上（补了却忘了记账 → 这里红）
+    assert report["constant_count"] == CONSTANT_COUNT_LEDGER, (
+        f"常量数 {report['constant_count']} != 台账 {CONSTANT_COUNT_LEDGER}："
+        "补常量后请在 CONSTANT_COUNT_LEDGER 里加一行增量（别改断言）"
+    )
+
+
+def test_constant_count_is_derived_from_the_table() -> None:
+    """常量总数**不再硬编码**：改由「表自洽 + 增量台账」两条断言共同决定。"""
+    assert_constant_count_is_derived_from_the_table()
+    # 台账本身也要有非空转前置（否则等式两边都可能是同一个写死的数字）
+    assert BASELINE_CONSTANT_COUNT >= 100
+    assert CONSTANT_COUNT_LEDGER == 147, f"台账落点应为 147，实为 {CONSTANT_COUNT_LEDGER}"
+
+
+def test_constant_count_guard_is_not_vacuous(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**变异自检**：多出一行没有常量名的元数据时，上面那条自洽断言必须变红。
+
+    没有这条，「常量数由表推导」可能只是把 146 换成了一个永远成立的同义反复。
+    """
+    monkeypatch.setitem(attributes.ATTRIBUTES, 987654, ("mutationProbe", "x", None))
+
+    with pytest.raises(AssertionError):
+        assert_constant_count_is_derived_from_the_table()
+
+
+def test_t32_max_targets_constant_is_registered() -> None:
+    """`-70 maxTargets` 已迁入常量表：值 / 元数据行 / 语义名 / 不缩放，四条都要对上。"""
+    assert attributes.ATTR_MAX_TARGETS == T32_CONSTANTS["ATTR_MAX_TARGETS"] == -70
+    assert attributes.ATTR_MAX_TARGETS in attributes.ATTRIBUTES, "没有元数据行（audit 会报孤儿常量）"
+
+    name, unit, unit_id = attributes.ATTRIBUTES[attributes.ATTR_MAX_TARGETS]
+    assert name == "maxTargets", f"语义名应为 maxTargets，实为 {name!r}"
+    assert unit == "count"  # 与同族 maxLockedTargets(192) 同口径
+    assert unit_id is None, "派生负 ID 没有 ESI unit_id（「SDE 无记录」，不猜）"
+    # 真的登记了：名字不是兜底名 `attr_-70`
+    assert attribute_dict.name_of(-70) == "maxTargets"
+    assert attribute_dict.unit_of(-70) == "count"
+    # 目标个数不需要换算：不得进缩放表（进了会把 8 变成 0.008）
+    assert attribute_dict.is_scaled(attributes.ATTR_MAX_TARGETS) is False
+    assert _exactly(attribute_dict.to_physical(attributes.ATTR_MAX_TARGETS, 8), 8.0)
+
+
+def test_t32_max_targets_is_a_derived_id_absent_from_the_sde() -> None:
+    """`Index.attribute(-70)` = None —— 这就是「派生，SDE 无记录」的实证（也是它要单独登记的原因）。"""
+    from evefit.config.paths import db_path
+    from evefit.sde.index import Index
+
+    try:
+        index = Index.open(db_path())
+    except Exception as exc:  # noqa: BLE001 —— 索引库缺失是环境问题，跳过而非失败
+        pytest.skip(f"SDE 索引库不可用，跳过派生 ID 取证：{exc}")
+
+    try:
+        assert index.attribute(attributes.ATTR_MAX_TARGETS) is None, (
+            "-70 竟然出现在 SDE 属性表里：那么它不该被当成「派生负 ID」登记"
+        )
+        # 对照组：正 ID 查得到（证明上面那条不是「索引库打不开」造成的假绿）
+        assert index.attribute(attributes.ATTR_MAX_LOCKED_TARGETS) is not None
+    finally:
+        index.close()
+
+
+def test_t32_provenance_side_is_pinned() -> None:
+    """补登之后 provenance 侧的三条事实：`-70` 仍 unknown、仍是手工覆盖、不再有未登记项。"""
+    from evefit.project import provenance as P
+
+    assert P.tag(attributes.ATTR_MAX_TARGETS) == "unknown"
+    assert attributes.ATTR_MAX_TARGETS in P._MANUAL_OVERRIDES
+    audit = P.audit()
+    assert audit["unregistered"] == [], (
+        f"常量表已登记，不该再有「未登记」的 unknown 项：{audit['unregistered']}"
+    )
+    assert audit["consistent"] is True
 

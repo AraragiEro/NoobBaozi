@@ -415,6 +415,41 @@ BARE_MUTATIONS = (
 
 
 # ---------------------------------------------------------------------------
+# T-30：实例级 provenance「升格合法 / 降级禁止」的自证 payload
+# ---------------------------------------------------------------------------
+
+
+def _prov_payload(attr_id, declared):
+    """形态 B：一个 TypedValue 叶子，带指定 source_attr 与声明的 provenance。"""
+    return {
+        "views": {
+            "survivability": {
+                "overview": {
+                    "layers": {
+                        "shield_hp": {"value": 780.0, "provenance": declared,
+                                      "unit": "HP", "source_attr": attr_id}
+                    }
+                },
+                "provenance": {},
+            }
+        }
+    }
+
+
+def pick_attrs(oracle):
+    """从权威表里挑一个 measured 属性与一个 assumed 属性（不硬编码）。"""
+    candidates = [263, 265, 9, 14, 13, 12, 1137, 48, 49, 11, 15, 102, 101]
+    measured = assumed = None
+    for attr in candidates:
+        tag = oracle.tag(attr)
+        if tag == "measured" and measured is None:
+            measured = attr
+        elif tag == "assumed" and assumed is None:
+            assumed = attr
+    return measured, assumed
+
+
+# ---------------------------------------------------------------------------
 # T-23 新字段：feasible / over_budget / dph=null 的自证 payload
 # ---------------------------------------------------------------------------
 
@@ -806,6 +841,34 @@ def main() -> int:
 
     print()
     print("=" * 78)
+    print("B5) provenance 实例级升格 / 降级（T-30）")
+    print("=" * 78)
+    measured_attr, assumed_attr = pick_attrs(oracle)
+    print(f"  取样属性：measured={measured_attr}（tag={oracle.tag(measured_attr) if measured_attr else None}）"
+          f" / assumed={assumed_attr}（tag={oracle.tag(assumed_attr) if assumed_attr else None}）")
+    grade_ok = True
+    if measured_attr is not None:
+        # 升格：静态表 measured → 本次 assumed（合法）
+        up = ra.check_provenance_instances("f1", _prov_payload(measured_attr, "assumed"),
+                                           spec, oracle)
+        ok_up = not up
+        grade_ok = grade_ok and ok_up
+        print(f"  升格 measured→assumed：缺陷 {len(up)} 条  {'✅ 合法（不报）' if ok_up else '❌ 误报'}")
+    else:
+        print("  升格：找不到 measured 属性，跳过")
+    if assumed_attr is not None:
+        # 降级：静态表 assumed → 本次 measured（禁止）
+        down = ra.check_provenance_instances("f1", _prov_payload(assumed_attr, "measured"),
+                                             spec, oracle)
+        ok_down = any(d.category == "provenance 错误" for d in down)
+        grade_ok = grade_ok and ok_down
+        print(f"  降级 assumed→measured：命中 {[d.category for d in down] or '（未命中）'}  "
+              f"{'✅ 正确报缺陷' if ok_down else '❌ 漏检'}")
+    else:
+        print("  降级：找不到 assumed 属性，跳过")
+
+    print()
+    print("=" * 78)
     print("C) 形状样例落盘（给实现方对照）：形态A 与形态B 各一份")
     print("=" * 78)
     sample_path = HERE / "out" / "views-样例.json"
@@ -831,13 +894,13 @@ def main() -> int:
     print("=" * 78)
     passed = (baseline_ok and all_ok and bare_ok and bare_mutations_ok
               and conf_ok and repair_ok and repair_mut_ok
-              and feasible_ok and feasible_mut_ok and dph_ok)
+              and feasible_ok and feasible_mut_ok and dph_ok and grade_ok)
     print(f"自测结论：{'全部通过' if passed else '存在失败项'}"
           f"（形态B 合规零缺陷={baseline_ok} / 形态B 注入全中={all_ok} / "
           f"形态A 合规零缺陷={bare_ok} / 形态A 注入全中={bare_mutations_ok} / "
           f"稀疏confidence 注入全中={conf_ok} / repair 合规={repair_ok} / repair 注入全中={repair_mut_ok} / "
           f"feasible 合规={feasible_ok} / feasible 注入全中={feasible_mut_ok} / "
-          f"dph=null 契约={dph_ok}）")
+          f"dph=null 契约={dph_ok} / provenance 升降级={grade_ok}）")
     print("=" * 78)
     return 0 if passed else 1
 

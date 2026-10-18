@@ -20,6 +20,16 @@
    字段规格 §9 要求标注，故附一句 `needs_implant_basis` 文字依据。
 
 `flags` 恒为 `[]`：可疑点由渲染层统一算一次（`diagnostics.evaluate`）。
+
+provenance 归属（`FIELD_SOURCES`，T-34 补齐）
+-------------------------------------------
+本视角**没有一个字段是属性直读**：违规条目是引擎 `validate()` 的结构化结论 + 本视角的
+归一化（`kind` / `message` / `shortfall` 都是我们算的），门槛画像是 12 个 `requiredSkill*`
+的聚合，植入体判据是「全 5 档重算」的推断 → 一律登记 `None`（渲染层判 `assumed`：
+「依赖我们的计算逻辑」，既不是某个输入属性的实测，也不是「不可知」）。
+
+`tier_violations` 额外登记**容器**：`rule.*` 的键集合由引擎**按违规类型**决定，逐键枚举
+会在引擎新增一种违规时静默退回 `unknown`；容器来源会被 `render._tag()` 继承给每个元素。
 """
 
 from __future__ import annotations
@@ -71,8 +81,29 @@ SKILL_REQUIREMENT_PAIRS: tuple[tuple[int, int], ...] = (
 # =============================================================================
 
 FIELD_SOURCES: dict[str, int | None] = {
-    # 违规条目是引擎判定的结构化结论（不是单一属性直读）→ 来源 None
+    # 违规清单是引擎 `validate()` 的结构化结论 + 本视角的归一化 → 整块来源 None。
+    #
+    # **登记容器而不是逐个 `[]` 元素**（T-34）：`rule.*` 的键集合由引擎按违规类型决定
+    # （resource 类 → `type`/`resource`/`used`/`available`；skill 类 → `type`/`type_id`/
+    # `required`/`level`），逐键枚举会在引擎新增一种违规类型时**静默退回 `unknown`**
+    # —— 那正是 T-32 里 `tier_violations[].rule.*` 被兜成 `not_applicable` 的成因
+    # （「把确定的事说成不知道」与「说成不适用」是同一类错误）。
+    # 渲染层 `render._tag()` 的容器回退会把容器来源继承给每个元素子字段。
     "hard_violations": None,
+    "tier_violations": None,
+    # 条目里**不是属性直读**的元素字段逐条登记（路标：让「这条为什么是 assumed」有据可查，
+    # 同时钉住「哪些字段是我们合成的」）：
+    # `kind` 由 `_classify()` 二分得出；`message` 由 `_tier_resource()` / `_tier_skill()`
+    # 拼出来；`resource` 是引擎规则里的资源**名**（枚举，不是属性值）；
+    # `skill_type_id` / `skill_name` 是引擎规则里的 type_id 与查表得来的技能名。
+    "tier_violations[].kind": None,
+    "tier_violations[].resource": None,
+    "tier_violations[].message": None,
+    "tier_violations[].skill_type_id": None,
+    "tier_violations[].skill_name": None,
+    # 数值键仍逐条登记：数值叶子覆盖率断言要求**精确路径**（容器回退不参与那条断言），
+    # 且它们与容器同源（引擎规则里的 used/available/required/level；另一类违规由
+    # `_tier_base()` 先置 None）。
     "tier_violations[].used": None,
     "tier_violations[].available": None,
     "tier_violations[].shortfall": None,
@@ -89,9 +120,12 @@ FIELD_SOURCES: dict[str, int | None] = {
 }
 """overview 点路径 → 来源属性 ID（渲染层据此打 provenance）。
 
-三条约定：
+四条约定：
 
 1. **违规条目**是引擎判定的结构化结论（不是单一属性直读）→ 来源 `None`；
+   **登记容器**（`tier_violations`）让 `rule.*` 这类「键集合由引擎决定」的元素子字段
+   有来源可继承 —— 这正是 T-34 修的欠账（此前它们查不到映射，落 `unknown` 后被
+   `reasons.py` 兜成 `not_applicable`，把「我们自己算出来的确定值」说成了「不适用」）；
 2. **字符串 / 布尔叶子**（`needs_implant`、`needs_implant_basis`）不是属性直读，
    登记 `None`——渲染层判 `assumed`（多属性/多规则合成），**不冒充** `measured`，
    也不让它们落成 `unknown`（红线 N4 的另一半：登记过就得有来源，没有就说没有）；

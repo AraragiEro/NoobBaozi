@@ -51,6 +51,10 @@ FIXTURE_DIR = HERE / "fixtures"
 DEFAULT_OUT = HERE / "out"
 
 PROVENANCE_VALUES = ("measured", "assumed", "unknown")
+
+#: 保守度排序（越大越保守）。T-30：实例级**只允许往更保守的方向升格**，
+#: `measured → assumed` 合法（配装状态敏感），`assumed → measured` 是降级，禁止。
+PROVENANCE_CONSERVATISM = {"measured": 0, "assumed": 1, "unknown": 2}
 #: 可信度等级（与 provenance 正交，见 Lead 裁决 2026-10-18）
 CONFIDENCE_VALUES = ("A", "B", "C", "D", "E")
 
@@ -1534,11 +1538,23 @@ def check_provenance_instances(case: str, payload: dict, spec: dict,
                         expected = oracle.tag(leaf.source_attr)
                         if expected is not None:
                             break
-                if expected is not None and declared != expected:
-                    defects.append(Defect(
-                        "provenance 错误", "medium", case, f"{view_name}.{path}",
-                        f"{expected}（静态表 tag）", declared,
-                        "有值时 provenance 必须跟随静态表"))
+                if expected is None or declared == expected:
+                    continue
+                declared_rank = PROVENANCE_CONSERVATISM.get(declared)
+                expected_rank = PROVENANCE_CONSERVATISM.get(expected)
+                if declared_rank is None or expected_rank is None:
+                    continue
+                if declared_rank > expected_rank:
+                    # **T-30 合法升格**：实例级比静态表更保守，例如某属性随模块
+                    # state（active/online）变化 → 静态表判 measured，本次判 assumed。
+                    continue
+                # 到这里只剩「降级」（如 assumed → measured）：禁止
+                defects.append(Defect(
+                    "provenance 错误", "medium", case, f"{view_name}.{path}",
+                    f"{expected}（静态表 tag），或更保守的 assumed/unknown",
+                    declared,
+                    "禁止降级：静态表判 assumed/unknown 时不得声称 measured"
+                    "（实例规则只允许往更保守方向升格）"))
     return defects
 
 

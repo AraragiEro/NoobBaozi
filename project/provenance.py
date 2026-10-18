@@ -25,9 +25,19 @@
    属性不可知」，而「f4 有带弹药武器却零伤害」会被误解成「`-11` 这个属性永远依赖假设」。
    静态表回答「同一属性在不同配装上是否稳定」，`resolve()` 回答「这一次计算里它到底有没有
    值」；两者的先后顺序是**实例先行**（值都没有，就谈不上依赖不依赖假设）。
-   > 本轮只做第一层实例规则（**值缺失 ⇒ `unknown`**）。「按配装检测状态敏感族」（例如
-   > 有盾抗模块时护盾共振率必须 `assumed`）是第二层，留待下一轮；静态表目前把 `271`–`274`
-   > 判为 `assumed` 已是保守方向。
+3. **实例级规则②：状态敏感性**（本模块 `resolve()` 的 `state_sensitive` 参数，T-30 落地）：
+   **按本次配装实测探测** —— 同一份配装额外算「全 online」与「全 active」两次，逐属性比
+   较，**值不同就说明该属性在这一次配装里依赖模块状态** → `assumed`（覆盖静态表的
+   `measured`）。**不枚举模块族**：盾抗模块让 `271`–`274` 变、MWD 让 `4`/`552` 变、
+   主动回血让 `-47`/`-50` 变……都由「值变了没有」自动发现，模块名单会随版本过时、这条不会。
+   顺序上有两条硬约束：① **只升格 `measured → assumed`**，`assumed` / `unknown` 一个都不许
+   被这条降级或改判（`unknown` 升成 `assumed` 同样是把「不可知」说成「有假设支撑」）；
+   ② **缺值优先**：值 `None` 已经判 `unknown`，状态敏感性不得把它改回 `assumed`。
+   > 现状（本表生成日）：`271`–`274` 已被第 14 轮的多样本实验保守判成 `assumed`，所以这条
+   > 规则在当前样本上**没有可见变化**——它是给「静态表把状态敏感属性判成 `measured`」这类
+   > 情形准备的（`271`–`274` 若被收紧回 `measured`，无盾抗模块的船应保持 `measured`，
+   > 有盾抗模块的船由本条覆盖成 `assumed`）。探测逻辑与成本护栏在
+   > `project/render.py::state_sensitive_attrs()`。
 
 三态的定义
 ----------
@@ -96,10 +106,11 @@ DERIVED_SAMPLE: str = "f1-hecate-killmail.eft (killmail 139246907, Hecate T3D) +
 #: 样本清单（每个样本各自跑三轴，取并集判定；由脚本重写）。
 DERIVED_SAMPLES: tuple[str, ...] = ("f1-hecate-killmail.eft (killmail 139246907, Hecate T3D)", "f4-non-hecate.json (killmail 139254056, Loki T3C)", "f15-battleship-raven.json (Raven, 弹道 + 导弹)", "构造样本：Nyx + 6×Templar II + 6×Gungnir II + 3×Cenobite II + 5×Hornet II")
 
-#: `-70` = `maxTargets`（实测恒为 0，引擎没有在算它）。字段规格未登记、
-#: `config/attributes.py` 也还没有常量（该文件本轮为只读），故常量就近定义在这里，
-#: 并在 `audit()` 里露出。等 `config/attributes.py` 可写时应迁过去（红线 N12）。
-ATTR_MAX_TARGETS_UNVERIFIED: int = -70
+#: `-70` = `maxTargets`（实测恒为 0，引擎没有在算它）。**常量表已登记**
+#: （T-32 起 `config/attributes.py::ATTR_MAX_TARGETS`，红线 N12）：本模块只经 `_a` 引用，
+#: 不再裸写数字。别名保留是为了不打断 `confidence.py` / `derive_provenance.py` 里既有的
+#: 文字引用，新代码请直接用 `ATTR_MAX_TARGETS`。
+ATTR_MAX_TARGETS_UNVERIFIED: int = _a.ATTR_MAX_TARGETS
 
 # =============================================================================
 # 一、measured：至少在一个样本里出现，且在出现它的每个样本上三轴都不变
@@ -327,25 +338,45 @@ def tag(attribute_id: int) -> Provenance:
 
 
 INSTANCE_MISSING_RULE: str = (
-    "实例级覆盖：值缺失（None）→ unknown，覆盖属性级三态表；值非 None 时仍按静态表"
+    "实例级覆盖①：值缺失（None）→ unknown，覆盖属性级三态表；值非 None 时按下面的规则继续判"
 )
-"""实例级规则的**唯一说明文案**（`audit()` 原样回显，便于排查与对拍文档）。"""
+"""实例级规则①的**唯一说明文案**（`audit()` 原样回显，便于排查与对拍文档）。"""
+
+INSTANCE_STATE_RULE: str = (
+    "实例级覆盖②（状态敏感性）：本次配装里全 online 与全 active 的值不同 → assumed"
+    "（覆盖静态表的 measured）；只升格 measured → assumed，不降级、不改判 unknown，"
+    "且缺值规则①优先"
+)
+"""实例级规则②（状态敏感性）的**唯一说明文案**（`audit()` 原样回显）。
+
+探测由 `project/render.py::state_sensitive_attrs()` 做（最多多算 2 次），本模块只负责
+「拿到这个布尔标记以后怎么判三态」——把判定集中在一处，避免渲染层各写一套。
+"""
 
 
-def resolve(attribute_id: int | None, value: object) -> Provenance:
-    """**实例级**三态：本次计算里的值 → 三态（两层模型的第二层，T-27）。
+def resolve(
+    attribute_id: int | None, value: object, *, state_sensitive: bool = False
+) -> Provenance:
+    """**实例级**三态：本次计算里的值 → 三态（两层模型的第二层，T-27 / T-30）。
 
     顺序就是优先级，别调换：
 
-    1. **`value is None` → `unknown`**（实例级覆盖，本轮唯一新增规则）。
+    1. **`value is None` → `unknown`**（实例级规则①，T-27）。
        值都没有（引擎没给这个键 / 投影层判定缺值）就谈不上「依赖假设」还是「实测稳定」，
        三态只能落在 `unknown`。这条**覆盖**静态表：`dph` 的来源属性 `-11` 在表里是
        `assumed`，但 f4 的 `dph` 是 `None`（有弹药却零伤害，突变模块数据缺失）→
        `dph` 必须报 `unknown`，不能报「有假设支撑」。同一条也覆盖所有「引擎没给这个键」
        的情形（例：纯炮台配装的 `application.explosion_velocity_mps` 是 `None`，
        不能因为它映射到 `653 aoeVelocity`（表里 `measured`）就说这个值实测稳定）。
-    2. 其余情况按静态表：来源属性 `None` = **多属性合成值** → `assumed`；
-       有属性 ID → `tag(attribute_id)`（表外默认 `unknown`）。
+       **规则①优先于规则②**：值缺失时 `state_sensitive` 不产生任何作用（否则会把
+       `unknown` 改回 `assumed`，等于用「有假设支撑」冒充「不可知」）。
+    2. 来源属性 `None` = **多属性合成值** → `assumed`（与状态敏感性无关）。
+    3. **`state_sensitive=True` 且静态表判 `measured`** → `assumed`（实例级规则②，T-30）：
+       「全 online」与「全 active」两次计算里这个属性的值不同，说明它这次配装下依赖模块
+       状态，静态表（多属性级）说的「实测稳定」在这一份配装上不成立。
+       **只有 `measured → assumed` 这一个方向**：`assumed` 不会变（不降级成 `measured`），
+       `unknown` 也不会变（不许把「表外 / 不可知」说成「有假设支撑」）。
+    4. 其余情况按静态表：有属性 ID → `tag(attribute_id)`（表外默认 `unknown`）。
 
     **`0.0` 是值，不是缺失**：只有 `None` 触发覆盖，零伤害照实走静态表（零本身可以是
     真实事实，缺值不是）。
@@ -353,6 +384,8 @@ def resolve(attribute_id: int | None, value: object) -> Provenance:
     Args:
         attribute_id: 来源属性 ID；`None` 表示「合成值 / 指不到单一来源属性」。
         value: 本次计算里该字段的值（**原样传**，本函数只判 `is None`，不取值、不换算）。
+        state_sensitive: 该属性在**本次配装**里是否被探测为「值随模块状态（online ↔ active）
+            变化」。默认 `False` = 完全沿用旧逻辑（不传该标志时行为与 T-27 一致）。
 
     Returns:
         `measured` / `assumed` / `unknown`。
@@ -361,7 +394,10 @@ def resolve(attribute_id: int | None, value: object) -> Provenance:
         return "unknown"
     if attribute_id is None:
         return "assumed"
-    return tag(int(attribute_id))
+    state = tag(int(attribute_id))
+    if state_sensitive and state == "measured":
+        return "assumed"
+    return state
 
 
 def typed(attribute_id: int, raw: float) -> contracts.TypedValue:
@@ -392,12 +428,15 @@ def audit() -> dict:
     - `measured` / `assumed` / `unknown`：各类 ID 个数（`unknown` 含手工覆盖项）；
     - `derived_at` / `sample` / `samples`：这张表是哪天、用哪些样本跑出来的（可复跑性）；
     - `overrides`：手工覆盖的 ID → 理由（必须逐条有据）；
-    - `instance_missing_rule`：实例级覆盖的说明（**值缺失 → `unknown`**；T-27 起静态表
+    - `instance_missing_rule`：实例级规则①的说明（**值缺失 → `unknown`**；T-27 起静态表
       不再是唯一裁决者，排查「值没了却报 assumed」时先看这条）；
+    - `instance_state_rule`：实例级规则②的说明（**状态敏感性 → `assumed`**，只升格
+      `measured → assumed`；T-30 起「同一属性在无盾抗模块的船上可以 measured」这件事由
+      按配装探测决定，排查「静态表说 measured 却报了 assumed」时先看这条）；
     - `overlap`：重叠 ID（正常为空）；
-    - `unnamed`：在分类表里但 `attribute_dict` 没有名字来源的 ID（正常为空；`-70`
-      除外——它本来就未登记，单列在 `unregistered`）；
-    - `unregistered`：`unknown` 类里尚未进 `config/attributes.py` 的 ID；
+    - `unnamed`：在分类表里但 `attribute_dict` 没有名字来源的 ID（正常为空）；
+    - `unregistered`：`unknown` 类里尚未进 `config/attributes.py` 的 ID（T-32 起 `-70`
+      已登记 `ATTR_MAX_TARGETS`，故正常也是空）。
     - `consistent`：上述错误项全空时为 True。
     """
     overlap = sorted(
@@ -418,6 +457,7 @@ def audit() -> dict:
         "samples": list(DERIVED_SAMPLES),
         "overrides": {aid: why for aid, why in sorted(_MANUAL_OVERRIDES.items())},
         "instance_missing_rule": INSTANCE_MISSING_RULE,
+        "instance_state_rule": INSTANCE_STATE_RULE,
         "overlap": overlap,
         "unnamed": [aid for aid in unnamed if aid not in UNKNOWN_ATTRS],
         "unregistered": unregistered,
