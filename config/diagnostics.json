@@ -39,6 +39,18 @@
       "message": "无人机带宽 {bandwidth_total} Mbit/s 全部空闲，未携带任何无人机"
     },
     {
+      "id": "drone_bandwidth_exceeded",
+      "view": "resources",
+      "enabled": true,
+      "message": "无人机全部放飞需要 {bandwidth_required} Mbit/s，总带宽只有 {bandwidth_total}（超 {over} Mbit/s）"
+    },
+    {
+      "id": "launched_drones_exceeded",
+      "view": "resources",
+      "enabled": true,
+      "message": "无人机全部放飞共 {drone_count} 架，同时放飞上限 {max_launched} 架（超 {over} 架）"
+    },
+    {
       "id": "no_propulsion",
       "view": "mobility",
       "enabled": true,

@@ -22,6 +22,15 @@
 正确值（载机停在机库不参战，T-28 改造实验已证）。它存在的唯一目的，是让下游知道
 「`weapons[]` 里没有战斗机、`dps.fighter` 是 0」**并非**数据缺失。
 
+**无人机两条上限（T-1/5）**：`drone_bandwidth_exceeded`（带宽）与 `launched_drones_exceeded`
+（同时放飞架数）是**两个量纲**，互不替代、可以同时命中。判据一律取**引擎** `validate=True`
+的 `resource` 规则（`drone_bandwidth` / `launched_drones`），我方不另算一份阈值。
+为什么必须拆成两条：实测 `Dominix + 5×Warrior II + 1×Ogre II` 是「带宽 50/125 够、架数 6/5 超」
+—— 合成一条会输出「带宽超」且 `over = 50 − 125 = −75`，自相矛盾。
+**口径上限（必须在报告与字段说明里说清）**：fit 文本与引擎 `Layout` 都**没有「已放飞」这个
+维度**（只有 `drone_bay`），所以这两条算的都是「**如果全部放飞**会怎样」，不是实时状态；
+这不是缺陷，是输入形态决定的上限。f7（Legion）就是 25 架 / 175 Mbit/s 对 50 总带宽。
+
 还有 `state_exclusive`（T-43；前身是 T-35 的 `propulsion_illegal_stack` → T-38 的
 `propulsion_state_conflict`）：推进类模块**同一时刻只能启用其一**。它把两段判据统一成
 **一条**输出 —— ① 引擎原生 `max_group … limit=active` 超限（同组，如 AB+MWD）、
@@ -638,6 +647,113 @@ def _rule_drone_bandwidth_idle(facts: _Facts) -> dict | None:
     }
 
 
+DRONE_BANDWIDTH_RESOURCE: str = "drone_bandwidth"
+"""引擎校验规则里的**带宽**维度名（`{"type": "resource", "resource": "drone_bandwidth"}`）。"""
+
+LAUNCHED_DRONES_RESOURCE: str = "launched_drones"
+"""引擎校验规则里的**同时放飞架数**维度名。与带宽是两个量纲，**不合并成一条 flag**。"""
+
+
+def _engine_resource_rule(facts: _Facts, resource: str) -> dict | None:
+    """引擎 `validate()` 里某条 `resource` 违规（`{used, available, …}`）。
+
+    **判据只认引擎**：不拿 `drone.bandwidth.used` 自己比一次大小 —— 那会造出第二份口径
+    （slot 公式两份实现的教训）。双方实测一致（Dominix 6×Ogre II：我方 150 / 引擎 150），
+    但一致性靠「只读一处」保证，不靠两处各自算对。
+
+    走 `engine.validate(fit)` 而不是 `calculate(fit, validate=True)`：与
+    `_engine_active_group_conflicts` 同一条口径（只取 `violations`，不重算整套属性），
+    也让「什么都不给的桩引擎」自然返回空列表（缺值用例不该被迫真算变体）。
+
+    `facts.ctx.fit` 已经**注入了技能档**（`api` 层做的）：不注入的话
+    `launched_drones.available` 会是 0（零技能假象，实测过）。
+    """
+    for violation in facts.ctx.engine.validate(facts.ctx.fit):
+        if not isinstance(violation, dict):
+            continue
+        rule = violation.get("rule")
+        if not isinstance(rule, dict):
+            continue
+        if rule.get("type") == "resource" and rule.get("resource") == resource:
+            return rule
+    return None
+
+
+def _non_negative(value: object) -> float | None:
+    """规则里的 `used` / `available` → `float`（`bool`/非数/负数/NaN 一律 `None`，不补 0）。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if number != number or number < 0.0:  # `x != x` 只对 NaN 为真（不引入 math 依赖）
+        return None
+    return number
+
+
+def _rule_drone_bandwidth_exceeded(facts: _Facts) -> dict | None:
+    """机舱里的无人机**全部放飞**所需带宽 > 船体总带宽（引擎 `drone_bandwidth` 维度）。
+
+    口径（T-1/5 实测，别读错）：本产品**没有「已放飞」这个维度**（fit 文本与引擎 `Layout`
+    都只有 `drone_bay`），所以这条算的是「**如果全部放飞**会超多少」，不是「现在已经放了
+    `bandwidth_required`」。f7（Legion）的准确读法是「25 架全放需要 175 Mbit/s，总带宽只有 50」。
+
+    判据是引擎规则命中，**不是**我方 `drone.bandwidth.used` 与总量比大小；`available` 取引擎
+    给的值（留空也照实输出，缺省时不补 0）。
+
+    与 `drone_bandwidth_idle` **互斥**：idle 的判据是「带宽 > 0 且机舱里 0 架」，这条的前提是
+    机舱里有无人机 —— 天然互斥，但这里再显式挡一次（防止将来改了 idle 判据后两条并存）。
+    """
+    rule = _engine_resource_rule(facts, DRONE_BANDWIDTH_RESOURCE)
+    if rule is None:
+        return None
+    required = _non_negative(rule.get("used"))
+    total = _non_negative(rule.get("available"))
+    if required is None or total is None:
+        return None  # 引擎没给能用的数 → 不下结论（N4）
+    over = required - total
+    if over <= 0.0:
+        return None
+    if facts.drones_carried() <= 0:
+        return None  # 机舱里 0 架却报「带宽超」= 自相矛盾，宁可不出
+
+    return {
+        "bandwidth_total": units.fmt(total),
+        "bandwidth_required": units.fmt(required),
+        "over": units.fmt(over),
+        "source": "engine:drone_bandwidth",
+    }
+
+
+def _rule_launched_drones_exceeded(facts: _Facts) -> dict | None:
+    """机舱里的无人机**全部放飞**的架数 > 同时放飞上限（引擎 `launched_drones` 维度）。
+
+    这是**架数**口径，与带宽无关：`Dominix + 5×Warrior II + 1×Ogre II` 带宽 50 / 125 完全够，
+    但 6 架 > 上限 5 架 —— 只有这条规则命中。`available` 是 `maxActiveDrones`（引擎算的，
+    受技能/模块影响；实测 all4 档 = 5）。
+
+    与 `drone_bandwidth_exceeded` **互不替代**：两条可以同时命中（f7 = 25 架 / 175 带宽）。
+    """
+    rule = _engine_resource_rule(facts, LAUNCHED_DRONES_RESOURCE)
+    if rule is None:
+        return None
+    required = _non_negative(rule.get("used"))
+    limit = _non_negative(rule.get("available"))
+    if required is None or limit is None:
+        return None
+    count = int(round(required))
+    max_launched = int(round(limit))
+    over = count - max_launched
+    if over <= 0:
+        return None
+    if facts.drones_carried() <= 0:
+        return None
+
+    return {
+        "drone_count": count,
+        "max_launched": max_launched,
+        "over": over,
+    }
+
+
 def _rule_no_propulsion(facts: _Facts) -> dict | None:
     """没有任何推进模块（无脱离能力）。"""
     if not facts.index_available:
@@ -1092,6 +1208,8 @@ _HANDLERS: dict[str, Callable[[_Facts], dict | None]] = {
     "empty_hardpoint": _rule_empty_hardpoint,
     "hardpoint_violation": _rule_hardpoint_violation,
     "drone_bandwidth_idle": _rule_drone_bandwidth_idle,
+    "drone_bandwidth_exceeded": _rule_drone_bandwidth_exceeded,
+    "launched_drones_exceeded": _rule_launched_drones_exceeded,
     "no_propulsion": _rule_no_propulsion,
     "mwd_sig_increase": _rule_mwd_sig_increase,
     "state_exclusive": _rule_state_exclusive,

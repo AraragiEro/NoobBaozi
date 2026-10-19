@@ -1579,3 +1579,176 @@ def test_upgrade_space_fits_true_rows_do_not_carry_blocked_by(ctx_from_eft) -> N
     for row in rows:
         if not row["fits"]:
             assert row.get("blocked_by"), "fits=false 的行必须带原因"
+
+
+# =============================================================================
+# 十一、无人机两条上限（T-1/5）：**带宽（Mbit/s）与架数是两个量纲，不合并**
+#
+# 背景（实测，写进报告）：本产品**没有「已放飞」这个维度** —— fit 文本与引擎 `Layout`
+# 都只有 `drone_bay`。所以两条 flag 算的都是「**如果全部放飞**会怎样」：
+#   - `drone.bandwidth.used` = Σ `droneBandwidthUsed(1272) × 数量` = 全部放飞所需带宽；
+#   - 架数 = 机舱里无人机数量合计。
+# 引擎在 `calculate(validate=True)` 里给两条**独立**的 resource 规则（同一套算术，实测一致）。
+# =============================================================================
+
+BANDWIDTH_OVER_EFT = "[Vexor, 带宽超]\nDamage Control II\n\nOgre II x5\n"
+"""**只**带宽超：Vexor 带宽 75，5×Ogre II 全部放飞需 125 → 超 50；架数 5 = 上限 5（不超）。"""
+
+LAUNCHED_OVER_EFT = "[Dominix, 架数超]\nDamage Control II\n\nWarrior II x5\nOgre II x1\n"
+"""**只**架数超：6 架 > 上限 5；带宽 5×5 + 25 = 50 ≤ 125（**够**）。
+
+这条样本是「两条 flag 不能合并」的决定性证据：合成一条会输出「带宽超」且 over 为负。
+"""
+
+BOTH_OVER_EFT = "[Dominix, 两条都超]\nDamage Control II\n\nOgre II x6\n"
+"""两条都超：带宽 150 > 125，架数 6 > 5（互不替代，同时出现）。"""
+
+WITHIN_LIMITS_EFT = "[Dominix, 都够]\nDamage Control II\n\nOgre II x5\n"
+"""都够（**边界值**）：带宽 125 = 125、架数 5 = 5；`over == 0` 不算超。"""
+
+NO_DRONES_EFT = "[Dominix, 没带无人机]\nDamage Control II\n"
+
+DRONE_FLAG_IDS = ("drone_bandwidth_idle", "drone_bandwidth_exceeded", "launched_drones_exceeded")
+
+
+def _drone_flags(ctx: ViewContext) -> dict[str, dict]:
+    """`{flag_id: flag}`，只留无人机相关的三条（幂等，便于反证「另一条没出」）。"""
+    return {
+        flag["id"]: flag
+        for flag in D.evaluate(ctx)
+        if flag["id"] in DRONE_FLAG_IDS
+    }
+
+
+def test_drone_bandwidth_exceeded_fires_alone_on_bandwidth(ctx_from_eft) -> None:
+    """带宽超、架数不超：**只有** `drone_bandwidth_exceeded`，evidence 三个数都对。"""
+    flags = _drone_flags(ctx_from_eft(BANDWIDTH_OVER_EFT))
+
+    assert set(flags) == {"drone_bandwidth_exceeded"}, f"只该带宽那条命中，实际 {sorted(flags)}"
+    flag = flags["drone_bandwidth_exceeded"]
+    assert flag["view"] == "resources"
+    assert flag["evidence"] == {
+        "bandwidth_total": 75.0,
+        "bandwidth_required": 125.0,
+        "over": 50.0,
+        "source": "engine:drone_bandwidth",
+    }, "判据必须来自引擎规则（source 标明出处），数值是引擎给的 125/75"
+    assert "125" in flag["message"] and "75" in flag["message"] and "50" in flag["message"]
+
+
+def test_launched_drones_exceeded_fires_alone_on_count(ctx_from_eft) -> None:
+    """架数超、带宽不超：**只有** `launched_drones_exceeded`（这条证明两个量纲没被合并）。"""
+    ctx = ctx_from_eft(LAUNCHED_OVER_EFT)
+    flags = _drone_flags(ctx)
+
+    assert set(flags) == {"launched_drones_exceeded"}, (
+        f"带宽 50/125 是够的，不许出带宽 flag；实际 {sorted(flags)}"
+    )
+    flag = flags["launched_drones_exceeded"]
+    assert flag["view"] == "resources"
+    assert flag["evidence"] == {"drone_count": 6, "max_launched": 5, "over": 1}
+    assert "6" in flag["message"] and "5" in flag["message"]
+
+    # 反证：这套配装的带宽字段确实「够」，所以上面那条 red 不是因为带宽也超了
+    bandwidth = build_view("resources", ctx)["overview"]["drone"]["bandwidth"]
+    assert bandwidth["used"] == 50.0 and bandwidth["total"] == 125.0
+
+
+def test_both_drone_flags_fire_together(ctx_from_eft) -> None:
+    """两条**互不替代**：可以同时命中，各自带自己的量纲与 hint。"""
+    ctx = ctx_from_eft(BOTH_OVER_EFT)
+    flags = _drone_flags(ctx)
+
+    assert set(flags) == {"drone_bandwidth_exceeded", "launched_drones_exceeded"}
+    assert flags["drone_bandwidth_exceeded"]["evidence"]["over"] == 25.0
+    assert flags["launched_drones_exceeded"]["evidence"]["over"] == 1
+
+
+def test_no_drone_limit_flag_when_within_limits(ctx_from_eft) -> None:
+    """边界样本（`over == 0`）：**一条都不许出**；带得动就不报「超」，也不报 idle。"""
+    flags = _drone_flags(ctx_from_eft(WITHIN_LIMITS_EFT))
+    assert flags == {}, f"125/125、5/5 是合法的，实际 {sorted(flags)}"
+
+
+def test_idle_and_bandwidth_exceeded_are_mutually_exclusive(ctx_from_eft) -> None:
+    """`drone_bandwidth_idle` 与 `drone_bandwidth_exceeded` **互斥**（一个「0 架」一个「> 0 架」）。"""
+    idle = _drone_flags(ctx_from_eft(NO_DRONES_EFT))
+    assert set(idle) == {"drone_bandwidth_idle"}, f"没带无人机只该 idle，实际 {sorted(idle)}"
+
+    exceeded = _drone_flags(ctx_from_eft(BANDWIDTH_OVER_EFT))
+    assert "drone_bandwidth_idle" not in exceeded, "带了无人机就不该说「带宽全空闲」"
+
+
+def test_drone_flag_numbers_match_the_projected_field(ctx_from_eft) -> None:
+    """evidence 的数字必须与 `resources.drone.bandwidth` **同一份口径**（不许各算一套）。"""
+    ctx = ctx_from_eft(BOTH_OVER_EFT)
+    bandwidth = build_view("resources", ctx)["overview"]["drone"]["bandwidth"]
+    evidence = _drone_flags(ctx)["drone_bandwidth_exceeded"]["evidence"]
+
+    assert evidence["bandwidth_required"] == bandwidth["used"], "「全部放飞所需」= 投影字段 used"
+    assert evidence["bandwidth_total"] == bandwidth["total"]
+    assert evidence["over"] == bandwidth["used"] - bandwidth["total"]
+
+
+def test_drone_flags_never_touch_feasible(ctx_from_eft) -> None:
+    """`feasible` **一个字符都不改**（主人裁决：它只算 CPU / PG / 标定三项余量）。"""
+    for text in (BANDWIDTH_OVER_EFT, LAUNCHED_OVER_EFT, BOTH_OVER_EFT, WITHIN_LIMITS_EFT):
+        overview = build_view("resources", ctx_from_eft(text))["overview"]
+        cpu = overview["cpu"]["free"]
+        pg = overview["powergrid"]["free"]
+        calib = overview["calibration"]["free"]
+        assert overview["feasible"] == (cpu >= 0 and pg >= 0 and calib >= 0), (
+            "feasible 的判据只有那三项；无人机超限不许把它翻成 False"
+        )
+
+
+def test_drone_flag_hints_are_short_and_per_dimension() -> None:
+    """L0 `hint` 的硬门槛是 **6–10 字**，且两条各说各的量纲（`无人机带宽超N` / `无人机架数超N`）。"""
+    from noobbaozi import api
+
+    bandwidth_hints = {
+        flag["id"]: flag["hint"]
+        for flag in api.fit_index(BANDWIDTH_OVER_EFT)["result"]["flags"]
+    }
+    assert bandwidth_hints["drone_bandwidth_exceeded"] == "无人机带宽超50"
+
+    launched_hints = {
+        flag["id"]: flag["hint"]
+        for flag in api.fit_index(LAUNCHED_OVER_EFT)["result"]["flags"]
+    }
+    assert launched_hints["launched_drones_exceeded"] == "无人机架数超1"
+    for hint in list(bandwidth_hints.values()) + list(launched_hints.values()):
+        assert hint and 6 <= len(hint) <= 10, f"hint 字数越界：{hint!r}"
+
+
+def test_drone_rule_config_matches_implementation() -> None:
+    """config 与实现同口径：两条 id 都在两边、`view=resources`、`enabled=True`、模板带数值位。"""
+    rules = {rule.id: rule for rule in D.load_rules()}
+    implemented = set(D.implemented_rules())
+    for rule_id in ("drone_bandwidth_exceeded", "launched_drones_exceeded"):
+        assert rule_id in rules and rule_id in implemented, f"{rule_id} 两边都要有"
+        assert rules[rule_id].view == "resources"
+        assert rules[rule_id].enabled is True
+    assert "{bandwidth_required}" in rules["drone_bandwidth_exceeded"].message
+    assert "{over}" in rules["drone_bandwidth_exceeded"].message
+    assert "{drone_count}" in rules["launched_drones_exceeded"].message
+    assert "{max_launched}" in rules["launched_drones_exceeded"].message
+
+
+def test_merging_the_two_dimensions_would_contradict_itself(ctx_from_eft) -> None:
+    """**本单的关键证明**：合并成「命中任一维度」会立刻自相矛盾。
+
+    `Dominix + 5×Warrior II + 1×Ogre II`：带宽 50 / 125（够），架数 6 / 5（超）。
+    若判据是「命中 `launched_drones` 或 `drone_bandwidth`」，这条会输出
+    `drone_bandwidth_exceeded`，而它的 `over = required − total = 50 − 125 = −75` ——
+    一条「带宽超出 −75」的 flag。所以两条必须分开（这也是我把你的「任一维度」裁决改成
+    「各认各的维度」的依据）。
+    """
+    ctx = ctx_from_eft(LAUNCHED_OVER_EFT)
+    bandwidth = build_view("resources", ctx)["overview"]["drone"]["bandwidth"]
+    merged_over = bandwidth["used"] - bandwidth["total"]
+
+    assert merged_over == -75.0, "合并口径会输出负数超出量"
+    assert _drone_flags(ctx).keys() == {"launched_drones_exceeded"}, (
+        "正确实现只出架数那条；合并实现会在这里多出带宽那条"
+    )

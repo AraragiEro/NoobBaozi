@@ -81,6 +81,15 @@
 「这个模块占几个炮位」的属性，只有船体侧的 102 / 101 总量）。分不清就进 `unattributed`，
 不猜、不补。
 
+**`drone.bandwidth.used` 的口径（T-1/5，务必读准）**：它是**机舱里全部无人机「全部放飞」
+所需**的带宽（Σ `droneBandwidthUsed(1272) × 数量`），**不是当前已放飞的消耗**。
+fit 文本与引擎 `Layout` 都**没有「已放飞」这个维度**（只有 `drone_bay`），所以「已放飞」
+在本产品里根本不存在 —— 这不是缺陷，是输入形态决定的上限，别当成算错。
+f7（Legion）的准确读法是「**25 架全放需要 175 Mbit/s，而总带宽只有 50**」，**不是**
+「现在已经放了 175」。超限由诊断的 `drone_bandwidth_exceeded`（带宽，Mbit/s）与
+`launched_drones_exceeded`（同时放飞架数）**两条** flag 分别报；`feasible` 只算
+CPU / PG / 标定三项余量，**不含**无人机带宽（主人裁决：不改 `feasible` 的定义）。
+
 **`feasible` / `over_budget` 是 T-22 新增的可行性事实（字段规格 §0.6）**：
 
 - `feasible`：`cpu.free >= 0 and powergrid.free >= 0 and calibration.free >= 0` 的三项合判
@@ -404,7 +413,7 @@ FIELD_SOURCES: dict[str, int | None] = {
     "hardpoints.non_hardpoint": None,
     "hardpoints.non_hardpoint_modules": None,
     "hardpoints.unattributed": None,
-    # 无人机：上限来自船体，占用是从 items 合成的
+    # 无人机：上限来自船体，占用是从 items 合成的（**「全部放飞所需」口径**，不是实时放飞）
     "drone.bandwidth.used": None,
     "drone.bandwidth.total": A.ATTR_DRONE_BANDWIDTH,
     "drone.capacity.used": None,

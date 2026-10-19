@@ -787,6 +787,15 @@ _HINT_SHAPES: tuple[tuple[tuple[str, ...], Callable[[Mapping[str, object]], str]
     (("armed_weapons", "dph_hp"), lambda e: f"{_hint_number(e['armed_weapons'])}门有弹零伤害"),
     # 电容会耗尽（有修复速率也不稳）→ "电容38.4s耗尽"
     (("cap_depletes_in_s",), lambda e: f"电容{_hint_number(e['cap_depletes_in_s'])}s耗尽"),
+    # 无人机带宽超限（全部放飞所需 > 总带宽）→ "无人机带宽超125"
+    # 形状：`bandwidth_required` + `over`。必须排在 `("bandwidth_total","drones_carried")`
+    # （idle 那条）之前：新形状先于更宽的形状，否则会被「带宽50未用」吃掉。
+    # 字数：hint 的硬门槛是 **6–10 字**（`tests/test_summary.py`），所以前缀带上「无人机」——
+    # 只写「带宽超1」只有 4 字，会直接打红。
+    (("bandwidth_required", "over"), lambda e: f"无人机带宽超{_hint_number(e['over'])}"),
+    # 同时放飞架数超限 → "无人机架数超20"（与带宽是两个量纲，两条 flag 各带各的 hint，
+    # 同一配装可以同时出现「无人机带宽超125」与「无人机架数超20」）
+    (("max_launched", "over"), lambda e: f"无人机架数超{_hint_number(e['over'])}"),
     # 无人机带宽闲着 → "带宽50未用"
     (("bandwidth_total", "drones_carried"), lambda e: f"带宽{_hint_number(e['bandwidth_total'])}未用"),
     # 一件推进模块都没有 → "无推进模块22件"
