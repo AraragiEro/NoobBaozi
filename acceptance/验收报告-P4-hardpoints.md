@@ -138,3 +138,86 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 | 2 | `dangerRatio 12.5 → 12` 等 ratio/mean 字段原样透传（已确认 **high**） | 待修；复验点：注入浮点 → 输出逐位相同（含 gangRatio / soloRatio / avgGangSize） |
 | 3 | `hardpoints` 其余分类（如 `unclassified` 是否只该有节日发射器一类） | 已覆盖 Lead 指定的 7 类；更多类别可再扩 |
 
+## 10. 「限流 → `internal_error`」的原始证据（Lead 索要）
+
+### 10.1 调用参数与序列
+
+- 接口：**`api.zkb_stats(...)`（Python 直调，不经过 MCP 层）**
+- 参数：`entity_id` ∈ {2117515414, 98821127, 1354830081}，`entity_type` ∈
+  {character, corporation, alliance}，**`include` 未传（用默认）**
+- 序列：**同一脚本第 2 次执行**（第 1 次刚成功跑完同样 3 次调用），
+  **3 实体连跑、间隔 0**，全部 3 次都返回 `ok=false kind=internal_error`
+
+### 10.2 我看到的到底是什么
+
+**是 `error.kind`，不是 MCP 的 `isError`。** 那次调用根本没走 MCP 服务器，
+所以不存在“把布尔标志当 kind”的问题。
+
+### 10.3 错误对象全文：**我没保留，如实说明**
+
+当时脚本只落了 `kind` 与 `message[:60]`（`out/hardpoints-classes.json` 随后被
+成功运行覆盖），**没有保存完整 `{"ok":false,"error":{...}}`**。这是我的取证缺失，不狡辩。
+
+### 10.4 现在能否复现：**不能**
+
+刚才按「6 次连跑、间隔 0」重放：
+
+| 序 | 实体 | 结果 | 体量 | 耗时 |
+|---|---|---|---|---|
+| 1 | SixtyEverSnake | ok=True | 2,280 B | 1,791 ms |
+| 2 | The big boys | ok=True | 3,164 B | 2,508 ms |
+| 3 | Goonswarm Federation | ok=True | 3,719 B | 2,817 ms |
+| 4–6 | 同上重放 | ok=True | 同上 | 1,762 / 1,668 / 4,090 ms |
+
+**失败 0 次** → 与开发方“复现不出来”一致。倾向判断：**上游瞬态**（而非 `rate_limited` 接线缺失）。
+
+### 10.5 构建版本
+
+仓库根在 `evefit/`（不是工作区根），当前 **`dfdaa7a`**。
+**失败时刻的确切 HEAD 我没记录** —— 无法回溯，只能确认当前版本正常。
+
+## 11. 体量口径纠正（重要）
+
+我此前报的 **2,280 / 3,164 / 3,719** 是 **`api` 信封**大小，**不是 MCP 线上**。实测四口径：
+
+| 口径 | SixtyEverSnake | The big boys | Goonswarm | ≤4KB? |
+|---|---|---|---|---|
+| `result` 紧凑（开发方口径） | ~1,910 | ~2,706 | ~3,215 | ✅ |
+| `result` 默认 dumps | 2,062 | 2,946 | 3,502 | ✅ |
+| api 信封（我先前报的） | 2,280 | 3,164 | 3,719 | ✅ |
+| **MCP 线上**（content + structuredContent） | **4,891** | **6,771** | **7,941** | ❌ **全部超** |
+
+原因：`structuredContent` 与 `content[0].text` **各放一份完整信封** → 约 2×。
+
+**结论**：`≤4 KB` 只在 `result` 口径成立；按 Lead 建议的「MCP 线上（agent 实际吃进去的量）」口径**不成立**。
+建议二选一：
+1. 把预算口径明确写成「`result` 紧凑 JSON ≤ 4 KB」，并在 MCP 层注明双发的倍数；
+2. MCP 层不要双发（老版本只给文本、新版本只给 structuredContent，或 structuredContent 只放精简版）。
+
+## 12. 三项修复复验（✅ 全过）
+
+| # | 项 | 结果 |
+|---|---|---|
+| 1 | EFT 模块行带回装填弹药 | ✅ emit 行变为 `Light Neutron Blaster II, Void S`；`parse→emit→parse` **含弹药一致=True**；eft 长度回到 1,015 |
+| 2 | ratio / mean 原样透传 | ✅ `dangerRatio 12.5 → 12.5`、`gangRatio 45.5 → 45.5`；真实数据 `avg_gang_size=3.6`、`top.characters[0].isk=182078148.24` 均原样 |
+| 3 | 错误分类共用判定 | ✅ 精确错误体 `"Invalid type or id"` → `unknown_entity`；**真实 HTTP 路径**抛 429 → **`rate_limited` + `hint.min_interval_s=1.2`** |
+
+**一个注入缝的边界（观察，待裁决）**：用 `zkb_stats(..., requester=fn)` 让 `fn` 直接抛
+`urllib.error.HTTPError(429)` 时，得到的是 `internal_error` 而非 `rate_limited` ——
+说明限流判定在 HTTP 层，`requester` 注入缝绕过了它。
+建议文档写明「`requester` 只注入响应正文，不模拟 HTTP 错误」；或让注入缝也识别 `HTTPError`。
+
+## 13. 分类矩阵重跑（修复后 ✅ 7/7）
+
+隐身 / 智能炸弹 / 吸电 / 遥修 / 牵引 / 探针发射器 → **non_hardpoint**；
+`Festival Launcher` → **unclassified**（`non_hardpoint=0`、`unclassified=1`、`modules=[]`）。
+**修复没有碰坏分类。**
+
+## 14. 当前基线
+
+| 项 | 值 |
+|---|---|
+| 基线 | **65 × 43 = 2,795/2,795 = 100%**，`status=pass`（27 条 low，**0 条 medium+**） |
+| `pytest`（我自己跑） | **1,042 passed** |
+| 构建 | `dfdaa7a`（仓库根 `evefit/`） |
+

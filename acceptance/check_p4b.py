@@ -181,6 +181,46 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         notes.append(f"danger_ratio 用例异常：{type(exc).__name__}: {exc}")
 
+    # 更高精度透传：top.isk 四舍五入 / security_status 强转
+    canned2 = {
+        "dangerRatio": 12.5, "gangRatio": 45.5, "soloRatio": 33.3,
+        "info": {"id": 1, "name": "X", "secStatus": 0.123456},
+        "topLists": [{"type": "character", "data": [{"id": 2, "name": "Y",
+                                                     "isk": 1234567.891}]}],
+    }
+    try:
+        result = api.zkb_stats(1, entity_type="character", requester=requester(canned2))
+        inner = result.get("result") or {}
+        entity = inner.get("entity") or {}
+        style = inner.get("style") or {}
+        top = inner.get("top") or {}
+        print(f"  security_status={entity.get('security_status')!r} "
+              f"danger_ratio={style.get('danger_ratio')!r} "
+              f"top.isk={json.dumps(top, ensure_ascii=False)[:100]}")
+        if entity.get("security_status") not in (0.123456, None):
+            defect("口径错误", "medium", "zkb_stats(security_status)",
+                   "0.123456 原样", repr(entity.get("security_status")))
+    except Exception as exc:  # noqa: BLE001
+        notes.append(f"高精度透传用例异常：{type(exc).__name__}: {exc}")
+
+    # 429/403 → rate_limited（与 zkb_search 共用判定）
+    import urllib.error
+
+    def raising_429(url, digest=None):
+        raise urllib.error.HTTPError(url, 429, "Too Many Requests", {}, None)
+
+    try:
+        result = api.zkb_stats(1, entity_type="character", requester=raising_429)
+        error = result.get("error") or {}
+        hint = error.get("hint") or {}
+        print(f"  429 → ok={result.get('ok')} kind={error.get('kind')} hint={hint}")
+        if error.get("kind") != "rate_limited":
+            defect("口径错误", "high", "zkb_stats(429)", "kind=rate_limited", repr(error.get("kind")))
+        if not isinstance(hint, dict) or "min_interval_s" not in hint:
+            defect("字段缺失", "medium", "zkb_stats(429).hint", "hint.min_interval_s", repr(hint))
+    except Exception as exc:  # noqa: BLE001
+        notes.append(f"429 用例异常：{type(exc).__name__}: {exc}")
+
     # 体量：真实实体（网络可用时）
     for entity_id in (1633215779, 90000001, 1):
         try:

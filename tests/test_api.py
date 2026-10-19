@@ -21,6 +21,7 @@ from __future__ import annotations
 import copy
 import json
 import statistics
+import time
 import urllib.error
 from pathlib import Path
 
@@ -848,15 +849,31 @@ def test_capsule_counts_are_not_vacuous(monkeypatch: pytest.MonkeyPatch) -> None
         _assert_capsule_facts(api.fit_killmail(text)["result"])
 
 
-def test_fit_killmail_merges_zkb_and_esi(monkeypatch: pytest.MonkeyPatch) -> None:
-    """联网形态：zkillboard 给价值块、ESI 给伤害详情，**两个都拉**再合并。"""
+def _zkb_payload_without_items() -> object:
+    """zkb `killID` 原文的副本，但把 `victim.items` 抹成空 —— 模拟「zkb 这次没带模块」。
+
+    只动这一个字段，其余（attackers / victim / zkb 块）一个字节都不变，
+    这样两次运行的差异就只可能是「items 短路有没有生效」。
+    """
+    payload = copy.deepcopy(json.loads(KILLMAIL_ZKB_PATH.read_text(encoding="utf-8")))
+    entry = payload[0] if isinstance(payload, list) else payload
+    entry["victim"]["items"] = []
+    return payload
+
+
+def test_fit_killmail_uses_the_complete_zkb_document(monkeypatch: pytest.MonkeyPatch) -> None:
+    """zkb 的 `/api/killID/` 自带**整条** killmail（含 items）→ **一次都不请求 ESI**。
+
+    实测依据：16/16 样本的 zkb 原文与 ESI 原文逐字段一致（attackers 条数与每个字段值、
+    victim 全字段、items 逐项）。所以只要 items 非空，跳过 ESI 不会少任何数据 ——
+    这省掉的是冷路径里最贵的 **1.7–2.6 s**。
+    """
     zkb_payload = json.loads(KILLMAIL_ZKB_PATH.read_text(encoding="utf-8"))
-    esi_payload = json.loads(KILLMAIL_ESI_PATH.read_text(encoding="utf-8"))
     seen: list[str] = []
 
     def fake_http(url: str) -> object:
         seen.append(url)
-        return zkb_payload if "zkillboard" in url else esi_payload
+        return zkb_payload
 
     _offline_system(monkeypatch)
     monkeypatch.setattr(api, "_http_json", fake_http)
@@ -864,23 +881,33 @@ def test_fit_killmail_merges_zkb_and_esi(monkeypatch: pytest.MonkeyPatch) -> Non
     out = api.fit_killmail({"killmail_id": KILLMAIL_ID, "hash": KILLMAIL_HASH})
     assert out["ok"] is True, out
     result = out["result"]
-    assert result["killmail_source"] == "network"
-    # 价值块来自 zkillboard
+    assert result["killmail_source"] == "network", "输入形态仍是联网"
+    assert result["killmail_origin"] == "zkillboard", "原文来自 zkb"
+    assert out["meta"]["killmail_origin"] == "zkillboard"
+
+    # 数据完整：价值块 / 名字外的一切 / 伤害 / 参战方 一个都不少
     assert result["killmail"]["value"]["total"] == 76942042803.52
     assert "capinv" in result["killmail"]["labels"]
-    # 伤害详情来自 ESI
     assert result["victim"]["damage_taken"] == 6558773
     assert result["attackers"]["count"] == 79
-    assert len(seen) == 2, f"应当恰好两个请求（zkb + ESI），实际 {seen}"
-    assert any("zkillboard" in url for url in seen)
-    assert any("esi.evetech.net" in url for url in seen)
+    # 79 个挂名里只有 57 个真的打出了伤害（余下 22 个是零伤害 —— 两行 fixture 都这么算）
+    assert result["attackers"]["damaging_count"] == 57
+    assert (
+        result["attackers"]["damaging_count"] + result["attackers"]["zero_damage_count"]
+        == result["attackers"]["count"]
+    )
+
+    assert seen == [
+        f"https://zkillboard.com/api/killID/{KILLMAIL_ID}/"
+    ], f"zkb 带 items 时只该有一次请求，实际 {seen}"
+    assert not any("回落" in warning for warning in result["warnings"]), result["warnings"]
 
 
-def test_fit_killmail_uses_the_zkb_hash_when_missing(
+def test_fit_killmail_falls_back_to_esi_when_zkb_items_are_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """只给 `killmail_id`（不给 hash）也能跑：hash 从 zkillboard 的 `zkb.hash` 拿。"""
-    zkb_payload = json.loads(KILLMAIL_ZKB_PATH.read_text(encoding="utf-8"))
+    """items 为空 → 回落 ESI，**并且说出来**（多花了一次 1.7–2.6 s 的请求）。"""
+    zkb_payload = _zkb_payload_without_items()
     esi_payload = json.loads(KILLMAIL_ESI_PATH.read_text(encoding="utf-8"))
     seen: list[str] = []
 
@@ -890,6 +917,73 @@ def test_fit_killmail_uses_the_zkb_hash_when_missing(
 
     _offline_system(monkeypatch)
     monkeypatch.setattr(api, "_http_json", fake_http)
+    api.clear_caches()
+
+    out = api.fit_killmail({"killmail_id": KILLMAIL_ID, "hash": KILLMAIL_HASH})
+    assert out["ok"] is True, out
+    result = out["result"]
+    assert result["killmail_origin"] == "esi"
+    assert any("回落" in warning for warning in result["warnings"]), (
+        f"回落 ESI 必须写进 warnings，实际 {result['warnings']}"
+    )
+    # 回落后数据依然完整（ESI 是原路径）
+    assert result["victim"]["damage_taken"] == 6558773
+    assert result["attackers"]["count"] == 79
+    assert result["killmail"]["value"]["total"] == 76942042803.52
+    assert seen == [
+        f"https://zkillboard.com/api/killID/{KILLMAIL_ID}/",
+        f"https://esi.evetech.net/latest/killmails/{KILLMAIL_ID}/{KILLMAIL_HASH}/",
+    ], seen
+
+
+def test_zkb_items_shortcut_is_not_vacuous(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**配对证明**：同一份 fixture 只改 `victim.items` 一个字段，请求数必须从 1 变 2。
+
+    如果「带 items 就跳过 ESI」那段被删掉，第一条运行会变成 2 个请求，这里立刻红 ——
+    所以它证明的不是「恰好没请求 ESI」，而是「短路真的在起作用」。
+    """
+    esi_payload = json.loads(KILLMAIL_ESI_PATH.read_text(encoding="utf-8"))
+    with_items = json.loads(KILLMAIL_ZKB_PATH.read_text(encoding="utf-8"))
+    without_items = _zkb_payload_without_items()
+
+    def run(payload: object) -> tuple[dict, list[str]]:
+        seen: list[str] = []
+
+        def fake_http(url: str) -> object:
+            seen.append(url)
+            return payload if "zkillboard" in url else esi_payload
+
+        _offline_system(monkeypatch)
+        monkeypatch.setattr(api, "_http_json", fake_http)
+        api.clear_caches()  # 结果缓存是进程级的：不清就会在上一次的结果上打转
+        envelope = api.fit_killmail({"killmail_id": KILLMAIL_ID, "hash": KILLMAIL_HASH})
+        assert envelope["ok"] is True, envelope
+        return envelope, seen
+
+    _, seen_with = run(with_items)
+    _, seen_without = run(without_items)
+    assert len(seen_with) == 1, f"带 items 应只请求 zkb，实际 {seen_with}"
+    assert len(seen_without) == 2, f"items 为空应多请求一次 ESI，实际 {seen_without}"
+
+
+def test_fit_killmail_uses_the_zkb_hash_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """只给 `killmail_id`（不给 hash）也能跑：hash 从 zkillboard 的 `zkb.hash` 拿。
+
+    （要用 items 为空的样本才能走到 ESI —— 带 items 时那条路根本不会走。）
+    """
+    zkb_payload = _zkb_payload_without_items()
+    esi_payload = json.loads(KILLMAIL_ESI_PATH.read_text(encoding="utf-8"))
+    seen: list[str] = []
+
+    def fake_http(url: str) -> object:
+        seen.append(url)
+        return zkb_payload if "zkillboard" in url else esi_payload
+
+    _offline_system(monkeypatch)
+    monkeypatch.setattr(api, "_http_json", fake_http)
+    api.clear_caches()
 
     out = api.fit_killmail({"killmail_id": KILLMAIL_ID})
     assert out["ok"] is True, out
@@ -897,6 +991,62 @@ def test_fit_killmail_uses_the_zkb_hash_when_missing(
     assert esi_urls == [
         f"https://esi.evetech.net/latest/killmails/{KILLMAIL_ID}/{KILLMAIL_HASH}/"
     ], esi_urls
+
+
+def test_fit_killmail_runs_names_and_system_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`names` 与 `systems` 互不依赖 → **必须并行**（各睡 0.3 s，串行会是 0.6 s）。
+
+    用**本地 killmail** 做样本：这样整条路径只剩这两个桩，网络零参与，差异只可能来自
+    并行与否。阈值 0.5 s 卡在 0.3 与 0.6 之间，串行必然超。
+    """
+    api.get_index()  # 预热：索引首次打开要 100–300 ms，别把它算进计时
+
+    def slow_names(ids: object) -> dict:
+        time.sleep(0.3)
+        return {SOLAR_SYSTEM_ID: AMAMAKE["name"]}
+
+    def slow_system(system_id: int) -> dict:
+        time.sleep(0.3)
+        return dict(AMAMAKE)
+
+    monkeypatch.setattr(api, "universe_names", slow_names)
+    monkeypatch.setattr(api, "universe_system", slow_system)
+    api.clear_caches()
+
+    text = KILLMAIL_ZKB_PATH.read_text(encoding="utf-8")
+    started = time.monotonic()
+    out = api.fit_killmail(text)
+    elapsed = time.monotonic() - started
+
+    assert out["ok"] is True, out
+    assert out["result"]["killmail_origin"] == api.KILLMAIL_ORIGIN_LOCAL
+    assert elapsed < 0.5, (
+        f"names 与 systems 串行了：{elapsed:.2f}s（并行应 ≈0.3 s，串行 0.6 s）"
+    )
+
+
+def test_fit_killmail_system_failure_does_not_hide_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """并行时**一个失败不许掩盖另一个**：星系挂了，名字也得照常给。"""
+    def broken_system(system_id: int) -> dict:
+        raise api._ApiFailure("network_failed", "星系接口超时")
+
+    monkeypatch.setattr(api, "universe_names", lambda ids: {SOLAR_SYSTEM_ID: AMAMAKE["name"]})
+    monkeypatch.setattr(api, "universe_system", broken_system)
+    api.clear_caches()
+
+    out = api.fit_killmail(KILLMAIL_ZKB_PATH.read_text(encoding="utf-8"))
+    assert out["ok"] is True, out
+    result = out["result"]
+    # 星系降级：security 给 null + 一条 warning
+    assert result["killmail"]["security"]["status"] is None
+    assert any("星系安全等级查不到" in warning for warning in result["warnings"])
+    # 但名字照常给（没被掩盖），战报本身也没失败
+    assert result["killmail"]["solar_system"]["name"] == AMAMAKE["name"]
+    assert result["attackers"]["count"] == 79
 
 
 def test_fit_killmail_refuses_fits_without_a_battle() -> None:

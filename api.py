@@ -124,6 +124,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 from noobbaozi.config import paths as _paths
@@ -1454,6 +1455,27 @@ NOT_A_KILLMAIL_KIND: str = "not_a_killmail"
 与 §10.4 的五种 kind **只增不改**：宁可诚实报错，也不拿配装去猜一条战报。
 """
 
+KILLMAIL_ORIGIN_ZKILLBOARD: str = "zkillboard"
+"""这条战报的**原文**来自 zkb `/api/killID/<id>/`（它本身就带整条 killmail，见下）。"""
+
+KILLMAIL_ORIGIN_ESI: str = "esi"
+"""原文来自 ESI `/killmails/<id>/<hash>/`（zkb 没带 items 时的回落路径）。"""
+
+KILLMAIL_ORIGIN_LOCAL: str = "local"
+"""原文是调用方直接贴进来的 killmail JSON（不经网络）。"""
+
+ZKB_ITEMS_FALLBACK_WARNING: str = (
+    "zkb 的 victim.items 为空，已回落到 ESI 取原文（多一次 1.7–2.6 s 的请求）；"
+    "两边都为空说明这条战报本来就没有模块（例如蛋 / 空船）"
+)
+"""回落 ESI 时写进 `warnings` 的说明（**沉默不行**：多花了一次时间要交代）。"""
+
+ZKB_COMPLETE_KILLMAIL_NOTE: str = (
+    "zkb /api/killID/ 返回的是**整条完整 killmail**（实测 16/16 与 ESI 逐字段一致："
+    "attackers 条数与每个字段值、victim 全字段、items 逐项），所以带 items 时不必再请求 ESI"
+)
+"""数据源原则的实测依据（写在常量里，改这条之前先看它）。"""
+
 ESI_UNIVERSE_NAMES_API: str = "https://esi.evetech.net/latest/universe/names/"
 """ESI 批量 id → 名字（`POST`，请求体是 id 数组）。星系名本地 SDE 索引里**没有**。"""
 
@@ -1773,11 +1795,26 @@ def _security_band(
     return SECURITY_BAND_NULLSEC
 
 
-def _system_block(system_id: object, warnings: list[str], names: dict[int, str]) -> dict:
+def _system_block(
+    system_id: object,
+    warnings: list[str],
+    names: dict[int, str],
+    *,
+    prefetched: "dict | None" = None,
+    prefetch_error: str | None = None,
+) -> dict:
     """`solar_system_id` → `{id, name, security: {status, band}}`（查不到给 `null` + `warnings`）。
 
     名字**不再单独发一次 names 请求**：`names` 是调用方一次批量查好的 `{id: name}`
     （星系 id 一起进了那一批），这里只取。取不到就退回 ESI 星系详情自带的 `name`。
+
+    `prefetched` / `prefetch_error` 是**并行取数的结果**：`_execute_killmail()` 会把
+    `universe_system()` 放到工作线程里与 `names` 同时跑（两者互不依赖），再把结果递进来。
+    没给就走原来的同步路径 —— 调用点不必关系并行与否。
+
+    Args:
+        prefetched: 线程里已经取到的星系详情（`None` = 没预取）。
+        prefetch_error: 预取失败时的人话原因（与同步路径的 warning 文案一致）。
     """
     identifier = _as_int(system_id)
     if identifier is None:
@@ -1791,10 +1828,15 @@ def _system_block(system_id: object, warnings: list[str], names: dict[int, str])
         "security_class": None,
         "has_class": False,
     }
-    try:
-        info = universe_system(identifier)
-    except _ApiFailure as exc:
-        warnings.append(f"星系安全等级查不到（{exc.message}）：security 给 null")
+    if prefetched is not None:
+        info = dict(prefetched)
+    elif prefetch_error is not None:
+        warnings.append(f"星系安全等级查不到（{prefetch_error}）：security 给 null")
+    else:
+        try:
+            info = universe_system(identifier)
+        except _ApiFailure as exc:
+            warnings.append(f"星系安全等级查不到（{exc.message}）：security 给 null")
 
     if name is None:
         # 同一个 ESI 的星系详情也带 name（权威来源相同），不额外多花一次请求。
@@ -1821,15 +1863,30 @@ def _zkb_entry(payload: object) -> dict:
     return {}
 
 
-def fetch_killmail_report(killmail_id: int, digest: str | None) -> dict:
-    """取一条战报的**完整**上下文：zkillboard 的价值块 + ESI 的详情，合并成一份。
+def fetch_killmail_report(
+    killmail_id: int, digest: str | None
+) -> tuple[dict, str]:
+    """取一条战报的**原文** → `(killmail, origin)`，`origin` ∈ `zkillboard` / `esi`。
 
-    与 `fetch_killmail()`（只给配装层要的那份 ESI 原文）并列存在，两者互不影响：
+    数据源策略（**实测依据见 `ZKB_COMPLETE_KILLMAIL_NOTE`**）：
 
-    1. 先 `GET zkillboard /api/killID/<id>/` —— 既拿 `zkb`（价值 / points / labels），
-       也在 `digest is None` 时拿 `zkb.hash`（ESI 原文必须要它）；
-    2. 再 `GET ESI /killmails/<id>/<hash>/` —— attackers / victim / `damage_taken`；
-    3. 合并：**ESI 当底**（items 与 damage 以它为准），`zkb` 块原样附上。
+    1. 先 `GET zkillboard /api/killID/<id>/` —— 这一步本来就要做：它给 `zkb`（价值 /
+       points / labels）与 `hash`，**而且它返回的就是整条 killmail**（attackers / victim /
+       items 全在，16/16 样本与 ESI 逐字段一致）；
+    2. **若 `victim.items` 存在且非空** → 直接用它当原文，**不再请求 ESI**
+       （省掉 1.7–2.6 s 的那一跳）；`origin = "zkillboard"`；
+    3. 否则（items 缺失 / 空）→ 回落 ESI（原路径），`origin = "esi"`。
+
+    为什么只降级到「items 非空」而不干脆全用 zkb：`items` 为空既可能是「这条战报本来
+    没有模块」（蛋 / 空船），也可能是 zkb 这次没带 —— **从响应里分不出这两种**，所以按
+    「拿不准就回落」处理，宁可多花一次时间也不猜。
+
+    Args:
+        killmail_id: 战报 id。
+        digest: ESI 要求的 hash；`None` 时向 zkb 要。
+
+    Returns:
+        `(合并后的 killmail, 来源)`。`zkb` 块会原样附在文档里（ESI 路径也附）。
 
     Raises:
         _ApiFailure: kind=`network_failed`（任一步失败都**不**拿半成品继续算）。
@@ -1837,6 +1894,17 @@ def fetch_killmail_report(killmail_id: int, digest: str | None) -> dict:
     zkb_url = ZKILL_KILL_API.format(killmail_id=killmail_id)
     payload = _http_json(zkb_url)
     entry = _zkb_entry(payload)
+    zkb_block = entry.get("zkb")
+
+    victim = entry.get("victim") if isinstance(entry.get("victim"), dict) else {}
+    items = victim.get("items")
+    if isinstance(items, list) and items and isinstance(victim, dict):
+        # zkb 自带整条 killmail（含 items）→ 不花那 1.7–2.6 s 去 ESI 取同一份东西。
+        merged = dict(entry)
+        if isinstance(zkb_block, dict):
+            merged["zkb"] = zkb_block
+        return merged, KILLMAIL_ORIGIN_ZKILLBOARD
+
     if not digest:
         digest = _hash_from_zkill(payload)
         if not digest:
@@ -1856,10 +1924,9 @@ def fetch_killmail_report(killmail_id: int, digest: str | None) -> dict:
         )
 
     merged = dict(killmail)
-    zkb_block = entry.get("zkb")
     if isinstance(zkb_block, dict):
         merged["zkb"] = zkb_block
-    return merged
+    return merged, KILLMAIL_ORIGIN_ESI
 
 
 # ---- 十二之二：战报块的组装（只整理，不判断）--------------------------------
@@ -2279,14 +2346,28 @@ def _killmail_report(
     killmail_source: str,
     warnings: list[str],
     names: dict[int, str],
+    *,
+    killmail_origin: str = KILLMAIL_ORIGIN_LOCAL,
+    system_prefetched: "dict | None" = None,
+    system_error: str | None = None,
 ) -> dict:
-    """原始 killmail + `ViewContext` + 批量查好的 `names` → `result`（形状见 `fit_killmail`）。"""
+    """原始 killmail + `ViewContext` + 批量查好的 `names` → `result`（形状见 `fit_killmail`）。
+
+    `killmail_source`（`network` / `local`）说的是**输入形态**，`killmail_origin`
+    （`zkillboard` / `esi` / `local`）说的是**原文从哪来** —— 两者维度不同，别混。
+    """
     index = ctx.index
     victim = killmail.get("victim") if isinstance(killmail.get("victim"), dict) else {}
     if not isinstance(killmail.get("zkb"), dict):
         warnings.append("没有 zkb 价值块：value / flags / labels 给 null（不猜）")
 
-    system = _system_block(killmail.get("solar_system_id"), warnings, names)
+    system = _system_block(
+        killmail.get("solar_system_id"),
+        warnings,
+        names,
+        prefetched=system_prefetched,
+        prefetch_error=system_error,
+    )
     victim_damage = _as_int(victim.get("damage_taken"))
     if victim_damage is None:
         warnings.append("killmail 没有 victim.damage_taken：damage_check 给 null（不猜）")
@@ -2321,6 +2402,7 @@ def _killmail_report(
         "attackers": attacker_block,
         "context": _ehp_context(ctx, victim_damage),
         "killmail_source": killmail_source,
+        "killmail_origin": killmail_origin,
         "warnings": warnings,
     }
 
@@ -2380,6 +2462,29 @@ def _killmail_from_text(text: str) -> dict:
     )
 
 
+def _prefetch_system_info(system_id: object) -> dict:
+    """取星系详情，**把两种结局都收成返回值**（供工作线程用，绝不抛到线程外）。
+
+    Returns:
+        `{"info": dict | None, "error": str | None}`。`id` 不是整数时两者都是 `None`
+        （`_system_block()` 会自己给 warning）。
+
+    为什么要在工作线程里跑：它与 `POST /universe/names/` **互不依赖**（一个要 system_id、
+    一个要 id 集合），串行时白等 0.66–0.71 s。但**只有它**进线程 —— names 有批间闸门
+    （`_UNIVERSE_NAMES_MIN_INTERVAL_S`）与进程内缓存字典，留在主线程最省心（见
+    `_execute_killmail` 的注释）。
+    """
+    identifier = _as_int(system_id)
+    if identifier is None:
+        return {"info": None, "error": None}
+    try:
+        return {"info": universe_system(identifier), "error": None}
+    except _ApiFailure as exc:
+        return {"info": None, "error": exc.message}
+    except Exception as exc:  # noqa: BLE001 - 线程里绝不能裸抛，否则会掩盖 names 的结果
+        return {"info": None, "error": f"{type(exc).__name__}: {exc}"}
+
+
 def _execute_killmail(
     fit: object,
     *,
@@ -2388,6 +2493,9 @@ def _execute_killmail(
     state_policy: object,
 ) -> dict:
     """`fit_killmail` 的执行骨架（与 `_execute()` 同构，只是载荷是**原始 killmail**）。
+
+    冷路径的两次「互不依赖」请求在这里并行：`universe_system()` 进工作线程，`names`
+    留在主线程，join 之后再装配（`_system_block()` 要用 names 给星系名）。
 
     Raises: 无 —— 任何异常都变成失败信封（§10.4）。
     """
@@ -2407,21 +2515,48 @@ def _execute_killmail(
 
         warnings: list[str] = []
         if kind == INPUT_NETWORK:
-            killmail = fetch_killmail_report(payload["killmail_id"], payload["hash"])
+            killmail, killmail_origin = fetch_killmail_report(
+                payload["killmail_id"], payload["hash"]
+            )
             killmail_source = "network"
+            if killmail_origin == KILLMAIL_ORIGIN_ESI:
+                # 多花了一次 ESI 请求就要交代（沉默不行）。
+                warnings.append(ZKB_ITEMS_FALLBACK_WARNING)
         else:
             killmail = _killmail_from_text(payload["text"])
             killmail_source = "local"
+            killmail_origin = KILLMAIL_ORIGIN_LOCAL
 
         # 索引先就位：船的 type/group 与武器族的判据都来自它（`_context()` 也要它）。
         _ensure_index()
         parsed = _parsed_fit({"text": json.dumps(killmail, ensure_ascii=False)})
         ctx = _context(parsed["fit"], str(skill_tier))
 
-        # 名字**一次查完**：星系 + 受害者 + 全部攻击者（去重后一批 names 请求）。
-        names = _resolve_identity_names(_killmail_name_ids(killmail), warnings)
+        # 冷路径最后两步**互不依赖**：names 要的是 id 集合，systems 要的是 system_id。
+        # 把 systems 丢进工作线程、names 留在主线程，join 后再装配（systems 的星系名
+        # 要用 names 的结果，所以「装配」不能并行，只能「取数」并行）。
+        #
+        # 为什么 names 不进线程：它有批间闸门（`_UNIVERSE_NAMES_MIN_INTERVAL_S`，靠模块级
+        # `_UNIVERSE_NAMES_LAST_START` 记账）与进程内缓存字典。放进线程虽不坏（缓存有锁），
+        # 但闸门的「与上一次请求至少隔 0.05 s」在并发下就不再是全局串行了 —— 为了省这点
+        # 复杂度，让最娇的那条留在主线程。
+        system_prefetch: dict = {"info": None, "error": None}
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="noobbaozi-sys") as pool:
+            pending = pool.submit(_prefetch_system_info, killmail.get("solar_system_id"))
+            # 名字**一次查完**：星系 + 受害者 + 全部攻击者（去重后一批 names 请求）。
+            names = _resolve_identity_names(_killmail_name_ids(killmail), warnings)
+            system_prefetch = pending.result()
 
-        result = _killmail_report(killmail, ctx, killmail_source, warnings, names)
+        result = _killmail_report(
+            killmail,
+            ctx,
+            killmail_source,
+            warnings,
+            names,
+            killmail_origin=killmail_origin,
+            system_prefetched=system_prefetch["info"],
+            system_error=system_prefetch["error"],
+        )
         meta = _meta(
             ctx,
             source_format=str(parsed.get("source_format")),
@@ -2429,6 +2564,7 @@ def _execute_killmail(
             state_policy=str(state_policy),
         )
         meta["killmail_source"] = killmail_source
+        meta["killmail_origin"] = killmail_origin
         envelope = _success(result, meta)
     except _ApiFailure as exc:
         return _failure(exc.payload())
@@ -2498,8 +2634,20 @@ def fit_killmail(
                                             "ehp_provenance"},
                      "note"},
          "killmail_source": "network" | "local",
+         "killmail_origin": "zkillboard" | "esi" | "local",
          "warnings": [...]}
         ```
+
+    `killmail_source` 与 `killmail_origin` **是两个维度**，别混：
+
+    - `killmail_source`：**输入形态** —— `network`（链接 / id / id+hash，要联网）或
+      `local`（调用方直接贴的 killmail JSON）；
+    - `killmail_origin`：**原文从哪来** —— `zkillboard`（zkb `/api/killID/` 自带整条
+      killmail 且带 items，因此**没有**请求 ESI）、`esi`（zkb 没带 items，回落 ESI）、
+      `local`（不经网络）。
+
+    回落时会往 `warnings` 里写一条 `ZKB_ITEMS_FALLBACK_WARNING` —— 多花了一次 1.7–2.6 s
+    的请求必须交代，不许静默。
 
     `null` 的语义（**别当 0 / 别当 false**）：
 
@@ -3948,6 +4096,9 @@ __all__ = [
     "HIGHSEC_THRESHOLD",
     "KILLMAIL_EHP_NOTE",
     "KILLMAIL_EHP_PATH",
+    "KILLMAIL_ORIGIN_ESI",
+    "KILLMAIL_ORIGIN_LOCAL",
+    "KILLMAIL_ORIGIN_ZKILLBOARD",
     "LOWSEC_THRESHOLD",
     "NETWORK_TIMEOUT_S",
     "NOT_A_KILLMAIL_KIND",
@@ -3967,6 +4118,8 @@ __all__ = [
     "USER_AGENT",
     "WEAPON_FAMILIES",
     "WEAPON_FAMILY_OTHER",
+    "ZKB_COMPLETE_KILLMAIL_NOTE",
+    "ZKB_ITEMS_FALLBACK_WARNING",
     "ZKB_API_ROOT",
     "ZKB_ERROR_UNKNOWN_ENTITY",
     "ZKB_FILTER_SEGMENTS",
