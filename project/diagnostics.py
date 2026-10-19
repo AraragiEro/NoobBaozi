@@ -258,19 +258,31 @@ class _Facts:
             if item.get("slot_type") != SLOT_CARGO
         ]
 
-    def slot_usage(self) -> dict[str, dict[str, int]]:
-        """各槽位 `{used, total, empty}`（总量来自 14/13/12/1137 四个属性）。"""
+    def slot_usage(self) -> dict[str, dict[str, int | None]]:
+        """各槽位 `{used, total, empty}`（总量来自 14/13/12/1137 四个属性）。
+
+        **总量未知就是 `None`，不许拿 0 顶替**（T-54 审查③）：旧实现用
+        `_as_count(_num(...))`，属性缺失时返回 `0`，于是「不知道有几格」被当成
+        「0 格、0 格空」——`resource_slack` 的 `empty_slots_by_slot` 就会写出
+        「rig 0」这种**假事实**（实测：只给高/中/低三项属性时，rig 一栏被写成 0）。
+        `used` 是例外：它从 items 数出来，0 就是真 0。
+        """
         totals = {
             "high": _a.ATTR_HI_SLOTS,
             "medium": _a.ATTR_MED_SLOTS,
             "low": _a.ATTR_LOW_SLOTS,
             "rig": _a.ATTR_RIG_SLOTS,
         }
-        usage: dict[str, dict[str, int]] = {}
+        usage: dict[str, dict[str, int | None]] = {}
         for slot_name, attribute_id in totals.items():
-            total = _as_count(_num(self.attrs, attribute_id))
+            raw = _num(self.attrs, attribute_id)
+            total = None if raw is None else int(round(raw))
             used = sum(1 for _pos, item in self.fitted() if item.get("slot_type") == slot_name)
-            usage[slot_name] = {"used": used, "total": total, "empty": max(total - used, 0)}
+            usage[slot_name] = {
+                "used": used,
+                "total": total,
+                "empty": None if total is None else max(total - used, 0),
+            }
         return usage
 
     def drones_carried(self) -> int:
@@ -312,11 +324,20 @@ PROPULSION_GROUP = _shared.PROPULSION_GROUP
 """
 
 
-def _usage_summary(usage: dict[str, dict[str, int]]) -> tuple[int, str]:
-    """`(空槽总数, "high 1, low 2, rig 0" 这样的摘要)`。"""
-    total_empty = sum(slot["empty"] for slot in usage.values())
-    summary = ", ".join(f"{name} {slot['empty']}" for name, slot in usage.items())
-    return total_empty, summary
+def _usage_summary(usage: dict[str, dict[str, int | None]]) -> tuple[int | None, str]:
+    """`(空槽总数, "high 1, low 2, rig 0" 这样的摘要)`。
+
+    任一槽位的 `empty` 未知（总量属性缺失）→ 总数返回 `None`，摘要里该槽位写 `?`。
+    **不许把未知当 0**：那会让 `resource_slack` 在「不知道有几格」时给出一条假事实。
+    """
+    empties = [slot["empty"] for slot in usage.values()]
+    summary = ", ".join(
+        f"{name} {'?' if slot['empty'] is None else slot['empty']}"
+        for name, slot in usage.items()
+    )
+    if any(empty is None for empty in empties):
+        return None, summary
+    return sum(empties), summary  # type: ignore[arg-type] - 上面已保证全非 None
 
 
 # =============================================================================
@@ -467,7 +488,8 @@ def _rule_resource_slack(facts: _Facts) -> dict | None:
         return None
 
     empty_total, empty_summary = _usage_summary(facts.slot_usage())
-    if empty_total <= 0:
+    # 任一槽位总量未知 → 总数是 None，**不出结论**（不许把「不知道」当 0 条空槽）
+    if empty_total is None or empty_total <= 0:
         return None
 
     return {
@@ -515,7 +537,8 @@ def _rule_empty_hardpoint(facts: _Facts) -> dict | None:
         return None
 
     high = facts.slot_usage()["high"]
-    if high["empty"] <= 0:
+    # 高槽总量未知 → 同样不出结论（`unknown 不是 0`，与上面硬点那一层同一套规矩）
+    if high["empty"] is None or high["empty"] <= 0:
         return None
 
     return {

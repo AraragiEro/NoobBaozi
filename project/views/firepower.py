@@ -158,8 +158,8 @@ FIELD_SOURCES: dict[str, int | None] = {
     "overload.on.range_m": _a.ATTR_MAX_RANGE,
     "overload.delta.dps": None,
     "overload.delta.range_m": None,
-    "hardpoints_free.turret": _a.ATTR_TURRET_SLOTS_LEFT,
-    "hardpoints_free.launcher": _a.ATTR_LAUNCHER_SLOTS_LEFT,
+    # **没有 `hardpoints_free.*`**（T-54 审查追加）：炮位归 `resources.hardpoints`，
+    # 本视角不再登记、不再输出（详见文件底部 `_hardpoints_free` 删除处的说明）。
 }
 """overview 点路径 → 来源属性 ID（渲染层据此打 provenance）。
 
@@ -515,12 +515,11 @@ def _overload_block(
     }
 
 
-def _hardpoints_free(attrs: dict[int, float]) -> dict[str, float | None]:
-    """空闲挂点（102 turretSlotsLeft / 101 launcherSlotsLeft），给绝对个数。"""
-    return {
-        "turret": _value(attrs.get(_a.ATTR_TURRET_SLOTS_LEFT)),
-        "launcher": _value(attrs.get(_a.ATTR_LAUNCHER_SLOTS_LEFT)),
-    }
+# `_hardpoints_free()` **已删除**（T-54 审查追加）：炮位事实只有一个出处
+# `views/resources.hardpoints`。它曾直读 102 `turretSlotsLeft` / 101 `launcherSlotsLeft`
+# 当「空闲挂点」—— 那是船体的**基准炮位数**，与装配无关（同一艘 Osprey NI 装 0 / 3 / 5 门
+# 发射器都输出 `{turret: 2.0, launcher: 3.0}`）。`tests/test_t54_audit.py` 有一条防线测试
+# 钉住「六视角里只有 `resources.hardpoints` 一个出处、`hardpoints_free` 在哪都取不到」。
 
 
 # =============================================================================
@@ -586,6 +585,10 @@ def build(ctx: ViewContext) -> dict:
         "application": _application_block(records),
         "ammo_endurance_s": _ammo_endurance_s(records),
         "overload": _overload_block(ctx, range_block, has_weapon_system=has_weapon_system),
-        "hardpoints_free": _hardpoints_free(attrs),
+        # **没有 `hardpoints_free`**（T-54 审查追加）：炮位只有一个出处
+        # `resources.hardpoints`。这里曾经直读 102 / 101（船体**基准炮位数**）当「空闲挂点」，
+        # 与装配无关 —— 同一艘 Osprey NI 装 0 / 3 / 5 门发射器都输出 `{turret:2, launcher:3}`。
+        # 那不是「火力」事实，是**装配**事实；留在这里等于同一产品里同时存在错误的老数字
+        # 和正确的新数字，agent 走 `fit_view("firepower")` 就会拿到老的那个。
     }
     return {"view": VIEW_NAME, "overview": overview, "flags": []}

@@ -49,6 +49,42 @@ def _resources(text: str) -> dict:
     return envelope["result"]
 
 
+_HIGH_BEAM: dict = {
+    "type_id": 1,
+    "name": "Heavy Beam Laser II",
+    "group_name": "Energy Weapon",
+    "slot_type": "high",
+    "attributes": {},
+}
+"""一件真炮（高槽）：给桩上下文当「已装模块」用。"""
+
+
+class _StubCtx:
+    """最小 duck-type `ViewContext`（`diagnostics._Facts` 只用 attrs/items/index/fit）。
+
+    用来构造**真实配装拿不到**的缺值情形（槽位总量属性缺失、硬点总量缺失），
+    这是 `unknown 不是 0` 那几条规矩唯一的验法 —— 真实船体不会缺 14/13/12/1137。
+    """
+
+    index = None
+    fit: dict = {"ship": {"type_id": 1}, "items": []}
+
+    def __init__(self, attrs: dict[int, float], items: tuple[dict, ...] = ()) -> None:
+        self._attrs = attrs
+        self._items = list(items)
+
+    def attrs(self, variant: str = "base") -> dict[int, float]:  # noqa: ARG002 - 桩
+        return self._attrs
+
+    def items(self, variant: str = "base") -> list[dict]:  # noqa: ARG002 - 桩
+        return self._items
+
+
+def _stub_ctx(attrs: dict[int, float], items: tuple[dict, ...] = (_HIGH_BEAM,)) -> _StubCtx:
+    """带一件高槽炮的桩上下文（`fitted()` 非空，`slot_usage` 的 `used` 才不是恒 0）。"""
+    return _StubCtx(attrs, items)
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _clean_api_cache() -> None:
     api.clear_caches()
@@ -74,8 +110,14 @@ def _clean_api_cache() -> None:
     ],
 )
 def test_non_weapon_high_slot_modules_are_never_counted(name: str, group: str) -> None:
-    """这些模块一律不进 `turret` / `launcher`：误分类会让 `free` 变负、**误报超装**。"""
-    assert R._hardpoint_kind(name, group) is None
+    """这些模块一律**不进 `turret` / `launcher`**：误分类会让 `free` 变负、**误报超装**。
+
+    它们现在落在 `non_hardpoint`（确定不占硬点）而不是 `unclassified`（认不出）——
+    但这条测试只关心一件事：**一件都不许算成武器**。
+    """
+    kind = R._hardpoint_kind(name, group)
+    assert kind not in ("turret", "launcher"), f"{name!r} 被判成了武器：{kind}"
+    assert kind == "non_hardpoint", "SDE 实测这些组都是高槽且确定不占硬点"
 
 
 def test_analysis_modules_hit_the_keyword_but_never_count_because_they_are_mid_slot() -> None:
@@ -115,7 +157,8 @@ def test_a_smartbomb_fit_never_reports_a_hardpoint_violation_on_a_zero_hardpoint
     assert overview["slots"]["high"]["total"] == 8, "Rorqual 有 8 个高槽"
     assert overview["hardpoints"]["turret"] == {"total": 0, "used": 0, "free": 0}
     assert overview["hardpoints"]["launcher"] == {"total": 0, "used": 0, "free": 0}
-    assert overview["hardpoints"]["unclassified"] == 3, "3 个智能炸弹进「未计入」，不是 0"
+    assert overview["hardpoints"]["non_hardpoint"] == 3, "3 个智能炸弹 = 确定不占硬点"
+    assert overview["hardpoints"]["unclassified"] == 0, "智能炸弹是**确定**的，不是「认不出」"
     assert "hardpoint_violation" not in {flag["id"] for flag in result["flags"]}
 
 
@@ -383,40 +426,17 @@ def test_empty_hardpoint_says_nothing_when_a_hardpoint_total_is_unknown() -> Non
     """
     from noobbaozi.project import diagnostics as D
 
-    class _Ctx:
-        """最小 duck-type `ViewContext`（`_Facts` 只用 attrs/items/index/fit）。"""
-
-        index = None
-        fit = {"ship": {"type_id": 1}, "items": []}
-
-        def __init__(self, attrs: dict[int, float]) -> None:
-            self._attrs = attrs
-
-        def attrs(self, variant: str = "base") -> dict[int, float]:  # noqa: ARG002 - 桩
-            return self._attrs
-
-        def items(self, variant: str = "base") -> list[dict]:  # noqa: ARG002 - 桩
-            return [
-                {
-                    "type_id": 1,
-                    "name": "Heavy Beam Laser II",
-                    "group_name": "Energy Weapon",
-                    "slot_type": "high",
-                    "attributes": {},
-                }
-            ]
-
     rule = D.Rule(id="empty_hardpoint", view="resources", enabled=True, message="{free_kinds}")
     both = {
         A.ATTR_TURRET_SLOTS_LEFT: 2,
         A.ATTR_LAUNCHER_SLOTS_LEFT: 0,
         A.ATTR_HI_SLOTS: 4,
     }
-    fired = D.evaluate(_Ctx(both), rules=[rule])
+    fired = D.evaluate(_stub_ctx(both), rules=[rule])
     assert fired and fired[0]["evidence"]["free_kinds"] == "炮位1", "两个 total 都有值时该报"
 
     only_turret = {A.ATTR_TURRET_SLOTS_LEFT: 2, A.ATTR_HI_SLOTS: 4}
-    assert D.evaluate(_Ctx(only_turret), rules=[rule]) == [], "总量未知 → 不出结论（不补 0）"
+    assert D.evaluate(_stub_ctx(only_turret), rules=[rule]) == [], "总量未知 → 不出结论（不补 0）"
 
 
 # =============================================================================
@@ -522,3 +542,298 @@ def test_unnamed_fit_publishes_a_reparseable_eft() -> None:
     again = api.parse_fit(emitted)
     assert again["ok"] is True, again.get("error")
     assert again["result"]["modules"]["fitted"] == envelope["result"]["modules"]["fitted"]
+
+
+# =============================================================================
+# 八、炮位事实**只有一个出处**（T-54 审查追加：firepower 里的 hardpoints_free 必须死）
+# =============================================================================
+
+ALL_VIEWS = ("firepower", "survivability", "mobility", "resources", "constraints", "stability")
+
+
+def _paths_with(node: object, needle: str, prefix: str = "") -> list[str]:
+    """递归找出**键名里含 `needle`** 的路径（用来扫「哪个视角还藏着 hardpoint*」）。"""
+    found: list[str] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if needle in str(key):
+                found.append(path)
+            found.extend(_paths_with(value, needle, path))
+    elif isinstance(node, list):
+        for position, value in enumerate(node):
+            found.extend(_paths_with(value, needle, f"{prefix}[{position}]"))
+    return found
+
+
+def test_only_resources_exposes_hardpoint_facts() -> None:
+    """六视角里**只有 `resources` 有硬点事实**，而且没有第二套 `hardpoints_free`。
+
+    旧实现的问题不是「算错了一个数」，是**同一产品里同时存在错误的老数字和正确的新数字**：
+    `firepower.hardpoints_free` 直读船体 102/101（基准炮位数、与装配无关），
+    `resources.hardpoints` 才是扣掉已装模块的真值 —— agent 走 `fit_view("firepower")`
+    就会拿到老的那个，而修这一轮正是为了它。
+    """
+    text = MISSILE_BOAT_TEXT
+    hits: dict[str, list[str]] = {}
+    for view in ALL_VIEWS:
+        envelope = api.fit_view(text, view)
+        assert envelope["ok"] is True, envelope.get("error")
+        # L1（overview）与 L0（index）两个入口都要扫：路径一律带上视角前缀，便于读
+        paths = [f"{view}.{path}" for path in _paths_with(envelope["result"]["overview"], "hardpoint")]
+        index_body = (api.fit_index(text)["result"] or {}).get(view)
+        paths += [f"{view}.{path}" for path in _paths_with(index_body, "hardpoint")]
+        if paths:
+            hits[view] = paths
+
+    assert set(hits) == {"resources"}, f"硬点事实只许出现在 resources，实际：{hits}"
+    assert "resources.hardpoints" in hits["resources"], "反证：扫描确实看得见 resources 的硬点块"
+    assert not any("hardpoints_free" in path for path in hits["resources"]), "旧字段一个都不许留"
+
+
+def test_hardpoints_free_is_unreachable_from_every_view() -> None:
+    """`fit_get` 在任何视角都取不到 `hardpoints_free`（L0/L1 都没有这条路）。"""
+    text = MISSILE_BOAT_TEXT
+    for view in ALL_VIEWS:
+        answer = api.fit_get(text, f"{view}.hardpoints_free")
+        assert answer["ok"] is False, f"{view} 仍然取得到 hardpoints_free：{answer}"
+        assert answer["error"]["kind"] == "invalid_path"
+
+    # 反证：正确的那条路取得到（否则上面的循环可能只是「什么都取不到」而空转）
+    good = api.fit_get(text, "resources.hardpoints.launcher.free")
+    assert good["ok"] is True and good["result"]["value"] == 0
+
+
+# =============================================================================
+# 九、`unclassified` 拆分：确定不占硬点 vs 真分不清
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    ("name", "group"),
+    [
+        ("Improved Cloaking Device II", "Cloaking Device"),
+        ("Covert Ops Cloaking Device II", "Cloaking Device"),
+        ("Large EMP Smartbomb II", "Smart Bomb"),
+        ("Heavy Energy Nosferatu II", "Energy Nosferatu"),
+        ("Heavy Energy Neutralizer II", "Energy Neutralizer"),
+        ("Small Remote Armor Repairer II", "Remote Armor Repairer"),
+        ("Small Remote Shield Booster II", "Remote Shield Booster"),
+        ("Small Remote Hull Repairer I", "Remote Hull Repairer"),
+        ("Small Remote Capacitor Transmitter I", "Remote Capacitor Transmitter"),
+        ("Salvager I", "Salvager"),
+        ("Small Tractor Beam I", "Tractor Beam"),
+        ("Core Probe Launcher I", "Scan Probe Launcher"),
+        ("Shield Command Burst I", "Command Burst"),
+        ("Bastion Module I", "Siege Module"),
+    ],
+)
+def test_confirmed_non_hardpoint_modules_are_their_own_bucket(name: str, group: str) -> None:
+    """**确定不占硬点**的进 `non_hardpoint`，不许再混进 `unclassified`（那是「认不出」）。"""
+    assert R._hardpoint_kind(name, group) == "non_hardpoint"
+
+
+@pytest.mark.parametrize(
+    ("name", "group"),
+    [
+        ("Interdiction Sphere Launcher I", "Interdiction Sphere Launcher"),
+        ("Festival Launcher I", "Festival Launcher"),
+        # 关键词表没命中、也不在确定白名单里的，一律算「分不清」（历史教训：Gas Cloud Harvester）
+        ("Reaction Control Unit", "Miscellaneous"),
+        ("Compression Module", "Miscellaneous"),
+    ],
+)
+def test_unknown_modules_stay_in_unclassified(name: str, group: str) -> None:
+    """**真分不清**的留在 `unclassified`：这一类 `> 0` 就是「可能漏收了一族」的维护信号。"""
+    assert R._hardpoint_kind(name, group) == "unclassified"
+
+
+def test_osprey_cloak_is_non_hardpoint_and_unclassified_is_zero() -> None:
+    """Osprey 真实装配：`non_hardpoint: 1`（那件隐身）+ 样例名字；`unclassified: 0`。
+
+    改之前是 `unclassified: 1` —— 读起来像「有一件武器我们认不出」，实际是确定不占硬点的隐身。
+    """
+    hardpoints = _resources(MISSILE_BOAT_TEXT)["overview"]["hardpoints"]
+
+    assert hardpoints["non_hardpoint"] == 1
+    assert hardpoints["non_hardpoint_modules"] == ["Improved Cloaking Device II"]
+    assert hardpoints["unclassified"] == 0
+    # 硬点的 used 不受影响（隐身一件都不加）
+    assert hardpoints["launcher"] == {"total": 3, "used": 3, "free": 0}
+
+
+def test_non_hardpoint_modules_list_caps_at_three() -> None:
+    """样例名字**最多 3 个**（再多只是噪音）；计数仍是真实的 4。"""
+    text = _eft(
+        (),
+        (),
+        (
+            "Improved Cloaking Device II",
+            "Salvager I",
+            "Small Tractor Beam I",
+            "Large EMP Smartbomb II",
+        ),
+        name="FourUtility",
+    )
+    hardpoints = _resources(text)["overview"]["hardpoints"]
+
+    assert hardpoints["non_hardpoint"] == 4
+    assert len(hardpoints["non_hardpoint_modules"]) == 3
+    assert hardpoints["unclassified"] == 0
+
+
+def test_both_counts_are_in_l0_with_provenance() -> None:
+    """两条计数都进 L0，且 `fit_get` 能原路取回（形状是契约）。"""
+    envelope = api.fit_index(MISSILE_BOAT_TEXT)
+    assert envelope["ok"] is True, envelope.get("error")
+    block = envelope["result"]["resources"]["hardpoints"]
+
+    assert block["non_hardpoint"] == 1
+    assert block["unclassified"] == 0
+    assert block["non_hardpoint_modules"] == ["Improved Cloaking Device II"]
+
+    for path, expected in (
+        ("resources.hardpoints.non_hardpoint", 1),
+        ("resources.hardpoints.unclassified", 0),
+    ):
+        answer = api.fit_get(MISSILE_BOAT_TEXT, path)
+        assert answer["ok"] is True, answer
+        assert answer["result"]["value"] == expected
+
+    provenance = _resources(MISSILE_BOAT_TEXT)["provenance"]
+    assert provenance["hardpoints.non_hardpoint"] == "assumed"
+    assert provenance["hardpoints.non_hardpoint_modules"] == "assumed"
+    assert provenance["hardpoints.unclassified"] == "assumed"
+
+
+def test_moving_a_group_out_of_the_whitelist_sends_it_to_unclassified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**非永真证明**：把 `Cloaking Device` 从确定白名单里挪走 → 隐身必须落回 `unclassified`。
+
+    这是「`non_hardpoint: 1` 真的是白名单判出来的」的唯一验法：抹掉那一行，
+    同一套配装的结论必须翻转（`non_hardpoint` 0 / `unclassified` 1），否则断言在空转。
+    """
+    baseline = _resources(MISSILE_BOAT_TEXT)["overview"]["hardpoints"]
+    assert baseline["non_hardpoint"] == 1 and baseline["unclassified"] == 0
+
+    mutated_whitelist = frozenset(
+        group
+        for group in R.HARDPOINT_NON_HARDPOINT_GROUPS_FOLDED
+        if group != "cloaking device"
+    )
+    monkeypatch.setattr(R, "HARDPOINT_NON_HARDPOINT_GROUPS_FOLDED", mutated_whitelist)
+    api.clear_caches()
+    mutated = _resources(MISSILE_BOAT_TEXT)["overview"]["hardpoints"]
+
+    assert mutated["non_hardpoint"] == 0, "白名单被抹掉后不许还算「确定不占硬点」"
+    assert mutated["non_hardpoint_modules"] == []
+    assert mutated["unclassified"] == 1, "数不出来的必须落回 unclassified（不猜）"
+
+
+# =============================================================================
+# 十、`HARDPOINT_LABELS` 单一出处（summary 从 resources 导入，不另抄一份）
+# =============================================================================
+
+
+def test_hardpoint_labels_are_imported_not_copied() -> None:
+    """`summary.HARDPOINT_LABELS` 与 `resources.HARDPOINT_LABELS` 必须是**同一个对象**。"""
+    from noobbaozi.project import summary
+
+    assert summary.HARDPOINT_LABELS is R.HARDPOINT_LABELS, "两份表迟早漂移；必须是同一个对象"
+    assert summary.HARDPOINT_LABELS == {"turret": "炮位", "launcher": "发射器"}
+    # 行为不变：hint 仍要用中文短名（导入替换不能把文案打回英文）
+    envelope = api.fit_index(
+        _eft(("Heavy Beam Laser II",) * 3, (), (LAUNCHER,) * 4, name="LabelsProbe")
+    )
+    assert envelope["ok"] is True
+    hints = {flag["id"]: flag["hint"] for flag in envelope["result"]["flags"]}
+    assert hints["hardpoint_violation"] == "炮位超1+发射器超1"
+
+
+# =============================================================================
+# 十一、`_Facts.slot_usage()`：槽位总量未知时**不许当 0**（T-54 审查③）
+# =============================================================================
+
+_SLACK_ATTRS: dict[int, float] = {
+    A.ATTR_CPU_OUTPUT: 500.0,
+    A.ATTR_CPU_FREE: 400.0,  # 400 > 0.5 × 500 → 余量过半
+    A.ATTR_POWER_OUTPUT: 1000.0,
+    A.ATTR_POWER_FREE: 800.0,  # 800 > 0.5 × 1000
+}
+"""CPU / PG 余量都过半的船体属性（`resource_slack` 的前置条件）。"""
+
+
+def test_slot_usage_keeps_unknown_totals_as_none() -> None:
+    """槽位总量属性缺失 → `total` / `empty` 都是 `None`，**不许补 0**（unknown 不是 0）。
+
+    旧实现用 `_as_count(_num(...))`：属性缺失返回 0，于是「不知道有几格」被输出成
+    「0 格、0 格空」——`resource_slack` 的 `empty_slots_by_slot` 会写出「rig 0」这种假事实。
+    """
+    from noobbaozi.project import diagnostics as D
+
+    facts = D._Facts(
+        _stub_ctx(
+            {
+                A.ATTR_HI_SLOTS: 4,
+                A.ATTR_MED_SLOTS: 6,
+                A.ATTR_LOW_SLOTS: 4,
+                # 故意不给 ATTR_RIG_SLOTS：rig 的格数是**未知**
+            }
+        )
+    )
+    usage = facts.slot_usage()
+
+    assert usage["rig"] == {"used": 0, "total": None, "empty": None}, "未知必须是 None，不是 0"
+    assert usage["high"] == {"used": 1, "total": 4, "empty": 3}, "已知的照常算（used 是数出来的）"
+
+    total, summary = D._usage_summary(usage)
+    assert total is None, "任一未知 → 总数不可知"
+    assert "rig ?" in summary, "摘要里必须写 ?, 不许写成 0"
+
+
+def test_resource_slack_refuses_to_conclude_when_a_slot_total_is_unknown() -> None:
+    """正反两向：rig 未知 → `resource_slack` **不出结论**；四个总量都给出 → 出结论（含真 0）。"""
+    from noobbaozi.project import diagnostics as D
+
+    rule = D.Rule(id="resource_slack", view="resources", enabled=True, message="x")
+
+    unknown_rig = _stub_ctx(
+        {**_SLACK_ATTRS, A.ATTR_HI_SLOTS: 4, A.ATTR_MED_SLOTS: 6, A.ATTR_LOW_SLOTS: 4}
+    )
+    assert D.evaluate(unknown_rig, rules=[rule]) == [], (
+        "rig 格数未知时不许下「还有空槽」的结论（否则会写出 rig 0 这种假事实）"
+    )
+
+    all_known = _stub_ctx(
+        {
+            **_SLACK_ATTRS,
+            A.ATTR_HI_SLOTS: 4,
+            A.ATTR_MED_SLOTS: 6,
+            A.ATTR_LOW_SLOTS: 4,
+            A.ATTR_RIG_SLOTS: 3,
+        }
+    )
+    fired = D.evaluate(all_known, rules=[rule])
+    assert fired, "四个总量都在时这条规则必须能命中（证明上面那次「不报」不是因为规则死了）"
+    evidence = fired[0]["evidence"]
+    # 高 4-1=3 / 中 6 / 低 4 / 改装 3
+    assert evidence["empty_slots"] == 3 + 6 + 4 + 3
+    assert "rig 3" in evidence["empty_slots_by_slot"], "已知的槽位要报真数"
+
+
+def test_empty_hardpoint_refuses_to_conclude_when_high_total_is_unknown() -> None:
+    """高槽总量未知时 `empty_hardpoint` 同样不出结论（硬点已知也不许凑一条 flag）。"""
+    from noobbaozi.project import diagnostics as D
+
+    rule = D.Rule(id="empty_hardpoint", view="resources", enabled=True, message="{free_kinds}")
+    attrs = {
+        A.ATTR_TURRET_SLOTS_LEFT: 4,
+        A.ATTR_LAUNCHER_SLOTS_LEFT: 0,
+        # 故意不给 ATTR_HI_SLOTS
+    }
+    assert D.evaluate(_stub_ctx(attrs), rules=[rule]) == []
+
+    with_high = {**attrs, A.ATTR_HI_SLOTS: 4}
+    fired = D.evaluate(_stub_ctx(with_high), rules=[rule])
+    assert fired and fired[0]["evidence"]["free_kinds"] == "炮位3", "补上高槽总量就能报（反证）"

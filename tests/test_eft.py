@@ -111,10 +111,11 @@ def test_high_slots_are_not_hardpoints() -> None:
     assert overview["slots"]["high"]["total"] == 5, "Osprey NI 有 5 个高槽"
     assert overview["hardpoints"]["launcher"]["total"] == 3, "但发射器挂点只有 3 个"
     assert overview["hardpoints"]["turret"]["total"] == 2
-    # 真实装配：3 门 RLML（+1 件隐身）。隐身是**确定不占硬点**，按「未计入」进 unclassified，
-    # 不是「分不清」（口径说明见 views/resources.py 的 unclassified 文档）
+    # 真实装配：3 门 RLML（+1 件隐身）。隐身是**确定不占硬点**，进 `non_hardpoint`
+    # （T-54 审查①把它从 `unclassified` 里拆出来了，见 views/resources.py 的硬点文档）
     assert overview["hardpoints"]["launcher"] == {"total": 3, "used": 3, "free": 0}
-    assert overview["hardpoints"]["unclassified"] == 1, "隐身未计入任何硬点类 → 不猜"
+    assert overview["hardpoints"]["non_hardpoint"] == 1, "隐身：确定不占硬点"
+    assert overview["hardpoints"]["unclassified"] == 0, "没有「认不出」的东西"
 
 
 def test_over_install_raises_hardpoint_violation() -> None:
@@ -159,7 +160,8 @@ def test_hardpoints_is_visible_in_l0_next_to_slots() -> None:
     assert block["slots"]["high"] == "4/5"
     assert block["hardpoints"]["turret"] == {"total": 2, "used": 0, "free": 2}
     assert block["hardpoints"]["launcher"] == {"total": 3, "used": 3, "free": 0}
-    assert block["hardpoints"]["unclassified"] == 1
+    assert block["hardpoints"]["non_hardpoint"] == 1
+    assert block["hardpoints"]["unclassified"] == 0
     # L0 的值必须能原路取回（文档 §1 的关键约束）
     answer = api.fit_get(OSPREY_REAL_TEXT, "resources.hardpoints.launcher.free")
     assert answer["ok"] is True, answer.get("error")
@@ -226,21 +228,22 @@ def test_empty_hardpoint_uses_the_same_free() -> None:
         ("Light Entropic Disintegrator II", "Precursor Weapon", "turret"),
         ("Strip Miner I", "Strip Miner", "turret"),
         ("Miner II", "Mining Laser", "turret"),
-        # 分不清 / 确定不占硬点 → 一律 None（进 unclassified，**不许猜**）
-        ("Improved Cloaking Device II", "Cloaking Device", None),
-        ("Scan Probe Launcher II", "Scan Probe Launcher", None),
-        ("Expanded Probe Launcher I", "Scan Probe Launcher", None),
-        ("Survey Probe Launcher I", "Survey Probe Launcher", None),
-        ("Tractor Beam II", "Tractor Beam", None),
-        ("Festival Launcher I", "Festival Launcher", None),
-        ("Interdiction Sphere Launcher I", "Interdiction Sphere Launcher", None),
+        # 确定不占硬点（T-54 审查①：它们**不再**混进 unclassified）→ 独立桶 non_hardpoint
+        ("Improved Cloaking Device II", "Cloaking Device", "non_hardpoint"),
+        ("Scan Probe Launcher II", "Scan Probe Launcher", "non_hardpoint"),
+        ("Expanded Probe Launcher I", "Scan Probe Launcher", "non_hardpoint"),
+        ("Survey Probe Launcher I", "Survey Probe Launcher", "non_hardpoint"),
+        ("Tractor Beam II", "Tractor Beam", "non_hardpoint"),
+        # 真分不清 → unclassified（只计数，不许猜）
+        ("Festival Launcher I", "Festival Launcher", "unclassified"),
+        ("Interdiction Sphere Launcher I", "Interdiction Sphere Launcher", "unclassified"),
         # 反例：`ion` 必须**整词**匹配，否则 447 个「-tion」结尾的普通模块全会中招
-        ("Reaction Control Unit", "Miscellaneous", None),
-        ("Compression Module", "Miscellaneous", None),
-        (None, None, None),
+        ("Reaction Control Unit", "Miscellaneous", "unclassified"),
+        ("Compression Module", "Miscellaneous", "unclassified"),
+        (None, None, "unclassified"),
     ],
 )
-def test_hardpoint_kind_classification(name: object, group: object, expected: str | None) -> None:
+def test_hardpoint_kind_classification(name: object, group: object, expected: str) -> None:
     """分类规则逐条钉住（表在 `views/resources.py` 的 `HARDPOINT_*`）。"""
     assert R._hardpoint_kind(name, group) == expected
 
@@ -257,13 +260,14 @@ def test_hardpoints_counts_only_high_slots() -> None:
         item("Mining Laser Upgrade II", "Mining Upgrade", "low"),  # 低槽 → 不计
         item("Torpedo Launcher II", "Missile Launcher Torpedo", "high"),  # launcher
         item("Small Shield Extender II", "Shield Extender", "medium"),  # 中槽 → 不计
-        item("Improved Cloaking Device II", "Cloaking Device", "high"),  # unclassified
+        item("Improved Cloaking Device II", "Cloaking Device", "high"),  # non_hardpoint
     ]
     block = R.hardpoints(attrs, fitted)
 
     assert block["turret"] == {"total": 2, "used": 1, "free": 1}
     assert block["launcher"] == {"total": 3, "used": 1, "free": 2}
-    assert block["unclassified"] == 1
+    assert block["non_hardpoint"] == 1, "隐身是确定不占硬点（不是「认不出」）"
+    assert block["unclassified"] == 0
 
 
 def test_hardpoints_never_invents_a_total() -> None:
@@ -377,11 +381,23 @@ def test_eft_roundtrip_through_the_api() -> None:
 
 
 def test_eft_header_without_fit_name() -> None:
-    """配装名为空 → 首行只写 `[船名]`（任务书 §格式 1）。"""
+    """配装名为空 → 首行只写 `[船名]`（任务书 §格式 1），**且这条形态能往返**。
+
+    `[船名]`（无逗号）是任务书要求的写法；解析侧对它的接受由
+    `engine/normalize._match_eft_header()` 保证（`[Ship]` 与 `[Ship, name]` 都认，
+    但 `[Empty High slot]` 这类占位行不会被当成船名行）。没有这一步，
+    `parse_fit()["eft"]` 对空名配装会输出一份**自己读不回来**的文本。
+    """
     from noobbaozi.engine import normalize
 
     fit = normalize.normalize_fit("[Osprey Navy Issue, ]\nDamage Control II\n")["fit"]
-    assert eft.emit(fit, api.get_index()).split("\n")[0] == "[Osprey Navy Issue]"
+    index = api.get_index()
+    emitted = eft.emit(fit, index)
+    assert emitted.split("\n")[0] == "[Osprey Navy Issue]"
+
+    back = normalize.normalize_fit(emitted)
+    assert back["fit"] is not None, back.get("errors")
+    assert eft.emit(back["fit"], index) == emitted, "空名配装也必须往返稳定"
 
 
 def test_eft_refuses_to_invent_names() -> None:

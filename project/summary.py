@@ -156,6 +156,10 @@ from noobbaozi.project import render
 from noobbaozi.project.views import available_views
 from noobbaozi.project.views.base import ViewContext
 from noobbaozi.project.views.loader import load_views
+# 硬点类别 → 中文短名：**从投影层导入，不在这里另抄一份**（T-54 审查②：两份同值表迟早漂移；
+# `tests/test_t54_audit.py` 用 `is` 断言同源）。方向是 summary → views.resources，不成环：
+# `views.resources` 只依赖 `views` 包与 `views.base`，从不 import `summary`。
+from noobbaozi.project.views.resources import HARDPOINT_LABELS
 
 # =============================================================================
 # 一、常量与口径
@@ -480,6 +484,10 @@ INDEX_SPEC: dict[str, tuple[IndexField, ...]] = {
                 ("launcher.total", "hardpoints.launcher.total"),
                 ("launcher.used", "hardpoints.launcher.used"),
                 ("launcher.free", "hardpoints.launcher.free"),
+                # T-54 审查①：两种「不计入硬点」的计数都要能在 L0 取到
+                # （`non_hardpoint` = 确定不占硬点；`unclassified` = 真分不清，语义收窄）
+                ("non_hardpoint", "hardpoints.non_hardpoint"),
+                ("non_hardpoint_modules", "hardpoints.non_hardpoint_modules"),
                 ("unclassified", "hardpoints.unclassified"),
             ),
         ),
@@ -673,8 +681,7 @@ _DAMAGE_LABELS: dict[str, str] = {
 _RESOURCE_LABELS: dict[str, str] = {"cpu": "CPU", "power": "PG", "powergrid": "PG", "calibration": "标定"}
 """资源三项的短名（`*_deficit` 的键去掉后缀之后 → 显示名）。"""
 
-_HARDPOINT_LABELS: dict[str, str] = {"turret": "炮位", "launcher": "发射器"}
-"""两种硬点的短名（`hardpoint_violation.evidence.kind` → 中文；只翻译，不产生新事实）。"""
+# 硬点类别的中文短名统一由 `views.resources.HARDPOINT_LABELS` 提供（见顶部 import）。
 
 
 def _hint_label(table: Mapping[str, str], value: object) -> str:
@@ -769,7 +776,7 @@ _HINT_SHAPES: tuple[tuple[tuple[str, ...], Callable[[Mapping[str, object]], str]
     (("over_kinds",), lambda e: _hint_compact(e["over_kinds"])),
     (
         ("kind", "over"),
-        lambda e: f"{_hint_label(_HARDPOINT_LABELS, e['kind'])}超{_hint_number(e['over'])}",
+        lambda e: f"{_hint_label(HARDPOINT_LABELS, e['kind'])}超{_hint_number(e['over'])}",
     ),
     # 关掉这一件电容就稳 → "关5MN就稳"
     (("module", "stable_pct_after"), lambda e: f"关{_hint_token(e['module'])}就稳"),

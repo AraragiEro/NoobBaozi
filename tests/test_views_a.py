@@ -473,15 +473,20 @@ def test_firepower_overload_matches_engine_variant(ctx: ViewContext) -> None:
     assert _close(overview["overload"]["delta"]["range_m"], 0.0)
 
 
-def test_firepower_hardpoints_free_match_ship_attributes(ctx: ViewContext) -> None:
-    """空闲挂点：102 / 101 直接取，与资源视角同名字段同源。"""
-    overview = build_view("firepower", ctx)["overview"]
-    attrs = ctx.attrs(BASE)
+def test_firepower_no_longer_exposes_hardpoints_free(ctx: ViewContext) -> None:
+    """**炮位只有一个出处**：`firepower` 不再输出 `hardpoints_free`（T-54 审查追加）。
 
-    assert _close(overview["hardpoints_free"]["turret"], round(attrs[A.ATTR_TURRET_SLOTS_LEFT], 3))
-    assert _close(
-        overview["hardpoints_free"]["launcher"], round(attrs[A.ATTR_LAUNCHER_SLOTS_LEFT], 3)
+    旧实现在这里直读 102 / 101（船体**基准炮位数**）当「空闲挂点」，与装配无关 ——
+    同一艘 Osprey NI 装 0 / 3 / 5 门发射器都输出 `{turret: 2.0, launcher: 3.0}`。
+    正确的口径（`total` / `used` / `free` 三段）在 `resources.hardpoints`，归资源视角。
+    """
+    overview = build_view("firepower", ctx)["overview"]
+
+    assert "hardpoints_free" not in overview, (
+        "firepower 不许再输出旧口径的 hardpoints_free："
+        "它是船体基准炮位数、与装配无关；正确值看 resources.hardpoints"
     )
+    assert not [key for key in overview if "hardpoint" in key], "本视角一个 hardpoint* 键都不许有"
 
 
 def test_firepower_missile_range_is_flight_time_times_velocity(ctx_from_eft) -> None:

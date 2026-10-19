@@ -110,10 +110,6 @@ def _good_payload(facts: ra.CaseFacts, oracle) -> dict:
             "on": {"dps": tv(dps * 1.15, unit="hp/s"), "range_m": tv(gun_range, unit="m")},
             "delta": {"dps": tv(dps * 0.15, unit="hp/s"), "range_m": tv(0.0, unit="m")},
         },
-        "hardpoints_free": {
-            "turret": tv(ship.get(102) or 0, unit="个", source_attr=102),
-            "launcher": tv(ship.get(101) or 0, unit="个", source_attr=101),
-        },
     }
 
     view_survivability = {
@@ -175,6 +171,8 @@ def _good_payload(facts: ra.CaseFacts, oracle) -> dict:
             "overload": {"speed_mps": tv(ship.get(37), unit="m/s"),
                          "sig_m": tv(ship.get(552), unit="m"),
                          "align_time_s": tv(ship.get(-1), unit="s")},
+            # T-43：单推进配装 → 空数组（形状恒定，不许整块省略）
+            "single": [],
         },
     }
 
@@ -209,9 +207,20 @@ def _good_payload(facts: ra.CaseFacts, oracle) -> dict:
             "low": {"used": tv(4, unit="个"), "total": tv(low_total, unit="个")},
             "rig": {"used": tv(3, unit="个"), "total": tv(rig_total, unit="个")},
         },
-        "hardpoints_free": {
-            "turret": tv(ship.get(102) or 0, unit="个", source_attr=102),
-            "launcher": tv(ship.get(101) or 0, unit="个", source_attr=101),
+        "hardpoints": {
+            "turret": {
+                "total": tv(ship.get(102) or 0, unit="个"),
+                "used": tv(0, unit="个"),
+                "free": tv(ship.get(102) or 0, unit="个", source_attr=102),
+            },
+            "launcher": {
+                "total": tv(ship.get(101) or 0, unit="个"),
+                "used": tv(0, unit="个"),
+                "free": tv(ship.get(101) or 0, unit="个", source_attr=101),
+            },
+            "non_hardpoint": tv(0, unit="个"),
+            "non_hardpoint_modules": tv([]),
+            "unclassified": tv(0, unit="个"),
         },
         "drone": {
             "bandwidth": {"used": tv(0.0, unit="Mbit/s"), "total": tv(ship.get(1271), unit="Mbit/s", source_attr=1271)},
@@ -725,7 +734,14 @@ def mutation_alignment_as_ms(payload, facts):
 
 
 def mutation_hardpoints_disagree(payload, facts):
-    payload["views"]["resources"]["overview"]["hardpoints_free"]["turret"]["value"] = 99.0
+    """炮位三态不自洽：free 与 total-used 不等（旧版是"两视角不一致"，已随字段合并改写）。"""
+    node = payload["views"]["resources"]["overview"]["hardpoints"]["turret"]
+    total = node["total"]["value"] if isinstance(node.get("total"), dict) else node["total"]
+    used = node["used"]["value"] if isinstance(node.get("used"), dict) else node["used"]
+    if isinstance(node.get("free"), dict):
+        node["free"]["value"] = float(total) - float(used) + 5.0
+    else:
+        node["free"] = float(total) - float(used) + 5.0
     return payload, "口径错误"
 
 

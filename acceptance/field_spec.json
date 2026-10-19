@@ -200,27 +200,6 @@
      "source_attrs": [],
      "meaning": "过载前后 dps/range 变化",
      "severe": "medium"
-    },
-    {
-     "name": "hardpoints_free",
-     "aliases": [
-      "hardpoints"
-     ],
-     "kind": "object",
-     "subpaths": [
-      "turret",
-      "launcher"
-     ],
-     "provenance": "measured",
-     "confidence": "A",
-     "confidence_basis": "102 turretSlotsLeft / 101 launcherSlotsLeft，§9 已确认",
-     "unit": "个",
-     "source_attrs": [
-      102,
-      101
-     ],
-     "meaning": "空闲挂点；与资源视角同名字段**必须由同一函数计算且值相等**（Lead 裁决 2026-10-18）",
-     "severe": "medium"
     }
    ]
   },
@@ -590,25 +569,25 @@
      }
     },
     {
-     "name": "hardpoints_free",
-     "aliases": [
-      "hardpoints"
-     ],
+     "name": "hardpoints",
+     "aliases": [],
      "kind": "object",
      "subpaths": [
       "turret",
-      "launcher"
+      "launcher",
+      "unclassified"
      ],
      "provenance": "measured",
      "confidence": "A",
-     "confidence_basis": "102/101 由船体与装配决定",
+     "confidence_basis": "total 由船体决定（102/101 的基准），used/free 由装配决定；旧 hardpoints_free 把「高槽数」当挂点数，已废弃",
      "unit": "个",
      "source_attrs": [
       102,
       101
      ],
-     "meaning": "空闲炮台/发射器挂点（102 turretSlotsLeft / 101 launcherSlotsLeft）；与火力视角同名字段**必须由同一函数计算且值相等**（Lead 裁决 2026-10-18）",
-     "severe": "medium"
+     "meaning": "炮位三态 {turret:{total,used,free}, launcher:{...}, non_hardpoint, non_hardpoint_modules, unclassified}；**free 可为负**（负值=非法超装，此时出 hardpoint_violation flag）。旧字段 hardpoints_free 已删除，且**只在 resources 一处出现**（firepower 不再重复登记）",
+     "severe": "high",
+     "since": "T-55（炮位口径修正）"
     },
     {
      "name": "drone",
@@ -978,7 +957,7 @@
   "authoritative_sample": "Hecate + 1 炮的最小探针配装（fixtures/f3-hecate-modes）——文档快照只认它；killmail 样本只验结构与方向（Lead 裁决 2026-10-18）",
   "note": "runner 三层校验：结构 → 方向 → 数值（数值用引擎独立重算对拍；最小探针再对 fixture 期望值）"
  },
- "field_total": 44,
+ "field_total": 43,
  "provenance_rules": {
   "instance_none": {
    "when": "该叶子在本次计算里值为 None",
@@ -1035,5 +1014,11 @@
    "f47-random-raptor",
    "f67-spotcheck-139255942"
   ]
+ },
+ "hardpoints_rules": {
+  "single_source": "resources.hardpoints 是唯一出处；firepower 不得再出现 hardpoints/hardpoints_free",
+  "free_formula": "free == total - used，可为负（负值即非法超装）",
+  "flag": "free < 0 时应出 hardpoint_violation",
+  "since": "T-55"
  }
 }

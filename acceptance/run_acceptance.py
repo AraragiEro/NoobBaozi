@@ -130,8 +130,8 @@ SEMANTIC_MAP: dict[str, int] = {
     "powergrid.load": 15,
     "calibration.output": 1132,
     "calibration.load": 1152,
-    "hardpoints_free.turret": 102,
-    "hardpoints_free.launcher": 101,
+    "hardpoints.turret.total": 102,
+    "hardpoints.launcher.total": 101,
     "drone.bandwidth.total": 1271,
     "drone.capacity.total": 283,
     "cargo.total": 38,
@@ -1303,7 +1303,7 @@ def check_ammo_endurance(case: str, payload: dict, facts: CaseFacts) -> list[Def
     consumables_value = (consumables or {}).get("ammo_endurance_s") \
         if isinstance(consumables, dict) else None
 
-    # 同一事实在两个视角必须一致（与 hardpoints_free 同类）
+    # 炮位**只有一个出处**（resources.hardpoints）；下面用形状+自洽性检查兜住
     if is_number(firepower_value) and consumables_value is None:
         defects.append(Defect(
             "口径错误", "medium", case, "stability.consumables.ammo_endurance_s",
@@ -2016,23 +2016,41 @@ def check_semantics(case: str, views: dict, facts: CaseFacts, index=None) -> lis
                                       f"{expected_value!r}", f"{float(target)!r}", note))
     # 资源视角与火力视角的同名字段必须一致
     both = []
-    for view_name in ("firepower", "resources"):
+    # 炮位：**单一出处** resources.hardpoints（旧 hardpoints_free 已删除）。
+    # 检查两件事：① 不得在别处重复登记；② 三态自洽 free == total - used（可为负）。
+    for view_name in views:
         node = resolve_view(views, view_name)
-        if isinstance(node, dict) and isinstance(node.get("hardpoints_free"), dict):
-            both.append((view_name, node["hardpoints_free"]))
-    if len(both) == 2:
-        (_, left), (_, right) = both
-        for key in ("turret", "launcher"):
-            lv = left.get(key)
-            rv = right.get(key)
-            lv = lv.get("value") if isinstance(lv, dict) else lv
-            rv = rv.get("value") if isinstance(rv, dict) else rv
-            if is_number(lv) and is_number(rv) and not rel_close(float(lv), float(rv), 1e-9):
-                defects.append(Defect("口径错误", "medium", case,
-                                      f"hardpoints_free.{key}",
-                                      "火力与资源两视角取值一致",
-                                      f"firepower={lv} resources={rv}",
-                                      "同一事实在两个视角给出不同值"))
+        if not isinstance(node, dict):
+            continue
+        for legacy in ("hardpoints_free", "hardpoints"):
+            if legacy in node and not (view_name == "resources" and legacy == "hardpoints"):
+                defects.append(Defect(
+                    "口径错误", "medium", case, f"{view_name}.{legacy}",
+                    "炮位只有一个出处（resources.hardpoints）",
+                    f"{view_name} 里也出现了 {legacy}",
+                    "重复出处 = 两处迟早漂移"))
+    resources_node = resolve_view(views, "resources")
+    hardpoints = resources_node.get("hardpoints") if isinstance(resources_node, dict) else None
+    if isinstance(hardpoints, dict):
+        for kind in ("turret", "launcher"):
+            node = hardpoints.get(kind)
+            if not isinstance(node, dict):
+                continue
+            values = {}
+            for key in ("total", "used", "free"):
+                raw = node.get(key)
+                values[key] = raw.get("value") if isinstance(raw, dict) else raw
+            if all(is_number(values[key]) for key in ("total", "used", "free")):
+                expect_free = float(values["total"]) - float(values["used"])
+                if not rel_close(float(values["free"]), expect_free, 1e-9):
+                    defects.append(Defect(
+                        "口径错误", "high", case, f"resources.hardpoints.{kind}.free",
+                        f"free == total - used == {expect_free}",
+                        f"total={values['total']} used={values['used']} free={values['free']}",
+                        "三态不自洽（允许负值，但不允许算错）"))
+    elif hardpoints is not None:
+        defects.append(Defect("口径错误", "high", case, "resources.hardpoints",
+                              "object", type(hardpoints).__name__))
 
     # `damage_split` 是 **0..1 比率**（四值之和 = 1）；渲染层不做 ×100（Lead 裁决 2026-10-18）。
     for view_name in views:

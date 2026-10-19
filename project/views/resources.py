@@ -40,7 +40,9 @@
 | `total` | 船体属性 102 / 101（引擎已叠加模块的 `turretHardPointModifier` 等修正） | `measured` |
 | `used` | **我们自己数已装模块**（分类规则见下） | `assumed` |
 | `free` | `total - used`，**可以为负**（负数 = 非法装配，由 `hardpoint_violation` flag 报） | `assumed` |
-| `unclassified` | 高槽里**未计入**任何硬点类的已装模块件数（含「确定不占硬点」与「分不清」两类，**都不许猜进 `used`**） | `assumed` |
+| `non_hardpoint` | 高槽里**确定不占硬点**的件数（隐身 / 智能炸弹 / 吸电 / 遥修…），**一件都不进 `used`** | `assumed` |
+| `non_hardpoint_modules` | 上面那件事的**样例名字**（最多 3 个，人读时不用猜是哪件） | `assumed` |
+| `unclassified` | 高槽里**分不清**是炮还是发射器的件数（`Festival Launcher` 一族，**不许猜进 `used`**） | `assumed` |
 
 `total` 缺失（属性没有）时 `free` 也是 `None`（缺值不补 0，红线 N4）；`used` 仍然是数出来的
 真值（0 就是真 0）。
@@ -49,22 +51,24 @@
 
 低槽的 `Mining Laser Upgrade` 名字含 `Laser`，但不是炮位，靠「只看高槽」这一条挡掉）：
 
-1. 组名命中 `HARDPOINT_UNCLASSIFIED_GROUPS` → **不计入任何一类**，进 `unclassified`
-   （确定不占硬点的，如 `Scan Probe Launcher` / `Tractor Beam`；以及**分不清**的，
-   如 `Festival Launcher` / `Interdiction Sphere Launcher`——**不许猜**）；
-2. 名字或组名含 `launcher` → `launcher`（`Rapid Light Missile Launcher` /
+1. 组名命中 `HARDPOINT_NON_HARDPOINT_GROUPS` → **确定不占硬点**，进 `non_hardpoint`
+   （`Cloaking Device` / `Smart Bomb` / `Energy Neutralizer` / `Energy Nosferatu` /
+   `Remote Armor Repairer` / `Scan Probe Launcher` / `Tractor Beam` / `Command Burst`…，
+   每一行为什么确定都写在表里）；
+2. 组名命中 `HARDPOINT_UNCLASSIFIED_GROUPS` → **分不清**，进 `unclassified`
+   （`Festival Launcher` / `Interdiction Sphere Launcher`——**不许猜**）；
+3. 名字或组名含 `launcher` → `launcher`（`Rapid Light Missile Launcher` /
    `Heavy Missile Launcher` / `Torpedo Launcher` / `Rocket Launcher` / `Cruise Missile Launcher`…）；
-3. 名字或组名含 `HARDPOINT_TURRET_KEYWORDS` 之一 → `turret`；其中 `ion` 按**整词**匹配
+4. 名字或组名含 `HARDPOINT_TURRET_KEYWORDS` 之一 → `turret`；其中 `ion` 按**整词**匹配
    （SDE 实测：`ion` 当子串会命中 447 个模块——凡是 `-tion` 结尾的普通词都会中，
    整词匹配后只剩 `Ion Blaster` 这类真正的炮）；
-4. 都不命中 → `unclassified`（计数，不给结论）。
+5. 都不命中 → `unclassified`（计数，不给结论）。
 
-`unclassified` 是个**混装计数**，别把它读成「我们不知道」：它同时收两类完全不同的东西——
-①**确定不占硬点**（`Cloaking Device` / `Smart Bomb` / `Energy Neutralizer` / `Energy Nosferatu` /
-`Remote Armor Repairer` / `Scan Probe Launcher` / `Tractor Beam`，它们本来就不该进任何一类）；
-②**分不清**（`Festival Launcher` / `Interdiction Sphere Launcher`）。两类在输出上等价
-（都不许计入 `used`），但语义不同：①是已知事实，②才是未知。字段名保持 `unclassified`
-（L0 已暴露的路径是契约），这里把话说清楚，免得下游把「一件隐身」读成「一件来路不明的模块」。
+**为什么把 `non_hardpoint` 和 `unclassified` 拆成两个数**（T-54 审查）：拆之前它们挤在一个
+`unclassified` 里，于是 Osprey 真实装配的 `unclassified: 1` 读起来像「有一件武器我们认不出」，
+实际是那件**隐身**（确定不占硬点）。现在：确定的进 `non_hardpoint`（还带样例名字），
+只有**真正分不清**的才留在 `unclassified` —— 后者 `> 0` 就是一条维护信号（「可能漏收了一族」，
+`Gas Cloud Harvester` 当年就躲在这里）。
 
 `used` 一律 `assumed`：这是**按名字/组名的启发式分类**，不是引擎算出来的（SDE 里没有
 「这个模块占几个炮位」的属性，只有船体侧的 102 / 101 总量）。分不清就进 `unclassified`，
@@ -192,38 +196,80 @@ HARDPOINT_WHOLE_WORD_KEYWORDS: frozenset[str] = frozenset({"ion"})
 结尾的普通词（`Compression` / `Reaction` / `Station`…）都会中，整词匹配后只剩
 `Ion Blaster` / `Ion Siege Blaster` 这类真正的炮。"""
 
-HARDPOINT_UNCLASSIFIED_GROUPS: frozenset[str] = frozenset(
+HARDPOINT_NON_HARDPOINT_GROUPS: frozenset[str] = frozenset(
     {
-        # —— 确定**不占**炮位（高槽、名字/组名含关键词，但装它不消耗 turret/launcher 硬点）
-        "Scan Probe Launcher",  # 探针发射器：占高槽，不占发射器硬点（SDE group 481）
+        # —— **确定不占硬点**的高槽模块组（T-54 审查拆分：这些不再是「分不清」）
+        #
+        # 白名单本身就是判据（SDE 里**没有**「这个模块占几个炮位」的属性），所以每一行都要能
+        # 说清「为什么确定」。取证方式：用引擎 `normalize` 逐件实测槽位 —— **全部落在 `high`**，
+        # 且「装它不消耗 turret / launcher 硬点」是游戏内的确定事实（不是我们猜的）。
+        "Cloaking Device",  # 隐形（Improved / Covert Ops / Prototype 同组，实测 high）
+        "Smart Bomb",  # 智能炸弹（实测 high，不占硬点）
+        "Energy Nosferatu",  # 吸电（实测 high）
+        "Energy Neutralizer",  # 毁电（实测 high）
+        "Remote Armor Repairer",  # 遥修装甲（实测 high）
+        "Remote Shield Booster",  # 遥修护盾（实测 high）
+        "Remote Hull Repairer",  # 遥修结构（实测 high）
+        "Remote Capacitor Transmitter",  # 遥修电容 / 传电（实测 high）
+        "Salvager",  # 打捞器（实测 high，不占硬点）
+        "Tractor Beam",  # 牵引光束：名字含 `Beam`（group 650，实测 high）
+        "Scan Probe Launcher",  # 探针发射器：名字含 `launcher`，但不占发射器硬点（group 481）
         "Survey Probe Launcher",  # 同上（group 1226）
-        "Tractor Beam",  # 名字含 Beam，但它是牵引光束（group 650）
+        "Cynosural Field Generator",  # 诱导力场发生器（常规与隐形**同组**，实测 high）
+        "Jump Portal Generator",  # 跳桥发生器（实测 high）
+        "Clone Vat Bay",  # 克隆舱（实测 high）
+        "Siege Module",  # 会战模块：`Bastion` / `Siege` / `Triage` 三族**同组**（实测 high）
+        "Command Burst",  # 指挥脉冲（Shield / Armor / Skirmish / Information / Mining 同组，实测 high）
         "Super Weapon",  # 旗舰末日武器（group 588）
-        "Gang Coordinator",  # Mining Foreman Link - Laser Optimization 等指挥模块（名字含 Laser）
-        # —— **分不清**（任务书：不许猜 → 一律 unclassified）
-        "Festival Launcher",
-        "Breacher Pod Launchers",
-        "Interdiction Sphere Launcher",
+        "Gang Coordinator",  # 指挥模块（`Mining Foreman Link - Laser Optimization` 名字含 Laser）
     }
 )
-"""名字/组名含关键词、但**不计入** `turret` / `launcher` 的组（一律进 `unclassified`）。
-两类都放这里，理由写在每一行的注释上——**确定不占硬点**与**分不清**在输出上等价
-（都不许计入 `used`），但都不是「猜一个」。
+"""**确定不占硬点**的高槽模块组 → 计入 `hardpoints.non_hardpoint`（**不是** `unclassified`）。
+
+为什么不含 `Micro Jump Field Generator`：引擎实测它是**中槽**，永远进不了硬点统计。
+"""
+
+HARDPOINT_UNCLASSIFIED_GROUPS: frozenset[str] = frozenset(
+    {
+        # —— **分不清**（既证明不了它占硬点，也证明不了它不占）→ 只计数，不猜
+        "Festival Launcher",
+        "Breacher Pod Launchers",
+        "Interdiction Sphere Launcher",  # 实测在 high 槽，但「是否消耗发射器硬点」没有证据
+    }
+)
+"""**分不清**的高槽模块组 → 计入 `hardpoints.unclassified`（`used` 一件都不许加）。
+
+T-54 审查拆分（诚实性）：拆之前这两类**混在同一个 `unclassified` 计数**里 ——
+Osprey 真实装配的 `unclassified: 1` 其实是**隐身**（确定不占硬点），读起来却像
+「有一件武器我们认不出」。现在确定的那类有独立字段 `non_hardpoint`（带样例名字）。
 """
 
 HARDPOINT_UNCLASSIFIED: str = "unclassified"
-"""`hardpoints` 里「**未计入**任何硬点类」的件数字段名。
+"""`hardpoints` 里**分不清**是炮还是发射器的件数字段名（只装 `HARDPOINT_UNCLASSIFIED_GROUPS`）。"""
 
-名字容易读歪：它**不是**「我们不知道这是什么」，而是「我们**没有把它算进** `turret` / `launcher`」。
-里面混着两类（见模块 docstring 第 4 条）：确定不占硬点的（隐身 / 智能炸弹 / 吸电 / 毁电 /
-遥修 / 探针发射器 / 牵引光束）与真正分不清的（`Festival Launcher` 一族）。
+HARDPOINT_NON_HARDPOINT: str = "non_hardpoint"
+"""`hardpoints` 里**确定不占硬点**的件数字段名（装 `HARDPOINT_NON_HARDPOINT_GROUPS`）。"""
+
+HARDPOINT_NON_HARDPOINT_MODULES: str = "non_hardpoint_modules"
+"""`hardpoints` 里 `non_hardpoint` 的**样例名字**（最多 `NON_HARDPOINT_SAMPLE` 个，便于人看懂）。
+
+人读 `non_hardpoint: 1` 会问「哪一件？」——所以这里带 1~3 个真名字。**只放真实存在的模块名**
+（来自 `${item['name']}`），查不到名字就只给计数、不编。
 """
 
+NON_HARDPOINT_SAMPLE: int = 3
+"""`non_hardpoint_modules` 最多列几个名字（题面要求「最多 3 个」；再多就只是噪音）。"""
+
 HARDPOINT_LABELS: dict[str, str] = {"turret": "炮位", "launcher": "发射器"}
-"""硬点类别的中文短名（`diagnostics` 的 evidence 文案用它；`summary` 也有一份同值的表）。
+"""硬点类别的中文短名（`diagnostics` 的 evidence 文案用它；`summary` **从这里导入**，不另抄一份）。
 
 **只做领域词翻译，不产生任何新事实**：键就是 `HARDPOINT_KINDS` 的两个值。
 """
+
+HARDPOINT_NON_HARDPOINT_GROUPS_FOLDED: frozenset[str] = frozenset(
+    name.casefold() for name in HARDPOINT_NON_HARDPOINT_GROUPS
+)
+"""`HARDPOINT_NON_HARDPOINT_GROUPS` 的小写影子表（组名比对统一走小写，避免大小写分叉）。"""
 
 HARDPOINT_UNCLASSIFIED_GROUPS_FOLDED: frozenset[str] = frozenset(
     name.casefold() for name in HARDPOINT_UNCLASSIFIED_GROUPS
@@ -339,6 +385,10 @@ FIELD_SOURCES: dict[str, int | None] = {
     "hardpoints.launcher.total": A.ATTR_LAUNCHER_SLOTS_LEFT,
     "hardpoints.launcher.used": None,
     "hardpoints.launcher.free": None,
+    # 两种「不计入 hardpoint」的计数（T-54 审查拆分）：
+    # `non_hardpoint` = 确定不占硬点；`unclassified` = 真分不清。两者都是数出来的合成值。
+    "hardpoints.non_hardpoint": None,
+    "hardpoints.non_hardpoint_modules": None,
     "hardpoints.unclassified": None,
     # 无人机：上限来自船体，占用是从 items 合成的
     "drone.bandwidth.used": None,
@@ -458,44 +508,71 @@ def _matches_keyword(text: str, keyword: str) -> bool:
     return keyword in text
 
 
-def _hardpoint_kind(name: object, group_name: object) -> str | None:
-    """一个高槽模块 → `"turret"` / `"launcher"` / `None`（分不清或确定不占硬点）。
+def _hardpoint_kind(name: object, group_name: object) -> str:
+    """一个高槽模块 → **四态之一**（不是「是/不是炮」的二值）：
 
-    规则顺序就是 `HARDPOINT_UNCLASSIFIED_GROUPS` → launcher → turret（见模块 docstring）：
-    先排除「不占硬点 / 分不清」的组，再判发射器（`launcher` 比 `laser` 这类词更具体），
-    最后判炮。**全部判不出来就是 `None`，不猜。**
+    | 返回 | 含义 | 谁消费 |
+    |---|---|---|
+    | `"turret"` / `"launcher"` | 关键词命中，**推定**占该类硬点 | 计入 `used` |
+    | `"non_hardpoint"` | 组名在 `HARDPOINT_NON_HARDPOINT_GROUPS` 里，**确定不占** | 计入 `non_hardpoint` 计数 |
+    | `"unclassified"` | 既判不出武器类、也不在确定白名单里 —— **分不清** | 只计数，不进 `used` |
+
+    规则顺序：确定白名单 →「分不清」组 → launcher 关键词 → turret 关键词 → 兜底 `unclassified`。
+    白名单**必须先行**：`Scan Probe Launcher` 组名含 `launcher`、`Tractor Beam` 含 `beam`，
+    先判关键词就会把它们算成武器。
     """
     group = str(group_name or "").strip()
-    if group.casefold() in HARDPOINT_UNCLASSIFIED_GROUPS_FOLDED:
-        return None
+    folded = group.casefold()
+    if folded in HARDPOINT_NON_HARDPOINT_GROUPS_FOLDED:
+        return HARDPOINT_NON_HARDPOINT
+    if folded in HARDPOINT_UNCLASSIFIED_GROUPS_FOLDED:
+        return HARDPOINT_UNCLASSIFIED
     text = f"{name or ''} {group}".lower()
     if not text.strip():
-        return None
+        return HARDPOINT_UNCLASSIFIED
     if any(_matches_keyword(text, keyword) for keyword in LAUNCHER_KEYWORDS):
         return "launcher"
     if any(_matches_keyword(text, keyword) for keyword in HARDPOINT_TURRET_KEYWORDS):
         return "turret"
-    return None
+    # 没命中任何关键词、也不在确定白名单里 → **不猜**（这可能是我们漏收的一族真炮，
+    # 历史实证：`Gas Cloud Harvester` 就是这样躲过关键词表的）
+    return HARDPOINT_UNCLASSIFIED
 
 
 def hardpoints(attrs: dict[int, float], fitted: list[tuple[int, dict]]) -> dict:
-    """炮位三段 `{kind: {total, used, free}}` + `unclassified` 件数（T-54）。
+    """炮位三段 `{kind: {total, used, free}}` + `non_hardpoint` / `unclassified` 两个计数（T-54）。
 
     - `total` ← 船体属性 102 / 101（**基准值**，引擎已把模块的 hardpoint 修正叠进去）；
     - `used` ← **数**高槽里被 `_hardpoint_kind()` 判成该类的已装模块（启发式 → `assumed`）；
     - `free = total - used`，**可以为负**（负数 = 非法装配，`hardpoint_violation` 负责报）；
-    - `total` 缺失 → `free = None`（缺值不补 0）；`used` 仍是数出来的真值。
+    - `total` 缺失 → `free = None`（缺值不补 0）；`used` 仍是数出来的真值；
+    - `non_hardpoint` ← **确定不占硬点**的件数（隐身 / 智能炸弹 / 吸电 / 遥修…）；
+      `non_hardpoint_modules` 带最多 `NON_HARDPOINT_SAMPLE` 个真名字（人读时不用再猜是哪件）；
+    - `unclassified` ← 只剩**真正分不清**的（`Festival Launcher` / `Interdiction Sphere Launcher`）。
     """
     counted = dict.fromkeys(HARDPOINT_KINDS, 0)
+    non_hardpoint = 0
+    non_hardpoint_modules: list[str] = []
     unclassified = 0
     for _position, item in fitted:
         if item.get("slot_type") != HARDPOINT_SLOT_TYPE:
             continue
         kind = _hardpoint_kind(item.get("name"), item.get("group_name"))
-        if kind is None:
-            unclassified += 1
+        if kind in counted:
+            counted[kind] += 1
             continue
-        counted[kind] += 1
+        if kind == HARDPOINT_NON_HARDPOINT:
+            non_hardpoint += 1
+            module_name = item.get("name")
+            if (
+                isinstance(module_name, str)
+                and module_name.strip()
+                and module_name not in non_hardpoint_modules
+                and len(non_hardpoint_modules) < NON_HARDPOINT_SAMPLE
+            ):
+                non_hardpoint_modules.append(module_name)
+            continue
+        unclassified += 1
 
     block: dict[str, object] = {}
     for kind in HARDPOINT_KINDS:
@@ -506,6 +583,8 @@ def hardpoints(attrs: dict[int, float], fitted: list[tuple[int, dict]]) -> dict:
             "used": used,
             "free": None if total is None else total - used,
         }
+    block[HARDPOINT_NON_HARDPOINT] = non_hardpoint
+    block[HARDPOINT_NON_HARDPOINT_MODULES] = non_hardpoint_modules
     block[HARDPOINT_UNCLASSIFIED] = unclassified
     return block
 
