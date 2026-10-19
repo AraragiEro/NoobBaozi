@@ -941,3 +941,169 @@ def test_module_entry_point_knows_sensitivity() -> None:
     assert completed.returncode == 0, completed.stderr
     for token in ("--metric", "--max-ops", "--ops-json", "--json"):
         assert token in completed.stdout, f"--help 里应提到 {token}：\n{completed.stdout}"
+
+
+# =============================================================================
+# 八、`project`：人话必须区分「改了 EHP」与「改了回血速度」
+# =============================================================================
+
+PROJECT_FIXTURES = NOOBBAOZI_ROOT / "acceptance" / "fixtures"
+PROJECT_TARGET_PATH = PROJECT_FIXTURES / "f15-battleship-raven.json"
+PROJECT_BURST_PATH = PROJECT_FIXTURES / "f14-command-damnation.json"
+PROJECT_REPAIR_PATH = PROJECT_FIXTURES / "f12-logistics-oneiros.json"
+
+
+def test_project_human_shows_ehp_and_who_gave_it(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """人话：EHP 前后 + 来源 + buff（谁给的）；不带 markdown 记号。"""
+    code, out, err = _run_cli(
+        [
+            "project", "--fit-file", str(PROJECT_TARGET_PATH),
+            "--source", str(PROJECT_BURST_PATH),
+        ],
+        capsys,
+    )
+    assert code == cli.EXIT_OK, err
+    assert err == ""
+    assert out.splitlines()[0].startswith("Raven")
+    assert "EHP " in out and "→" in out
+    assert "← " in out, "必须写出「谁给的」"
+    assert "投射 buff" in out
+    assert "|" not in out and "**" not in out, "人话输出不该带 markdown 记号"
+
+
+def test_project_human_separates_repair_rate_from_ehp(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """遥修：EHP 不变（+0），回血速度单独一节 —— 这是最容易误读的地方。"""
+    code, out, err = _run_cli(
+        [
+            "project", "--fit-file", str(PROJECT_TARGET_PATH),
+            "--source", str(PROJECT_REPAIR_PATH),
+        ],
+        capsys,
+    )
+    assert code == cli.EXIT_OK, err
+    assert "EHP " in out and "（+0.0000" in out, "遥修不改 EHP"
+    assert "改了回血速度" in out and "不改 EHP" in out
+    assert "hp/s" in out, "回血速度要带单位"
+
+
+def test_project_json_matches_api(capsys: pytest.CaptureFixture[str]) -> None:
+    """`--json` 就是 api 信封原样。"""
+    code, out, err = _run_cli(
+        [
+            "project", "--fit-file", str(PROJECT_TARGET_PATH),
+            "--source", str(PROJECT_BURST_PATH), "--json",
+        ],
+        capsys,
+    )
+    assert code == cli.EXIT_OK, err
+    envelope = json.loads(out)
+    api.clear_caches()
+    expected = api.fit_project(
+        PROJECT_TARGET_PATH.read_text(encoding="utf-8"),
+        [PROJECT_BURST_PATH.read_text(encoding="utf-8")],
+    )
+    assert envelope == expected
+
+
+def test_project_missing_source_file_is_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    """来源文件读不到 → 参数错误（退出码 2），不拿去问引擎。"""
+    code, out, err = _run_cli(
+        [
+            "project", "--fit-file", str(PROJECT_TARGET_PATH),
+            "--source", str(PROJECT_FIXTURES / "no-such-file.eft"),
+        ],
+        capsys,
+    )
+    assert code == cli.EXIT_USAGE
+    assert out == ""
+    assert "no-such-file" in err
+
+
+def test_project_bad_source_content_is_api_failure(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """来源**内容**坏 → 退出码 1 + `invalid_argument` + `sources[1]`（能指出第几项）。"""
+    code, out, err = _run_cli(
+        [
+            "project", "--fit-file", str(PROJECT_TARGET_PATH),
+            "--source", str(PROJECT_BURST_PATH),
+            "--source-eft", "这不是配装",
+        ],
+        capsys,
+    )
+    assert code == cli.EXIT_API_FAILURE, err
+    assert out == ""
+    assert "invalid_argument" in err and "sources[1]" in err
+
+
+def test_project_no_strict_state_changes_the_numbers(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--no-strict-state` 真的换口径：offline 指挥爆发的 buff 会被采信（EHP 变多）。
+
+    不写系统临时目录（沙箱下 `tmp_path` 会 `PermissionError`）；用项目内 gitignore 掉的
+    `.tmp/`，跑完删掉。
+    """
+    fit = api.parse_fit(PROJECT_BURST_PATH.read_text(encoding="utf-8"))["result"]["fit"]
+    for item in fit["items"]:
+        if item.get("type_id") == 43552:
+            item["state"] = "offline"
+    scratch = NOOBBAOZI_ROOT / ".tmp"
+    scratch.mkdir(exist_ok=True)
+    offline_path = scratch / "pytest-offline-burst.json"
+    offline_path.write_text(json.dumps(fit, ensure_ascii=False), encoding="utf-8")
+
+    base_args = ["project", "--fit-file", str(PROJECT_TARGET_PATH), "--source", str(offline_path), "--json"]
+    code, out, err = _run_cli(base_args, capsys)
+    assert code == cli.EXIT_OK, err
+    strict = json.loads(out)["result"]
+    ehp_strict = next(m for m in strict["delta"]["metrics"] if m["path"] == "survivability.ehp_mixed")
+
+    api.clear_caches()
+    code, out, err = _run_cli([*base_args, "--no-strict-state"], capsys)
+    assert code == cli.EXIT_OK, err
+    lax = json.loads(out)["result"]
+    ehp_lax = next(m for m in lax["delta"]["metrics"] if m["path"] == "survivability.ehp_mixed")
+
+    assert strict["strict_state"] is True and lax["strict_state"] is False
+    assert ehp_strict["delta"] == 0.0 and ehp_lax["delta"] > 0.0
+
+    offline_path.unlink(missing_ok=True)
+
+
+def test_project_effects_json_bad_and_unknown(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--effects-json` 顶层坏 → 退出码 2；effect_id 未知 → 退出码 0 + warning。"""
+    code, out, err = _run_cli(
+        [
+            "project", "--fit-file", str(PROJECT_TARGET_PATH),
+            "--effects-json", "{not json",
+        ],
+        capsys,
+    )
+    assert code == cli.EXIT_USAGE
+    assert "--effects-json" in err
+
+    code, out, err = _run_cli(
+        [
+            "project", "--fit-file", str(PROJECT_TARGET_PATH),
+            "--effects-json", '[{"type_id": 527, "effect_id": 999999}]', "--json",
+        ],
+        capsys,
+    )
+    assert code == cli.EXIT_OK, err
+    envelope = json.loads(out)
+    assert [w["kind"] for w in envelope["result"]["warnings"]] == ["unknown_effect_id"]
+
+
+def test_module_entry_point_knows_project() -> None:
+    """真起子进程：`python -m noobbaozi.cli project --help` 里有这一组选项。"""
+    completed = _subprocess_cli(["project", "--help"])
+    assert completed.returncode == 0, completed.stderr
+    for token in ("--source", "--source-eft", "--effects-json", "--no-strict-state", "--json"):
+        assert token in completed.stdout, f"--help 里应提到 {token}：\n{completed.stdout}"

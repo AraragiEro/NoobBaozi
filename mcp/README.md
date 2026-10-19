@@ -273,6 +273,7 @@ python -c "from noobbaozi import mcp_server as m; print(m.INSTRUCTIONS); [print(
 | `fit_detail` | 列表型明细（升级候选、逐模块电容、完整技能表 512 条） |
 | `fit_explain` | 归因链：这个数**为什么**是这个数（A 可加 / B 乘性 / C 投影，见 §4.10） |
 | `fit_sensitivity` | 灵敏度链：改一个输入（关模块 / 切状态 / 切模式）这个数会变多少（见 §4.11） |
+| `fit_project` | 投射：一艘船**给**另一艘船什么（加成 / 遥修 / 负面）；**一给一**，不链式传递（见 §4.12） |
 | `zkb_search` | 战报列表检索（先筛 killmail_id，再对那条调 `fit_killmail`）；**每行带受害者驾驶员 / 军团 / 联盟名字** |
 | `zkb_stats` | 实体画像（角色 / 公司 / 联盟）：战斗总量 + zkb 风格指标 + 7 天活动 + 6 类榜单；**公式未公开的指标只转述，不给威胁判词** |
 
@@ -289,7 +290,9 @@ python -c "from noobbaozi import mcp_server as m; print(m.INSTRUCTIONS); [print(
 | `state_policy` | `engine_default` | `engine_default` |
 
 `fit_explain` 还多一个自己的参数：`depth`（`1` / `2`，默认 `2`，见 §4.10）；
-`fit_sensitivity` 多两个：`ops`（数组，不给 = 自动计划）与 `max_ops`（默认 `32`，见 §4.11）。
+`fit_sensitivity` 多两个：`ops`（数组，不给 = 自动计划）与 `max_ops`（默认 `32`，见 §4.11）；
+`fit_project` 用 **`target`** 而不是 `fit`，并多四个：`sources` / `effects` / `buffs` /
+`strict_state`（见 §4.12）。
 
 `fit` 是**字符串**：EFT 文本、DNA 字符串（`fitting:` 前缀可有可无）、killmail 的 JSON
 文本，或者 zkillboard / ESI 的 killmail 链接（后两种会联网）。字典 / 数组也接受
@@ -835,6 +838,70 @@ delta_pct, note}`。
 
 > **只给数值变化，不给判词**：返回里没有「该不该拆」的结论（红线：多视角、无判据）。
 > 拆不拆由用户按自己的目标决定 —— 同一个 `delta` 对「跑得动」和「打得多」意义不同。
+
+### 4.12 `fit_project`：投射影响（一艘船**给**另一艘船什么）
+
+`fit_project(target, sources=None, effects=None, buffs=None, strict_state=True)`。目标是 `target`
+（**不是** `fit`），`sources` 是要把能力投过来的来源船。六个配装工具的最后一环：`projection`
+把来源船的 `outgoing` 塞进目标的 `incoming`，再算一次目标 —— **不重算任何 dogma**。
+
+**这是「一给一」，不是「编队」**（最重要的口径）：
+
+- 一次调用 = **一个目标** + N 个来源的**并集**；
+- 投射**不链式传递**：目标收到的 `incoming` 不会变成它的 `outgoing`（实测 B 收 A 的 web 后
+  `outgoing` 逐项不变）；
+- 编队只能由调用方**并联**：对每个目标各调一次，边自己枚举。
+
+**三条引擎语义**（决定了 `strict_state` 的存在；实测见 `projection.py`）：
+
+| 语义 | 事实 | 我们的处理 |
+|---|---|---|
+| `effects`（遥修 / web / 点） | **严格按 `state == "active"` 产生**，offline 的不出 | 原样采信（引擎已过滤） |
+| `buffs`（指挥脉冲） | **只看「模块在 + 弹头在」，与 `state` 无关** —— offline 的指挥爆发器照样给 | `strict_state=True`（默认）→ 自己按 active 重算一遍再采信；`False` → 引擎原样 |
+| 命令舰自己 | 会被**自己的**脉冲加成（引擎行为，与直觉不同） | 保留，并给 `self_buff_included` warning（注明「未与游戏内行为对拍」） |
+
+两种 `strict_state` 都**一定会给 warning**（`buff_state_filtered` / `buff_state_not_filtered`），
+差异不静默。实测 f14（burst 置 offline）→ f15：`strict=True` 是 +0 / `strict=False` 是
+**+4,962.776 EHP**（68,200.973 → 73,163.749）。
+
+**返回形状**：`{strict_state, target, applied{effects[], buffs[]}, sources[], delta, repaired,
+warnings[]}`。
+
+- `delta.metrics[]`：**固定 10 条** `{path, before, after, delta, delta_pct, unit}` ——
+  EHP 混合 + 三层 / 速度 / 电容六项；`delta_pct` 是**比例**，`before == 0` 时是 `null`；
+- `delta.attributes[]`：**每个真的变了的**船体属性 + `attributed_to[]`（把 `projected.index`
+  映射回「谁造成的」）；
+- `repaired`：遥修落点 —— **它改的是「回血速度」，不是 EHP**，两者在返回里是分开的：
+
+  ```
+  repaired.armor.effective: 0 → 675.23 hp/s（+675.23）     ← 有效（按抗性折算）
+  repaired.armor.rate     : null → 387.41 hp/s（delta null）← raw，源船没这条属性时一侧为 null
+  ```
+
+  **看 `effective` 那一侧**；`delta: null` 表示「一侧缺失，不可比」，不是 0 变化；
+- `applied.effects[]` / `applied.buffs[]`：合并后的投射内容，每条带 `from`（谁给的）；
+  `buffs` 按 `id` 取 **max**（引擎自己也取 max，顺序无关）。
+
+**错误归属**（四条，各有测试）：
+
+| 情形 | `error.kind` | 带什么 |
+|---|---|---|
+| `sources[i]` 解析失败 / 形态不对 | `invalid_argument` | `index=i` + `field="sources[i]"` + `cause`（原错误 kind） |
+| `sources` 整个不是数组 | `invalid_argument` | `field="sources"` |
+| `strict_state` 不是布尔 | `invalid_argument` | `field="strict_state"` |
+| `effects` 里 `effect_id` 未知 | **不是错误** | `warnings[]` 里 `unknown_effect_id`（含可用示例编号），**结果照给** |
+| 目标超载 / 非法配装 | **不是错误** | 照常给数值 + 该配装自己的 warnings |
+
+> `effect_id` 是**信任边界**：引擎对未知 `effect_id` **静默忽略**（无异常、无 warning）。
+> 所以显式 `effects` 会先查 `projection.effect_catalog(type_id)`，不在目录里就报出来 ——
+> 不跟着引擎静默。
+
+**成本 / 体量**（实测）：`projection.project` 本身 **5–7 ms**；本层端到端 **17–27 ms**
+（1–2 个 killmail 来源，含两份配装的归一化 + 建上下文；无来源 7 ms）；缓存命中 **≈0.1 ms**；
+`result` 紧凑 JSON **≈5.6 KB**。
+
+> **不做**：命中率 / 有效 DPS（交战数学另模块）、距离 / 视线 / 持续时间 / 叠加上限（引擎
+> 本来就没有这些维度）、「该不该这么配」的判词。
 
 ## 5. 返回契约
 

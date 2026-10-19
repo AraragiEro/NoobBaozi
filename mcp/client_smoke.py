@@ -70,6 +70,15 @@ EFT_PATH: Path = NOOBBAOZI_ROOT / "acceptance" / "fixtures" / "f1-hecate-killmai
 TYPO_EFT: str = "[Hecate, typo]\nDamage Controll II\n"
 """负例样本：`Damage Controll` 少一个 `o`（应得 `unknown_module` + candidates）。"""
 
+COMMAND_BURST_EFT: str = (
+    "[Absolution, CmdBurst]\n\nArmor Command Burst II, Armor Energizing Charge\n"
+)
+"""投射样本：Absolution 带一件**装了弹头**的装甲指挥爆发（EFT 里弹头写在模块行逗号后）。
+
+为什么必须带弹头：引擎的 `outgoing.buffs` 只看「模块在 + 弹头在」（见
+`project/projection.py` 模块 docstring）；不写弹头那条会得到 `no_outgoing`。
+"""
+
 
 class ProtocolError(RuntimeError):
     """对端（服务）违反协议：stdout 出现了非 JSON-RPC 的行 / 响应 id 对不上 / 提前 EOF。"""
@@ -282,6 +291,35 @@ def _check_sensitivity(envelope: dict) -> None:
     )
 
 
+def _check_project(envelope: dict) -> None:
+    """`fit_project(hecate ← 装甲指挥爆发)`：EHP 真的变了、来源行与 buffs 都在。"""
+    _require(envelope.get("ok") is True, "fit_project 应 ok:true")
+    result = envelope.get("result") or {}
+    _require(result.get("strict_state") is True, "默认必须 strict_state=True")
+    sources = result.get("sources")
+    _require(isinstance(sources, list) and sources, "sources 行不能为空")
+    _require(sources[0].get("label"), "来源行必须带 label（谁给的）")
+    applied = result.get("applied") or {}
+    _require(applied.get("buffs"), "装甲指挥爆发必须产出投射 buff")
+
+    metrics = (result.get("delta") or {}).get("metrics") or []
+    _require(metrics, "delta.metrics 不能为空")
+    ehp = next(
+        (entry for entry in metrics if entry.get("path") == "survivability.ehp_mixed"),
+        None,
+    )
+    _require(ehp is not None, "delta.metrics 必须含 survivability.ehp_mixed")
+    _require(
+        isinstance(ehp.get("before"), (int, float)) and isinstance(ehp.get("after"), (int, float)),
+        f"EHP 前后都应是数值：{ehp!r}",
+    )
+    _require(ehp["after"] > ehp["before"], "装甲指挥爆发应让目标 EHP 变大")
+    _require(
+        result.get("repaired") is not None,
+        "repaired 块必须存在（遥修落点；这条样本里它是 0 变化，但形状要在）",
+    )
+
+
 def _check_invalid_path(envelope: dict) -> None:
     """负例①：路径不存在 → 业务失败 `invalid_path` + 可用前缀 `hint`。"""
     _require(envelope.get("ok") is False, "不存在的路径必须 ok:false（不能用 value:null 冒充）")
@@ -363,6 +401,13 @@ def build_cases() -> tuple[dict, ...]:
             # 单值指标 + max_ops=4：冒烟要快，且 4 条足够验「delta == value - baseline」
             "arguments": {"fit": eft, "metric": "resources.cpu.free", "max_ops": 4},
             "check": _check_sensitivity,
+        },
+        {
+            "name": "project",
+            "tool": "fit_project",
+            # 目标 = Hecate，来源 = 带弹头的装甲指挥爆发（没有弹头会得 no_outgoing）
+            "arguments": {"target": eft, "sources": [COMMAND_BURST_EFT]},
+            "check": _check_project,
         },
         {
             "name": "neg:invalid_path",

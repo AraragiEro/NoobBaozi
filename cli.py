@@ -707,6 +707,139 @@ def _human_sensitivity(result: dict, _meta: dict) -> str:
     return "\n".join(lines)
 
 
+_PROJECT_ROWS: int = 8
+"""`project` 人话摘要里「其他指标」最多铺几行（完整 10 条与 attributes 在 `--json`）。"""
+
+
+def _delta_line(entry: object, *, unit: str = "") -> str:
+    """一条 `{before, after, delta, delta_pct}` → `before → after（+delta / +pct%）`。
+
+    **不补数**：`before` / `after` 有一侧缺失时如实写 `null`，`delta` 为 `null` 时写
+    「不可比」—— 这是投影里最常见的一种「看起来像 0 变化」的误读来源。
+    """
+    if not isinstance(entry, dict):
+        return "-"
+    before = entry.get("before")
+    after = entry.get("after")
+    delta = entry.get("delta")
+    pct = entry.get("delta_pct")
+    suffix = f" {unit}" if unit else ""
+    head = f"{_num(before)}{suffix} → {_num(after)}{suffix}"
+    if not isinstance(delta, (int, float)):
+        return f"{head}（不可比：一侧缺失）"
+    pct_text = f" / {pct * 100:+.1f}%" if isinstance(pct, (int, float)) else ""
+    return f"{head}（{delta:+,.4f}{pct_text}）"
+
+
+def _human_project(result: dict, _meta: dict) -> str:
+    """`project` 的人话摘要：**先把「改了 EHP」与「改了回血速度」分开**，再铺其余指标。
+
+    为什么必须分开：遥修只改「回血速度」，EHP 一点没动 —— 两者混在一张表里，读的人会
+    把「+675 修复/秒」当成「EHP 多了 675」。所以 headline 只放 EHP，回血单独一节。
+    """
+    target = result.get("target") if isinstance(result.get("target"), dict) else {}
+    ship = target.get("ship") if isinstance(target.get("ship"), dict) else {}
+    ship_name = ship.get("name") or f"type_id={ship.get('type_id')}"
+    target_label = target.get("name")
+    head = f"{ship_name}"
+    if target_label:
+        head += f"（{target_label}）"
+    sources = result.get("sources") if isinstance(result.get("sources"), list) else []
+    lines = [
+        f"{head} · 来源 {len(sources)} 个 · strict_state={result.get('strict_state')}"
+    ]
+
+    # ① headline：只放 EHP（含混合 EHP 的变化）
+    metrics = result.get("delta", {}).get("metrics") if isinstance(result.get("delta"), dict) else []
+    metrics = metrics if isinstance(metrics, list) else []
+    ehp = next((m for m in metrics if isinstance(m, dict) and m.get("path") == "survivability.ehp_mixed"), None)
+    lines.append(f"EHP {_delta_line(ehp, unit='hp')}")
+
+    # ② 来源：谁给的（labels 来自 sources 行；buffs 的 from 也指向它们）
+    for row in sources:
+        if not isinstance(row, dict):
+            continue
+        row_ship = row.get("ship") if isinstance(row.get("ship"), dict) else {}
+        name = row_ship.get("name") or f"type_id={row_ship.get('type_id')}"
+        lines.append(
+            f"{_INDENT}← {row.get('label')}（{name}）· effects {row.get('effects')}"
+            f" · buffs {row.get('buffs')}"
+        )
+        filtered = row.get("filtered")
+        if isinstance(filtered, dict) and filtered.get("count"):
+            lines.append(
+                f"{_INDENT * 2}已按 state 过滤 {filtered.get('count')} 个非 active 来源的 buff"
+            )
+
+    # ③ 投射内容（effect / buff 各一行），buffs 带「谁给的」
+    applied = result.get("applied") if isinstance(result.get("applied"), dict) else {}
+    effects = applied.get("effects") if isinstance(applied.get("effects"), list) else []
+    buffs = applied.get("buffs") if isinstance(applied.get("buffs"), list) else []
+    if effects:
+        kinds = [effect.get("type_name") or f"type_id={effect.get('type_id')}" for effect in effects if isinstance(effect, dict)]
+        lines.append(f"{_INDENT}投射 effect（{len(effects)}）：{', '.join(kinds[:6])}"
+                     + (" …" if len(kinds) > 6 else ""))
+    if buffs:
+        rows = []
+        for buff in buffs[:6]:
+            if not isinstance(buff, dict):
+                continue
+            origins = buff.get("from") if isinstance(buff.get("from"), list) else []
+            who = ", ".join(
+                str(origin.get("source"))
+                for origin in origins
+                if isinstance(origin, dict) and origin.get("source")
+            )
+            rows.append(f"buff#{buff.get('id')}={_num(buff.get('value'))}（← {who or '显式'}）")
+        lines.append(f"{_INDENT}投射 buff（{len(buffs)}）：" + " · ".join(rows)
+                     + (" …" if len(buffs) > 6 else ""))
+
+    # ④ 改了回血速度（**单独一节**：它不是 EHP）
+    repaired = result.get("repaired") if isinstance(result.get("repaired"), dict) else {}
+    repair_lines: list[str] = []
+    for layer in ("shield", "armor", "hull"):
+        block = repaired.get(layer) if isinstance(repaired.get(layer), dict) else {}
+        effective = block.get("effective")
+        raw = block.get("rate")
+        chosen = effective if isinstance(effective, dict) and effective.get("after") is not None else raw
+        if not isinstance(chosen, dict):
+            continue
+        delta = chosen.get("delta")
+        if not (isinstance(delta, (int, float)) and abs(delta) > 1e-12):
+            continue
+        label = "有效" if chosen is effective else "raw"
+        repair_lines.append(
+            f"{_INDENT}· {layer} {label}修复 {_delta_line(chosen, unit='hp/s')}"
+        )
+    if repair_lines:
+        lines.append("改了回血速度（不改 EHP —— 它加的是每秒修复量，不是血量上限）：")
+        lines.extend(repair_lines)
+
+    # ⑤ 其余指标（EHP 已经在 headline 里）
+    others = [
+        m for m in metrics
+        if isinstance(m, dict) and m.get("path") != "survivability.ehp_mixed"
+        and isinstance(m.get("delta"), (int, float)) and abs(m.get("delta")) > 1e-12
+    ]
+    if others:
+        lines.append("其他指标（有变化）：")
+        for entry in others[:_PROJECT_ROWS]:
+            unit = str(entry.get("unit") or "")
+            lines.append(f"{_INDENT}· {entry.get('path')} {_delta_line(entry, unit=unit)}")
+        if len(others) > _PROJECT_ROWS:
+            lines.append(f"{_INDENT}…还有 {len(others) - _PROJECT_ROWS} 项（--json 取全量）")
+    if not others and not repair_lines:
+        lines.append("其他指标：没有变化（投射只影响上面列出的项）")
+
+    warnings = result.get("warnings") or []
+    if warnings:
+        lines.append(f"warnings({len(warnings)}):")
+        for warning in warnings:
+            message = warning.get("message") if isinstance(warning, dict) else warning
+            lines.append(f"{_INDENT}- {message}")
+    return "\n".join(lines)
+
+
 _HUMAN: dict[str, Callable[[dict, dict], str]] = {
     "parse": lambda result, _meta: _human_parse(result),
     "killmail": lambda result, _meta: _human_killmail(result, _meta),
@@ -716,6 +849,7 @@ _HUMAN: dict[str, Callable[[dict, dict], str]] = {
     "detail": _human_detail,
     "explain": _human_explain,
     "sensitivity": _human_sensitivity,
+    "project": _human_project,
     "search": _human_search,
     "stats": _human_stats,
 }
@@ -937,6 +1071,43 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    project_cmd = subparsers.add_parser(
+        "project", help="一艘船给另一艘船什么（加成 / 遥修 / 负面，一给一）"
+    )
+    _add_common(project_cmd)
+    project_cmd.add_argument(
+        "--source",
+        action="append",
+        metavar="PATH",
+        help=(
+            "来源船配装文件（UTF-8，可重复；`-` 表示 stdin）。"
+            "目标 = 上面的 --fit-file / --eft / --killmail …；顺序按给出的顺序"
+        ),
+    )
+    project_cmd.add_argument(
+        "--source-eft",
+        action="append",
+        metavar="TEXT",
+        help="直接给来源船的 EFT 文本（可重复；排在所有 --source 之后）",
+    )
+    project_cmd.add_argument(
+        "--effects-json",
+        metavar="JSON",
+        help=(
+            '显式 effect 数组（JSON），如 [{"type_id":527,"effect_id":6426,"attributes":{}}]；'
+            "未知 effect_id 进 warnings，不报错"
+        ),
+    )
+    project_cmd.add_argument(
+        "--no-strict-state",
+        dest="strict_state",
+        action="store_false",
+        help=(
+            "不按 state 过滤（引擎原样：offline 的指挥爆发器也照样给加成）。"
+            "默认按 EVE 过滤非 active 源"
+        ),
+    )
+
     search_cmd = subparsers.add_parser(
         "search", help="战报列表检索（谁在打谁 / 这个公司最近损失了什么）"
     )
@@ -1027,25 +1198,52 @@ def _dispatch(args: argparse.Namespace, fit: object) -> dict:
             max_ops=args.max_ops,
             **params,
         )
+    if args.command == "project":
+        return api.fit_project(
+            fit,
+            getattr(args, "sources", None),
+            getattr(args, "effects", None),
+            strict_state=getattr(args, "strict_state", True),
+            **params,
+        )
     return api.fit_detail(fit, getattr(args, "view", None), getattr(args, "path", None), **params)
 
 
-def _pick_ops(text: str | None) -> tuple[object | None, str | None]:
-    """`--ops-json` → `ops` 参数（`None` = 自动计划）。
+def _pick_sources(args: argparse.Namespace) -> tuple[list[object] | None, str | None]:
+    """`--source`（文件，可重复）与 `--source-eft`（内联，可重复）→ `sources` 数组。
 
     Returns:
-        `(ops, 错误信息)`。**JSON 解析失败 / 顶层不是数组**是参数错误（退出码 2）——
-        连"要操作什么"都没说清时，不该拿去问引擎；而**数组里的单个坏 op** 是数据问题，
-        由 `sensitivity` 写进 `warnings` 并跳过（退出码 0，结果照给）。
+        `(sources, 错误信息)`。**读文件失败 / 编码失败**是参数错误（退出码 2）——
+        连来源内容都没拿到时不该去问引擎；而**内容本身解析失败**由 `api` 报
+        `invalid_argument` + `index`（退出码 1，能指出是第几项）。
+    """
+    sources: list[object] = []
+    for path in getattr(args, "source", None) or []:
+        text, problem = _from_stdin_or_file(path)
+        if problem is not None:
+            return None, problem
+        sources.append(text)
+    for text in getattr(args, "source_eft", None) or []:
+        sources.append(text)
+    return sources, None
+
+
+def _pick_json_array(text: str | None, flag: str) -> tuple[object | None, str | None]:
+    """`--ops-json` / `--effects-json` → 数组参数（`None` = 没给）。
+
+    Returns:
+        `(数组, 错误信息)`。**JSON 解析失败 / 顶层不是数组**是参数错误（退出码 2）——
+        连"要操作什么"都没说清时，不该拿去问引擎；而**数组里的单个坏条目**是数据问题，
+        由 `sensitivity` / `projection` 写进 `warnings` 并跳过（退出码 0，结果照给）。
     """
     if not text or not str(text).strip():
         return None, None
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError as exc:
-        return None, f"--ops-json 不是合法 JSON：{exc}"
+        return None, f"{flag} 不是合法 JSON：{exc}"
     if not isinstance(parsed, list):
-        return None, f"--ops-json 必须是 JSON 数组，收到 {type(parsed).__name__}"
+        return None, f"{flag} 必须是 JSON 数组，收到 {type(parsed).__name__}"
     return parsed, None
 
 
@@ -1158,11 +1356,25 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "sensitivity":
         # `--ops-json` 的**顶层**形态是参数问题（退出码 2）；数组里的坏 op 走 warnings。
-        ops, problem = _pick_ops(getattr(args, "ops_json", None))
+        ops, problem = _pick_json_array(getattr(args, "ops_json", None), "--ops-json")
         if problem is not None:
             print(f"参数错误：{problem}", file=sys.stderr)
             return EXIT_USAGE
         args.ops = ops
+
+    if args.command == "project":
+        # 来源文件读不到 / `--effects-json` 解析失败 → 参数问题（2）；
+        # 来源**内容**解析失败由 api 报 invalid_argument + index（1）。
+        sources, problem = _pick_sources(args)
+        if problem is not None:
+            print(f"参数错误：{problem}", file=sys.stderr)
+            return EXIT_USAGE
+        args.sources = sources
+        effects, problem = _pick_json_array(getattr(args, "effects_json", None), "--effects-json")
+        if problem is not None:
+            print(f"参数错误：{problem}", file=sys.stderr)
+            return EXIT_USAGE
+        args.effects = effects
 
     return _report(args, _dispatch(args, fit))
 

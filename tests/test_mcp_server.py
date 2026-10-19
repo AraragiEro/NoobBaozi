@@ -54,7 +54,14 @@ TOOL_NAMES = mcp_server.TOOL_NAMES
 title / description / schema」，而不是「一共有几个」。
 """
 FIT_TOOLS = tuple(name for name in TOOL_NAMES if name.startswith("fit_"))
-"""配装类工具（有 `fit` 入参的那几个）；`zkb_search` 不在其中（它查的是列表）。"""
+"""配装类工具（有一个「配装输入」入参的那几个）；`zkb_search` 不在其中（它查的是列表）。"""
+
+FIT_INPUT_KEYS: dict[str, str] = {"fit_project": "target"}
+"""配装输入参数名：**只有 `fit_project` 叫 `target`**（目标是那套配装，不是 `fit`）。
+
+它是「一给一」语义的自然结果：`fit_project(target, sources=[...])` 里 `target` 是被投的
+那艘船。其余工具统一叫 `fit`。这张映射只服务 schema 断言，不参与运行期逻辑。
+"""
 
 
 # =============================================================================
@@ -176,15 +183,16 @@ def test_tools_list_is_the_single_source_of_truth() -> None:
 
 
 def test_every_fit_tool_requires_a_string_fit() -> None:
-    """`fit` 是**配装类工具**的共同必填项，且声明成 string + 长度上下限。
+    """配装输入是**配装类工具**的共同必填项，声明成 string + 长度上下限。
 
-    `zkb_search` 不在这条里：它没有 `fit`（查的是列表，不是配装）—— 见
-    `test_zkb_search_schema`。
+    参数名按 `FIT_INPUT_KEYS` 取：除了 `fit_project` 叫 `target`，其余都叫 `fit`。
+    `zkb_search` 不在这条里：它没有配装输入（查的是列表）—— 见 `test_zkb_search_schema`。
     """
     for name in FIT_TOOLS:
+        key = FIT_INPUT_KEYS.get(name, "fit")
         schema = _tool_spec(name)["inputSchema"]
-        assert "fit" in schema["required"], f"{name} 没把 fit 标成必填"
-        fit = schema["properties"]["fit"]
+        assert key in schema["required"], f"{name} 没把 {key} 标成必填"
+        fit = schema["properties"][key]
         assert fit["type"] == "string"
         assert fit["minLength"] == 1
         assert fit["maxLength"] == mcp_server.MAX_FIT_CHARS
@@ -1461,3 +1469,96 @@ def test_readme_section_411_guard_is_not_vacuous() -> None:
     # 删掉恒等式也要报（否则「计数口径」可能被悄悄改回旧行为而不被发现）
     without_identity = section.replace("ops_planned == ops_executed + skipped", "")
     assert any("恒等式" in problem for problem in _section_411_problems(without_identity))
+
+
+# =============================================================================
+# 九、`fit_project`（第 11 个工具）：schema + 一给一 + 两种错误的归属
+# =============================================================================
+
+PROJECT_FIXTURES = NOOBBAOZI_ROOT / "acceptance" / "fixtures"
+PROJECT_TARGET_PATH = PROJECT_FIXTURES / "f15-battleship-raven.json"
+PROJECT_BURST_PATH = PROJECT_FIXTURES / "f14-command-damnation.json"
+PROJECT_BURST_EFT = "[Absolution, CmdBurst]\n\nArmor Command Burst II, Armor Energizing Charge\n"
+
+
+def _project_target_text() -> str:
+    return PROJECT_TARGET_PATH.read_text(encoding="utf-8")
+
+
+def test_fit_project_schema_shape() -> None:
+    """必填 `target`（**没有** `fit`）；`sources` 是字符串数组；`strict_state` 布尔默认 true。"""
+    schema = _tool_spec("fit_project")["inputSchema"]
+    assert schema["required"] == ["target"]
+    assert "fit" not in schema["properties"], "这个工具的参数叫 target，不叫 fit"
+    assert schema["properties"]["target"]["type"] == "string"
+    assert schema["properties"]["sources"]["type"] == "array"
+    assert schema["properties"]["sources"]["items"]["type"] == "string"
+    assert schema["properties"]["strict_state"]["type"] == "boolean"
+    assert schema["properties"]["strict_state"]["default"] is True
+    assert {"effects", "buffs"} <= set(schema["properties"])
+    for name in mcp_server._COMMON_PARAMETERS:
+        assert name in schema["properties"]
+
+
+def test_fit_project_roundtrip_over_mcp() -> None:
+    """目标（killmail）+ 来源（EFT 指挥爆发）：EHP 真的变了、来源行带 label。"""
+    result = _call(
+        "fit_project",
+        {"target": _project_target_text(), "sources": [PROJECT_BURST_EFT]},
+    )
+    assert result.get("isError") is not True, "成功调用不该带 isError"
+    envelope = _envelope(result)
+    assert result["structuredContent"] == envelope
+    body = envelope["result"]
+    assert body["strict_state"] is True
+    assert body["sources"] and body["sources"][0]["label"]
+    metrics = {entry["path"]: entry for entry in body["delta"]["metrics"]}
+    assert metrics["survivability.ehp_mixed"]["delta"] > 0
+
+
+def test_fit_project_bad_source_is_a_business_error_with_index() -> None:
+    """`sources[1]` 坏 → 成功响应 + `isError:true` + `invalid_argument` + `index=1`。"""
+    result = _call(
+        "fit_project",
+        {"target": _project_target_text(), "sources": [PROJECT_BURST_EFT, "这不是配装"]},
+    )
+    assert result["isError"] is True
+    envelope = _envelope(result)
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["index"] == 1
+    assert envelope["error"]["field"] == "sources[1]"
+
+
+def test_fit_project_unknown_effect_is_a_warning_not_an_error() -> None:
+    """未知 `effect_id` 走 MCP 仍是成功响应：`unknown_effect_id` 在 warnings 里。"""
+    result = _call(
+        "fit_project",
+        {
+            "target": _project_target_text(),
+            "effects": [{"type_id": 527, "effect_id": 999999}],
+        },
+    )
+    assert result.get("isError") is not True
+    envelope = _envelope(result)
+    assert envelope["ok"] is True
+    assert [w["kind"] for w in envelope["result"]["warnings"]] == ["unknown_effect_id"]
+
+
+def test_fit_project_bad_strict_state_is_a_business_error() -> None:
+    """`strict_state` 不是布尔 → `invalid_argument` + `field`（业务失败，不是 `-32602`）。"""
+    result = _call(
+        "fit_project",
+        {"target": _project_target_text(), "strict_state": "yes"},
+    )
+    assert result["isError"] is True
+    envelope = _envelope(result)
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["field"] == "strict_state"
+
+
+def test_fit_project_missing_target_is_invalid_params() -> None:
+    """缺 `target` → `-32602`（参数形态错；这个工具不接受 `fit`）。"""
+    for arguments in ({}, {"fit": "[Hecate, x]"}):
+        response = _rpc("tools/call", {"name": "fit_project", "arguments": arguments})
+        assert response["error"]["code"] == mcp_server.INVALID_PARAMS
+        assert response["error"]["data"]["field"] == "target"

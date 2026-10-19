@@ -3475,3 +3475,242 @@ def test_all_offline_equals_empty_fit_except_dps_base(eft_text: str) -> None:
         assert left["result"]["value"] == right["result"]["value"], (
             f"{metric}: 全 offline 与空配装必须逐位相同（差的是「有没有模块」这件事）"
         )
+
+
+# =============================================================================
+# 二十三、投射影响（P6-A projection）：fit_project 的三种来源 / 错误归属 / strict_state
+# =============================================================================
+#
+# 三个必须钉住的口径：
+# 1. 「一给一」：一次 = 一个目标 + N 个来源的并集，**不链式传递**（本项目不做编队）；
+# 2. `strict_state` 真的生效（引擎对 buffs 不看 state，offline 的指挥爆发器照样给加成）；
+# 3. 遥修改的是**回血速度**，不是 EHP —— 两者在返回里是分开的字段。
+
+PROJECT_FIXTURES = NOOBBAOZI_ROOT / "acceptance" / "fixtures"
+PROJECT_TARGET_PATH = PROJECT_FIXTURES / "f15-battleship-raven.json"
+PROJECT_BURST_PATH = PROJECT_FIXTURES / "f14-command-damnation.json"
+PROJECT_REPAIR_PATH = PROJECT_FIXTURES / "f12-logistics-oneiros.json"
+PROJECT_BURST_EFT = "[Absolution, CmdBurst]\n\nArmor Command Burst II, Armor Energizing Charge\n"
+"""带**弹头**的装甲指挥爆发（EFT 里弹头写在模块行逗号后；没有弹头会得 `no_outgoing`）。"""
+PROJECT_REPAIR_EFT = "[Guardian, RemoteRep]\n\nLarge Remote Armor Repairer II\nLarge Remote Armor Repairer II\n"
+"""遥修来源：改「回血速度」，不动 EHP。"""
+
+
+def _project_target_text() -> str:
+    return PROJECT_TARGET_PATH.read_text(encoding="utf-8")
+
+
+def _project_burst_text() -> str:
+    return PROJECT_BURST_PATH.read_text(encoding="utf-8")
+
+
+def _project_repair_text() -> str:
+    return PROJECT_REPAIR_PATH.read_text(encoding="utf-8")
+
+
+def _project_metric(result: dict, path: str) -> dict:
+    return next(entry for entry in result["delta"]["metrics"] if entry["path"] == path)
+
+
+def _project_offline_burst() -> dict:
+    """把 f14 的指挥爆发模块置 `offline`（弹头保留）→ 引擎照样给 buffs，strict 才拦得住。"""
+    fit = copy.deepcopy(api.parse_fit(_project_burst_text())["result"]["fit"])
+    for item in fit["items"]:
+        if item.get("type_id") == 43552:
+            item["state"] = "offline"
+    return fit
+
+
+def test_fit_project_accepts_eft_json_and_killmail_sources() -> None:
+    """三种来源形态都能当 `sources`：EFT 文本 / JSON 对象（同一套配装）/ killmail 原文。"""
+    target = _project_target_text()
+    api.clear_caches()
+    from_eft = api.fit_project(target, [PROJECT_BURST_EFT])
+    assert from_eft["ok"] is True, from_eft.get("error")
+
+    # 同一套配装的 JSON 对象形态：结果必须与 EFT 逐位相同（归一化只有一处）
+    fit = api.parse_fit(PROJECT_BURST_EFT)["result"]["fit"]
+    api.clear_caches()
+    from_json = api.fit_project(target, [fit])
+    assert from_json["ok"] is True, from_json.get("error")
+    assert (
+        _project_metric(from_json["result"], "survivability.ehp_mixed")["after"]
+        == _project_metric(from_eft["result"], "survivability.ehp_mixed")["after"]
+    ), "同一套配装的 EFT 与 JSON 形态必须给出同一个 EHP"
+
+    # killmail 原文：也能当来源，且真的产生 buffs
+    api.clear_caches()
+    from_killmail = api.fit_project(target, [_project_burst_text()])
+    assert from_killmail["ok"] is True, from_killmail.get("error")
+    assert from_killmail["result"]["applied"]["buffs"], "killmail 来源也应有投射 buff"
+
+
+def test_fit_project_is_one_to_one_not_a_fleet() -> None:
+    """「一给一」：两个来源的投射是**并集**投给同一个目标；返回里没有「链式/编队」字段。"""
+    api.clear_caches()
+    envelope = api.fit_project(
+        _project_target_text(),
+        [_project_burst_text(), _project_repair_text()],
+    )
+    assert envelope["ok"] is True, envelope.get("error")
+    result = envelope["result"]
+    assert len(result["sources"]) == 2, "两个来源 → sources 两行（并集，不是链）"
+    # 并集里既有 buffs（指挥爆发）也有 effects（遥修）
+    assert result["applied"]["buffs"] and result["applied"]["effects"]
+    assert "fleet" not in result and "chain" not in result, "不该出现编队/链式的字段"
+    # EHP 只由 buffs 改变；遥修只改回血速度
+    ehp = _project_metric(result, "survivability.ehp_mixed")
+    assert ehp["after"] > ehp["before"]
+    assert result["repaired"]["armor"]["effective"]["delta"] > 0
+
+
+def test_fit_project_labels_come_from_source_or_wrapper() -> None:
+    """来源标签：默认取配装名；`{"fit": ..., "label": ...}` 的显式标签优先。"""
+    target = _project_target_text()
+    api.clear_caches()
+    wrapped = api.fit_project(target, [{"fit": PROJECT_BURST_EFT, "label": "指挥舰 A"}])
+    assert wrapped["ok"] is True
+    assert wrapped["result"]["sources"][0]["label"] == "指挥舰 A"
+    assert wrapped["result"]["applied"]["buffs"][0]["from"][0]["source"] == "指挥舰 A"
+
+
+def test_fit_project_bad_source_reports_its_index() -> None:
+    """`sources[1]` 解析失败 → `invalid_argument` + `index=1` + `cause` 保留原 kind。"""
+    api.clear_caches()
+    envelope = api.fit_project(_project_target_text(), [PROJECT_BURST_EFT, "这不是配装"])
+    assert envelope["ok"] is False, "坏来源不能静默跳过"
+    error = envelope["error"]
+    assert error["kind"] == "invalid_argument"
+    assert error["index"] == 1
+    assert error["field"] == "sources[1]"
+    assert error["cause"]["kind"] == "parse_failed", "原错误要留着，便于区分是哪类写错"
+
+
+def test_fit_project_sources_must_be_an_array() -> None:
+    """`sources` 给成字符串 → `invalid_argument`（不能按字符迭代，那会变成 40 个来源）。"""
+    api.clear_caches()
+    envelope = api.fit_project(_project_target_text(), PROJECT_BURST_EFT)
+    assert envelope["ok"] is False
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["field"] == "sources"
+
+
+def test_fit_project_unknown_effect_id_is_a_warning_result_still_given() -> None:
+    """未知 `effect_id` → **不是错误**：`unknown_effect_id` warning，数值照给。"""
+    api.clear_caches()
+    envelope = api.fit_project(
+        _project_target_text(),
+        [],
+        effects=[{"type_id": 527, "effect_id": 999999}],
+    )
+    assert envelope["ok"] is True, envelope.get("error")
+    kinds = [warning["kind"] for warning in envelope["result"]["warnings"]]
+    assert "unknown_effect_id" in kinds
+    assert envelope["result"]["delta"]["metrics"], "结果仍要给出（只是少了那条 effect）"
+
+
+def test_fit_project_strict_state_changes_the_result() -> None:
+    """`strict_state` 两种取值**结果不同**：True 过滤掉 offline 释放器的 buff，False 采信引擎。"""
+    target = _project_target_text()
+    offline = _project_offline_burst()
+
+    api.clear_caches()
+    strict = api.fit_project(target, [offline], strict_state=True)
+    assert strict["ok"] is True
+    strict_result = strict["result"]
+    assert strict_result["strict_state"] is True
+    assert strict_result["applied"]["buffs"] == [], "strict=True 不许采信 offline 源的 buff"
+    assert _project_metric(strict_result, "survivability.ehp_mixed")["delta"] == 0.0
+    assert "buff_state_filtered" in [w["kind"] for w in strict_result["warnings"]]
+
+    api.clear_caches()
+    lax = api.fit_project(target, [offline], strict_state=False)
+    assert lax["ok"] is True
+    lax_result = lax["result"]
+    assert lax_result["applied"]["buffs"], "strict=False 按引擎原样：offline 源也给 buff"
+    assert _project_metric(lax_result, "survivability.ehp_mixed")["delta"] > 0
+    assert "buff_state_not_filtered" in [w["kind"] for w in lax_result["warnings"]]
+
+
+def test_fit_project_cache_key_separates_strict_state() -> None:
+    """**不清缓存**连调两次（True / False）：缓存 key 必须含 `strict_state`，不能串味。"""
+    target = _project_target_text()
+    offline = _project_offline_burst()
+    api.clear_caches()
+    first = api.fit_project(target, [offline], strict_state=True)["result"]
+    second = api.fit_project(target, [offline], strict_state=False)["result"]
+    assert first["strict_state"] is True and second["strict_state"] is False
+    assert first["applied"]["buffs"] != second["applied"]["buffs"]
+
+
+def test_fit_project_repaired_is_separate_from_ehp() -> None:
+    """遥修：**EHP 不变、回血速度变大**（两者在返回里是两处，别混着读）。"""
+    api.clear_caches()
+    result = api.fit_project(_project_target_text(), [_project_repair_text()])["result"]
+    ehp = _project_metric(result, "survivability.ehp_mixed")
+    assert ehp["delta"] == 0.0, "遥修不改 EHP"
+    effective = result["repaired"]["armor"]["effective"]
+    assert effective["delta"] > 0, "有效装甲修复率必须变大"
+    assert effective["before"] == 0.0 and effective["after"] > 0.0
+
+
+def test_fit_project_bad_strict_state_is_invalid_argument() -> None:
+    """`strict_state` 不是布尔 → `invalid_argument` + `field`（含 `1` / `"yes"`）。"""
+    for value in ("yes", 1, 0, None):
+        api.clear_caches()
+        envelope = api.fit_project(_project_target_text(), [], strict_state=value)  # type: ignore[arg-type]
+        assert envelope["ok"] is False, f"strict_state={value!r} 不该成功"
+        assert envelope["error"]["kind"] == "invalid_argument"
+        assert envelope["error"]["field"] == "strict_state"
+
+
+def test_fit_project_no_sources_is_identity() -> None:
+    """没有来源也没有显式 effects → 恒等：10 条指标 delta 全 0，并给 `no_outgoing` 之外的干净结果。"""
+    api.clear_caches()
+    result = api.fit_project(_project_target_text(), [])["result"]
+    assert result["sources"] == []
+    assert len(result["delta"]["metrics"]) == len(api._projection.METRIC_PATHS)
+    assert all(entry["delta"] == 0.0 for entry in result["delta"]["metrics"])
+    assert result["delta"]["attributes"] == []
+
+
+def test_fit_project_meta_carries_the_version_triplet() -> None:
+    """信封 `meta` 与其它入口一致（版本三元组 + 技能档 hash + 目标输入形态）。"""
+    api.clear_caches()
+    envelope = api.fit_project(_project_target_text(), [PROJECT_BURST_EFT])
+    assert envelope["ok"] is True
+    meta = envelope["meta"]
+    for key in ("spec_version", "engine_version", "sde_build"):
+        assert meta.get(key), f"信封 meta 缺 {key}"
+    assert meta["source_format"] == "killmail", "source_format 说的是**目标**的输入形态"
+    assert meta["skill_tier"]["hash"]
+
+
+def test_fit_project_strict_state_guard_is_not_vacuous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**配对证明**：把实现改成「忽略 strict_state（恒 True）」，上面那条差异断言必红。
+
+    做法：monkeypatch `projection.project` 强制 `strict_state=True`，然后按
+    `strict_state=False` 调 —— 结果必须变成「过滤后」（buffs 空）。也就是说，
+    `test_fit_project_strict_state_changes_the_result` 里的 `buffs` 非空断言在这种实现下
+    会失败；它不是永真的。
+    """
+    real = api._projection.project
+
+    def ignores_strict(ctx, sources=None, effects=None, buffs=None, *, strict_state=True):  # type: ignore[no-untyped-def]
+        return real(ctx, sources, effects, buffs, strict_state=True)
+
+    offline = _project_offline_burst()
+    api.clear_caches()
+    baseline = api.fit_project(_project_target_text(), [offline], strict_state=False)
+    assert baseline["ok"] is True
+    assert baseline["result"]["applied"]["buffs"], "前提：正常实现下 strict=False 会给 buff"
+
+    monkeypatch.setattr(api._projection, "project", ignores_strict)
+    api.clear_caches()
+    broken = api.fit_project(_project_target_text(), [offline], strict_state=False)
+    assert broken["ok"] is True
+    assert broken["result"]["applied"]["buffs"] == [], (
+        "变体没有生效？—— 恒 True 实现下 buffs 必须为空（这就是「断言会红」的证据）"
+    )

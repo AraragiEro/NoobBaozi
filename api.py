@@ -131,6 +131,7 @@ from noobbaozi.config import paths as _paths
 from noobbaozi.engine import adapter, normalize
 from noobbaozi.engine.assumptions import default_assumptions
 from noobbaozi.project import explain as _explain
+from noobbaozi.project import projection as _projection
 from noobbaozi.project import render
 from noobbaozi.project import sensitivity as _sensitivity
 from noobbaozi.project import summary as _summary
@@ -1606,21 +1607,25 @@ SENSITIVITY_METRICS: tuple[str, ...] = _sensitivity.supported_metrics()
 """可算灵敏度的指标（import 时快照）：`explain` 的 9 个 + 5 个单值指标（`combine == "single"`）。"""
 
 
-def _sensitivity_ops_key(ops: object) -> str | None:
-    """`ops` → 缓存 key 片段（**必须可哈希且确定**：`_execute` 的 key 要进 dict）。
+def _json_key(value: object) -> str | None:
+    """任意 JSON 可序列化值 → **确定的**缓存 key 片段（`None` 原样返回 `None`）。
 
-    `ops` 是「对象数组」，直接放进 key 会 `TypeError: unhashable`。这里按 JSON 规范化
-    （`sort_keys` + 紧凑分隔符）—— 同一份 op 列表的两种键序得到**同一个** key，
-    不同 op 列表绝不串味。`None`（自动计划）单独给 `"auto"`，不与任何显式列表撞。
+    为什么要它：`ops` / `effects` / `buffs` 都是「对象数组」，直接放进 key 会
+    `TypeError: unhashable`。按 JSON 规范化（`sort_keys` + 紧凑分隔符）之后，同一份列表
+    的两种键序得到**同一个** key，不同列表绝不串味。不可序列化的值给一个唯一标记
+    （那次调用照样能跑，只是不共享缓存）。
     """
-    if ops is None:
+    if value is None:
         return None
     try:
-        return json.dumps(ops, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     except (TypeError, ValueError):
-        # 不可 JSON 化的 ops：交给 `sensitivity` 自己写进 warnings（它判 `invalid_ops`）。
-        # key 里给一个**唯一**标记，避免与其它 ops 共用缓存条目。
-        return f"<unserializable:{id(ops)}>"
+        return f"<unserializable:{id(value)}>"
+
+
+def _sensitivity_ops_key(ops: object) -> str | None:
+    """`ops` → 缓存 key 片段（`None` = 自动计划，不与任何显式列表撞）。"""
+    return _json_key(ops)
 
 
 def fit_sensitivity(
@@ -1735,6 +1740,225 @@ def fit_sensitivity(
         state_policy=state_policy,
         compute=compute,
     )
+
+
+# =============================================================================
+# 十一之四、投射影响（P6-A projection）：`fit_project`
+# =============================================================================
+#
+# 为什么不复用 `_execute`
+# ----------------------
+# `_execute` 只吃**一个** `fit`；project 是「一个目标 + N 个来源」，每个来源都要独立归一化，
+# 而且来源解析失败必须报 `invalid_argument` + `index`（笼统的 `parse_failed` 会让调用方
+# 不知道是哪一项写错了）。缓存 key 因此要含「目标内容哈希 + 每个来源的内容哈希 +
+# effects / buffs / strict_state」。
+#
+# 三个错误归属（写在这里，免得将来「顺手统一」成一种）
+# ------------------------------------------------
+# - `sources[i]` 解析失败 / 形态不对 → `invalid_argument` + `index=i`；
+# - `effects` 里 `effect_id` 未知 → **不是错误**：`projection` 给 `unknown_effect_id`
+#   warning 并跳过（引擎对未知 id 静默忽略，我们不能跟着静默）；
+# - 目标超载 / 非法配装 → **照常返回数值** + 现有 warnings（那是事实，不是调用错误）。
+
+PROJECT_STRICT_STATE_DEFAULT: bool = _projection.STRICT_STATE_DEFAULT
+"""`fit_project` 的 `strict_state` 默认值（= `projection.STRICT_STATE_DEFAULT`，照 EVE 过滤）。"""
+
+
+def _project_source_items(sources: object) -> list[tuple[int, object, str | None]]:
+    """`sources` → `[(index, 配装输入, 显式 label | None)]`；形态不对 → `invalid_argument`。
+
+    每项可以是：
+    - 四形态配装输入本身（EFT / DNA / killmail JSON / 链接）；
+    - `{"fit": <四形态输入>, "label": "指挥舰 A"}`（标签只影响输出里「谁给的」）。
+    """
+    if sources is None:
+        return []
+    if isinstance(sources, (str, bytes)) or not isinstance(sources, (list, tuple)):
+        raise _ApiFailure(
+            "invalid_argument",
+            "sources 必须是数组（每项是一个配装输入：EFT / DNA / killmail JSON / 链接）",
+            field="sources",
+            hint="sources: []",
+        )
+    rows: list[tuple[int, object, str | None]] = []
+    for index, raw in enumerate(sources):
+        label: str | None = None
+        item = raw
+        if isinstance(raw, dict) and "fit" in raw and "victim" not in raw:
+            item = raw.get("fit")
+            label_value = raw.get("label")
+            if label_value is not None and str(label_value).strip():
+                label = str(label_value)
+        rows.append((index, item, label))
+    return rows
+
+
+def fit_project(
+    target: object,
+    sources: object = None,
+    effects: object = None,
+    buffs: object = None,
+    *,
+    strict_state: bool = PROJECT_STRICT_STATE_DEFAULT,
+    skill_tier: str = SKILL_TIER_ALL4,
+    damage_profile: str = DAMAGE_PROFILE_UNIFORM,
+    state_policy: str = STATE_POLICY_ENGINE_DEFAULT,
+) -> dict:
+    """把来源船的投射影响投到目标上（`project/projection.py` 的组装层，**不改形状**）。
+
+    **「一给一」而不是「编队」**：一次调用 = 一个目标 + N 个来源的**并集**。投射**不链式
+    传递**（目标收到的 incoming 不会变成它的 outgoing），所以编队要由调用方**并联**：
+    对每个目标各调一次，边自己枚举。
+
+    Args:
+        target: 目标配装（四形态输入）。
+        sources: 来源船数组，每项是四形态输入，或 `{"fit": <输入>, "label": "指挥舰 A"}`。
+            `None` / `[]` = 只看显式 `effects` / `buffs`（都没有时结果是恒等 delta）。
+        effects: 显式 `ProjectedEffect` 数组（`{type_id, effect_id, attributes}`）。
+            `effect_id` 不在该 type 的编号目录里 → `unknown_effect_id` warning 并跳过。
+        buffs: 显式 `ProjectedBuff` 数组（`{id, value}`）。
+        strict_state: `True`（默认，照 EVE）= **非 `active`** 的模块不提供加成；
+            `False` = 引擎原样（引擎对 buffs 不看 state，offline 的指挥爆发器也照样给）。
+            两种取值都会在 `warnings` 里说明差异（`buff_state_filtered` /
+            `buff_state_not_filtered`），不静默。
+
+    Returns:
+        成功时 `result` **就是** `projection.project(...)` 的返回（本层不改形状）：
+
+        - `{strict_state, target, applied{effects[], buffs[]}, sources[], delta, repaired,
+          warnings[]}`；
+        - `delta.metrics[]`：`{path, before, after, delta, delta_pct, unit}`，固定 10 条
+          （EHP 混合 + 三层 / 速度 / 电容六项）；
+        - `delta.attributes[]`：每个**真的变了**的船体属性 + `attributed_to`（谁造成的）；
+        - `repaired`：遥修落点（`rate` / `effective` 的前后与增量）—— **它改的是「回血
+          速度」，不是 EHP**，两者在返回里是分开的；
+        - `warnings[]`：`buff_state_filtered` / `buff_state_not_filtered` /
+          `unknown_effect_id` / `self_buff_included` / `no_outgoing` / `invalid_effect` /
+          `invalid_buff` / `effect_catalog_unavailable`。
+
+        业务失败：
+
+        - `sources[i]` 解析失败 / 形态不对 → `invalid_argument` + `index=i`
+          （原错误放在 `cause` 里，便于区分「写错模块名」还是「不是配装」）；
+        - `strict_state` 不是布尔 → `invalid_argument` + `field="strict_state"`；
+        - **目标超载 / 非法配装不报错**：照常给数值 + 该配装自己的 warnings。
+
+    Note:
+        成本实测 **5–7 ms**（目标基线 1 次 + 投影 1 次 + 每个有 buffs 的来源 1 次 strict
+        变体）；返回对象每次新建，不需要像 `fit_explain` 那样深拷贝。
+    """
+    try:
+        _check_params(skill_tier, damage_profile, state_policy)
+
+        if not isinstance(strict_state, bool):
+            raise _ApiFailure(
+                "invalid_argument",
+                f"strict_state 必须是布尔，收到 {strict_state!r}",
+                field="strict_state",
+                hint=[True, False],
+            )
+
+        source_rows = _project_source_items(sources)
+        target_kind, target_key, target_payload = _input_descriptor(target)
+
+        specs: list[dict] = []
+        for index, item, label in source_rows:
+            try:
+                kind, key, payload = _input_descriptor(item)
+            except _ApiFailure as exc:
+                raise _ApiFailure(
+                    "invalid_argument",
+                    f"sources[{index}] 无法识别：{exc.message}",
+                    field=f"sources[{index}]",
+                    index=index,
+                    cause=exc.payload(),
+                ) from exc
+            specs.append(
+                {"index": index, "kind": kind, "key": key, "payload": payload, "label": label}
+            )
+
+        effects_key = _json_key(effects)
+        buffs_key = _json_key(buffs)
+        cache_key: tuple | None = None
+        if target_key is not None and all(spec["key"] is not None for spec in specs):
+            cache_key = (
+                "project",
+                (
+                    tuple(spec["key"] for spec in specs),
+                    effects_key,
+                    buffs_key,
+                    strict_state,
+                ),
+                target_key,
+                skill_tier,
+                damage_profile,
+                state_policy,
+            )
+        if cache_key is not None:
+            hit = _cache_get(cache_key)
+            if hit is not None:
+                return hit
+
+        if target_kind == INPUT_NETWORK:
+            killmail = fetch_killmail(target_payload["killmail_id"], target_payload["hash"])
+            target_payload = {"text": json.dumps(killmail, ensure_ascii=False)}
+        for spec in specs:
+            if spec["kind"] == INPUT_NETWORK:
+                killmail = fetch_killmail(spec["payload"]["killmail_id"], spec["payload"]["hash"])
+                spec["payload"] = {"text": json.dumps(killmail, ensure_ascii=False)}
+
+        _ensure_index()
+        target_parsed = _parsed_fit(target_payload)
+        target_ctx = _context(target_parsed["fit"], str(skill_tier))
+
+        project_sources: list[object] = []
+        for spec in specs:
+            try:
+                parsed = _parsed_fit(spec["payload"])
+            except _ApiFailure as exc:
+                raise _ApiFailure(
+                    "invalid_argument",
+                    f"sources[{spec['index']}] 解析失败：{exc.message}",
+                    field=f"sources[{spec['index']}]",
+                    index=spec["index"],
+                    cause=exc.payload(),
+                ) from exc
+            ctx = _context(parsed["fit"], str(skill_tier))
+            entry: dict[str, object] = {"ctx": ctx}
+            if spec["label"]:
+                entry["label"] = spec["label"]
+            project_sources.append(entry)
+
+        result = _projection.project(
+            target_ctx,
+            project_sources,
+            effects,
+            buffs,
+            strict_state=strict_state,
+        )
+        envelope = _success(
+            result,
+            _meta(
+                target_ctx,
+                source_format=str(target_parsed.get("source_format")),
+                damage_profile=str(damage_profile),
+                state_policy=str(state_policy),
+            ),
+        )
+    except _ApiFailure as exc:
+        return _failure(exc.payload())
+    except Exception as exc:  # noqa: BLE001 - 边界层：任何异常都不得裸抛给 agent
+        return _failure(
+            {
+                "kind": "internal_error",
+                "message": "接口层内部异常，本次没有可用结果",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+        )
+
+    if cache_key is not None:
+        _cache_put(cache_key, envelope)
+    return envelope
 
 
 # =============================================================================
@@ -4460,6 +4684,7 @@ __all__ = [
     "LOWSEC_THRESHOLD",
     "NETWORK_TIMEOUT_S",
     "NOT_A_KILLMAIL_KIND",
+    "PROJECT_STRICT_STATE_DEFAULT",
     "SECURITY_BAND_HIGHSEC",
     "SECURITY_BAND_LOWSEC",
     "SECURITY_BAND_NULLSEC",
@@ -4523,6 +4748,7 @@ __all__ = [
     "fit_get",
     "fit_index",
     "fit_killmail",
+    "fit_project",
     "fit_sensitivity",
     "fit_view",
     "get_engine",

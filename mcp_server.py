@@ -133,6 +133,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "fit_detail",
     "fit_explain",
     "fit_sensitivity",
+    "fit_project",
     "zkb_search",
     "zkb_stats",
 )
@@ -146,8 +147,9 @@ TOOL_NAMES: tuple[str, ...] = (
 3. `fit_index` / `fit_view` / `fit_get` / `fit_detail` —— 六维度从摘要到深挖；
 4. `fit_explain` —— 某个数「为什么是这个数」（归因链，A 可加 / B 乘性 / C 投影）；
 5. `fit_sensitivity` —— 改一个输入（关模块 / 切状态 / 切模式），这个数会变多少；
-6. `zkb_search` —— 先按条件筛出 `killmail_id`，再回头对具体那条用 `fit_killmail`；
-7. `zkb_stats` —— 看一个实体（角色 / 公司 / 联盟）的画像：值不值得往下翻战报。
+6. `fit_project` —— 一艘船**给**另一艘船什么（加成 / 遥修 / 负面），一给一；
+7. `zkb_search` —— 先按条件筛出 `killmail_id`，再回头对具体那条用 `fit_killmail`；
+8. `zkb_stats` —— 看一个实体（角色 / 公司 / 联盟）的画像：值不值得往下翻战报。
 
 加工具的正确姿势：往这个元组里加一个名字、在 `_HANDLERS` 里加实现、在
 `_TOOL_DESCRIPTIONS` 里加文案、(必要时) 在 `_schema_for()` 里加 schema ——
@@ -328,24 +330,27 @@ class _UnknownTool(Exception):
     """未知工具名 → `-32602`（MCP 规范：未知工具属于 invalid params）。"""
 
 
-def _fit_argument(arguments: dict) -> object:
-    """取出 `fit`（**四形态**：字符串三形态 + 对象 / 数组兜底）。
+def _fit_argument(arguments: dict, field: str = "fit") -> object:
+    """取出配装输入（默认键名 `fit`；`fit_project` 用 `target`）。
+
+    四形态：字符串三形态 + 对象 / 数组兜底。
 
     Args:
         arguments: `tools/call` 的 `arguments`。
+        field: 参数名（`fit` / `target`）——错误信封的 `field` 与文案都跟着它走。
 
     Returns:
-        原样交给 `api` 的 `fit`。字符串原样传（EFT / DNA / JSON 文本），字典 / 列表
+        原样交给 `api`。字符串原样传（EFT / DNA / JSON 文本），字典 / 列表
         **直接传对象**（`api` 会判成 `INPUT_JSON`，比先序列化成文本更保真：缓存 key
         与 `meta.source_format` 都走对象那条路）。
 
     Raises:
         _InvalidParams: 缺参 / 类型不对 / 空串 / 超长。
     """
-    if "fit" not in arguments:
-        raise _InvalidParams("缺少必填参数 fit", field="fit")
+    if field not in arguments:
+        raise _InvalidParams(f"缺少必填参数 {field}", field=field)
 
-    fit = arguments.get("fit")
+    fit = arguments.get(field)
     if isinstance(fit, (dict, list)):
         # 对象形式不在 schema 里（schema 声明 string），但真实客户端常把「读进来的
         # killmail 对象」直接递过来 —— 多接一种不亏，大小仍按序列化后的长度卡。
@@ -353,33 +358,33 @@ def _fit_argument(arguments: dict) -> object:
             size = len(json.dumps(fit, ensure_ascii=False))
         except (TypeError, ValueError) as exc:
             raise _InvalidParams(
-                f"fit 对象无法序列化成 JSON：{exc}", field="fit"
+                f"{field} 对象无法序列化成 JSON：{exc}", field=field
             ) from exc
         if size > MAX_FIT_CHARS:
             raise _InvalidParams(
-                f"fit 太大：序列化后 {size} 字符，上限 {MAX_FIT_CHARS}",
-                field="fit",
+                f"{field} 太大：序列化后 {size} 字符，上限 {MAX_FIT_CHARS}",
+                field=field,
                 hint={"max_chars": MAX_FIT_CHARS},
             )
         return fit
 
     if not isinstance(fit, str):
         raise _InvalidParams(
-            "fit 必须是字符串（EFT 文本 / DNA / killmail JSON 文本）"
+            f"{field} 必须是字符串（EFT 文本 / DNA / killmail JSON 文本）"
             f"，收到 {type(fit).__name__}",
-            field="fit",
+            field=field,
         )
     text = fit.strip()
     if not text:
         raise _InvalidParams(
-            "fit 不能为空：请传 EFT 文本、DNA 字符串或 killmail 的 JSON 文本",
-            field="fit",
+            f"{field} 不能为空：请传 EFT 文本、DNA 字符串或 killmail 的 JSON 文本",
+            field=field,
         )
     if len(fit) > MAX_FIT_CHARS:
         raise _InvalidParams(
-            f"fit 太长：{len(fit)} 字符，上限 {MAX_FIT_CHARS}"
+            f"{field} 太长：{len(fit)} 字符，上限 {MAX_FIT_CHARS}"
             "（正常 EFT / DNA / killmail JSON 都在 256 KiB 以内）",
-            field="fit",
+            field=field,
             hint={"max_chars": MAX_FIT_CHARS},
         )
     return fit
@@ -571,6 +576,34 @@ def _sensitivity_options(arguments: dict) -> dict:
     return params
 
 
+def _tool_fit_project(arguments: dict) -> dict:
+    """`fit_project` → `api.fit_project()`（`target` 必填，`sources` / `effects` / `buffs` / `strict_state` 可选）。
+
+    与另外两个 P3 工具同一条纪律：**本层只挡类型**，错误归属交给 `api`
+    （`sources[i]` 坏 → `invalid_argument` + `index`；`strict_state` 非布尔 →
+    `invalid_argument` + `field`；未知 `effect_id` 不是错误，是 warning）。
+    """
+    return _api().fit_project(
+        _fit_argument(arguments, "target"),
+        **_project_options(arguments),
+        **_common_arguments(arguments),
+    )
+
+
+def _project_options(arguments: dict) -> dict:
+    """`fit_project` 的四个可选参数：**只搬值，不判合法性**（口径全在 api / projection）。
+
+    - `sources` 不是数组 → api 给 `invalid_argument` + `field="sources"`；
+    - `strict_state` 不是布尔 → api 给 `invalid_argument` + `field="strict_state"`；
+    - `effects` / `buffs` 里的坏条目 → projection 写进 `warnings`（数据问题，不是参数问题）。
+    """
+    params: dict[str, object] = {}
+    for name in ("sources", "effects", "buffs", "strict_state"):
+        if name in arguments and arguments[name] is not None:
+            params[name] = arguments[name]
+    return params
+
+
 _ZKB_INJECTION_KEYS: tuple[str, ...] = ("requester", "clock", "sleeper")
 """`api.zkb_search` 的三个**测试注入点**：MCP 层不转发（客户端不该能塞一个请求替身）。"""
 
@@ -614,6 +647,7 @@ _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "fit_detail": _tool_fit_detail,
     "fit_explain": _tool_fit_explain,
     "fit_sensitivity": _tool_fit_sensitivity,
+    "fit_project": _tool_fit_project,
     "zkb_search": _tool_zkb_search,
     "zkb_stats": _tool_zkb_stats,
 }
@@ -723,6 +757,18 @@ _TOOL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
         "限制：每个 op 一次引擎重算，默认 max_ops=32，超了截断（truncated=true + warning）；"
         "只给数值变化，**不给「该不该拆」的判词**；combine 可能是 additive / multiplicative / "
         "single（单值指标）；metric 不在表里给 invalid_path + 可用列表。",
+    ),
+    "fit_project": (
+        "一艘船给另一艘船什么（加成 / 遥修 / 负面，一给一）",
+        "想知道「A 给 B 什么、B 的数变了多少」时用它：返回 10 个指标的 baseline→after delta、"
+        "每个变了的属性（attributed_to 指向来源）、applied 的 effects/buffs、遥修落点 repaired"
+        "（改的是回血速度，不是 EHP）与 warnings。"
+        "**是「一给一」不是「编队」**：一次 = 一个目标 + N 个来源的**并集**，投射**不链式传递**"
+        "（目标收到的不再往下传）；编队要自己对每个目标各调一次、边自己枚举。"
+        "strict_state 默认 true：照 EVE 只采信 active 模块的加成（引擎对 buffs 不看 state），"
+        "false = 引擎原样；两种都会给 warning 说明差异。"
+        "限制：不判「该不该这么配」；未知 effect_id 给 warning 不报错；目标非法也照给数值；"
+        "sources[i] 解析失败是 invalid_argument（带 index）。",
     ),
     "zkb_search": (
         "战报列表检索（谁在打谁 / 最近损失了什么）",
@@ -1050,6 +1096,79 @@ def _sensitivity_input_schema() -> dict:
     }
 
 
+def _project_input_schema() -> dict:
+    """`fit_project` 的 `inputSchema`：必填 `target` + 可选 `sources` / `effects` / `buffs` /
+    `strict_state` + 三个共同参数。
+
+    `target` 与其它工具的 `fit` 是**同一套四形态**（EFT / DNA / killmail JSON / 链接），
+    只是键名不同 —— 这个工具没有 `fit` 这个参数。
+    """
+    properties = _common_properties()
+    properties.pop("fit", None)  # 目标叫 `target`，不是 `fit`
+    properties["target"] = {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": MAX_FIT_CHARS,
+        "description": (
+            "目标配装（四形态：EFT 文本 / DNA / killmail JSON / zkillboard·ESI 链接）。"
+            "返回的 delta 都是「这个目标在收到投射前后」的对比。"
+        ),
+    }
+    properties["sources"] = {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": (
+            "来源船数组（每项是一个配装输入，四形态同 target）。"
+            "**不是编队**：N 个来源的投射取并集投给这一个目标，且不链式传递。"
+            "不给 = 只看显式 effects / buffs（都没有时是恒等 delta）。"
+        ),
+    }
+    properties["effects"] = {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "type_id": {"type": "integer", "description": "仅标识/展示用"},
+                "effect_id": {"type": "integer", "description": "引擎 effect 编号"},
+                "attributes": {
+                    "type": "object",
+                    "description": "该 effect 带的属性（键是属性 id 的字符串）",
+                },
+            },
+            "required": ["type_id", "effect_id"],
+        },
+        "description": (
+            "显式投射 effect（手工构造时用）。effect_id 不在该 type 的编号目录里 → "
+            "unknown_effect_id warning 并跳过（引擎会静默忽略，我们不静默）。"
+        ),
+    }
+    properties["buffs"] = {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "integer"},
+                "value": {"type": "number"},
+            },
+            "required": ["id", "value"],
+        },
+        "description": "显式投射 buff（`{id, value}` 数组）；与 sources 的 buffs 按 id 取 max。",
+    }
+    properties["strict_state"] = {
+        "type": "boolean",
+        "default": _api().PROJECT_STRICT_STATE_DEFAULT,
+        "description": (
+            "true（默认，照 EVE）= 非 active 模块不提供加成；false = 引擎原样"
+            "（引擎对 buffs 不看 state，offline 的指挥爆发器也照样给）。"
+        ),
+    }
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": ["target"],
+    }
+
+
 def _schema_for(name: str) -> dict:
     """工具 → `inputSchema`（`zkb_search` / `zkb_stats` 不是配装工具，各走自己那一套）。"""
     if name == "zkb_search":
@@ -1060,6 +1179,8 @@ def _schema_for(name: str) -> dict:
         return _explain_input_schema()
     if name == "fit_sensitivity":
         return _sensitivity_input_schema()
+    if name == "fit_project":
+        return _project_input_schema()
     return _input_schema(
         view={"fit_view": "required", "fit_detail": "optional"}.get(name, "none"),
         path={"fit_get": "required", "fit_detail": "optional"}.get(name, "none"),
@@ -1103,15 +1224,16 @@ def _build_tool_specs() -> tuple[dict, ...]:
 
 INSTRUCTIONS: str = (
     "noobbaozi 配装分析（EVE Online）。按这个顺序用：\n"
-    "① fit_parse 先确认读懂了（船 / 模块件数 / warnings）；\n"
-    "② fit_killmail 分析战报时拿上下文（价值 / 参战方 / 伤害）；\n"
+    "① fit_parse 先确认读懂了；\n"
+    "② fit_killmail 战报上下文（价值 / 参战方 / 伤害）；\n"
     "③ fit_index 默认入口：六维度摘要 + flags；\n"
     "④ fit_view 展开可疑维度；⑤ fit_get 只取一个数（带 provenance）；\n"
     "⑥ fit_detail 深挖，返回很大，按需；\n"
     "⑦ fit_explain 归因：某个数为什么这么大（可加类：各项之和 == value；乘性因子不能相加）；\n"
     "⑧ fit_sensitivity 灵敏度：改一个输入看指标变多少（关件 / 切状态 / 切模式）；\n"
-    "⑨ zkb_search 要先找战报：筛 killmail_id 再回 ②。\n"
-    "⑩ zkb_stats 先看实体画像：值不值得深挖，再决定用⑨翻哪些战报。\n"
+    "⑨ fit_project 投射：一艘船给另一艘船什么（一给一，不链式传递）；\n"
+    "⑩ zkb_search 先找战报：筛 killmail_id 再回 ②。\n"
+    "⑪ zkb_stats 先看实体画像：再决定用⑩翻哪些战报。\n"
     "三条判读纪律：\n"
     "1) unknown 不是 0：provenance=unknown 别用常识补数，看 unknown_reasons"
     "（not_applicable=本配装不适用、不是「不知道」；input_incomplete=输入不足；"

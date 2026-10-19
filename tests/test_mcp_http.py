@@ -895,3 +895,59 @@ def test_fit_sensitivity_business_errors_survive_http(http_server: str, eft_text
     assert call_result["isError"] is True
     assert envelope["error"]["kind"] == "invalid_path"
     assert envelope["error"]["hint"] == list(api.SENSITIVITY_METRICS)
+
+
+# =============================================================================
+# 八、`fit_project` 走完整 HTTP 线：成功信封 + 业务失败（不是 4xx/5xx）
+# =============================================================================
+
+
+def test_fit_project_roundtrip_over_http(http_server: str) -> None:
+    """投射经 `/mcp` 回来：EHP 变了、来源行与 buffs 都在、`structuredContent` 同一份。"""
+    fixtures = NOOBBAOZI_ROOT / "acceptance" / "fixtures"
+    target = (fixtures / "f15-battleship-raven.json").read_text(encoding="utf-8")
+    burst = "[Absolution, CmdBurst]\n\nArmor Command Burst II, Armor Energizing Charge\n"
+    session = _initialize(http_server)[2]
+    call_result, envelope = _call(
+        http_server,
+        "fit_project",
+        {"target": target, "sources": [burst]},
+        session=session,
+        request_id=121,
+    )
+    assert call_result.get("isError") is not True, "成功调用不该带 isError"
+    assert envelope["ok"] is True, envelope.get("error")
+    body = envelope["result"]
+    assert body["sources"] and body["applied"]["buffs"]
+    metrics = {entry["path"]: entry for entry in body["delta"]["metrics"]}
+    assert metrics["survivability.ehp_mixed"]["delta"] > 0
+    assert call_result["structuredContent"] == envelope
+
+
+def test_fit_project_business_errors_survive_http(http_server: str) -> None:
+    """坏 `sources[i]` / 非布尔 `strict_state` 走 HTTP 仍是 `isError:true` 的业务失败。"""
+    fixtures = NOOBBAOZI_ROOT / "acceptance" / "fixtures"
+    target = (fixtures / "f15-battleship-raven.json").read_text(encoding="utf-8")
+    session = _initialize(http_server)[2]
+
+    call_result, envelope = _call(
+        http_server,
+        "fit_project",
+        {"target": target, "sources": ["这不是配装"]},
+        session=session,
+        request_id=122,
+    )
+    assert call_result["isError"] is True
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["index"] == 0
+
+    call_result, envelope = _call(
+        http_server,
+        "fit_project",
+        {"target": target, "strict_state": 1},
+        session=session,
+        request_id=123,
+    )
+    assert call_result["isError"] is True
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["field"] == "strict_state"
