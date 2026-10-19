@@ -131,6 +131,7 @@ from noobbaozi.config import paths as _paths
 from noobbaozi.engine import adapter, normalize
 from noobbaozi.engine.assumptions import default_assumptions
 from noobbaozi.project import render
+from noobbaozi.project import summary as _summary
 from noobbaozi.project.eft import EftError
 from noobbaozi.project.eft import emit as eft_emit
 from noobbaozi.project.views import ViewContext, available_views
@@ -882,8 +883,21 @@ def _parsed_fit(payload: dict) -> dict:
 
 
 def _skill_tier_block(name: str, skills: dict) -> dict:
-    """`meta.skill_tier` = `{name, count}`（**实际档名与实际技能数**，§10.2 硬要求）。"""
-    return {"name": name, "count": len(skills)}
+    """`skill_tier` 块 = `{name, count, hash}`（**实际档名 + 实际技能数 + 稳定摘要**）。
+
+    `hash` 由 `summary.skill_tier_hash()` 算 —— 与 L0 的 `result.meta.skill_tier.hash`
+    **同一个函数**，所以两处可以直接比对（§10.2 的「同源、可校验」）。
+
+    为什么信封也要 `hash`：`count` 相同**不代表内容相同**（同为 512 条、但某个技能
+    4 级 vs 5 级，count 一模一样）。agent 判断「两次分析是不是同一个技能档」只能靠
+    这个摘要 —— 只给 `{name, count}` 时它无从判断，只能重跑一遍。
+    """
+    payload = skills if isinstance(skills, dict) else {}
+    return {
+        "name": name,
+        "count": len(payload),
+        "hash": _summary.skill_tier_hash(payload) if payload else None,
+    }
 
 
 def _tier_skills(base: dict, skill_tier: str) -> dict[int, int]:
@@ -1313,6 +1327,27 @@ def _path_hint() -> list[str]:
     return ["ship", "meta", "flags", "provenance_counts", "budget", *available_views()]
 
 
+def _orphan_flags(ctx: ViewContext) -> list[dict]:
+    """「**不属于任何已注册视角**」的诊断 flag → `fit_detail` 的顶层 `flags` 兜底桶。
+
+    归位判据完全复用渲染层（`render._collect_flags(ctx, 全部视角)`）：`flag["view"]`
+    是已注册视角 → 归那个视角；**其余**（视角名不存在 / 压根没有 `view`）→ residual。
+
+    为什么必须有这个桶：`render_detail()` 只构建**被请求的**视角，它的 residual 是在
+    渲染层内部丢掉的。结果是「同一个诊断在 L1 的视角条目里看得见、到 L2 深挖时**彻底
+    消失**」—— 那正是「静默丢诊断」。（P2 红线：渲染层绝不丢弃 flag。）
+
+    为什么归位目标用**全部视角**而不是本次 `targets`：若只给 `view="mobility"`，用 targets
+    归位会把 firepower 等视角的 flag 也当成「不属于任何视角」塞进顶层桶 —— 那会撒谎。
+    顶层桶的语义是**脱离视角的孤儿**，与本次查哪个视角无关（形状因此也恒定）。
+
+    成本：多跑一次 `diagnostics.evaluate()`（渲染层每个视角各跑一次，这里是 +1）。
+    实测 f1（Hecate）单次 < 5 ms，可接受；换来的是「一条诊断都不丢」。
+    """
+    _attributed, residual = render._collect_flags(ctx, tuple(available_views()))
+    return [flag for flag in residual if isinstance(flag, dict)]
+
+
 def _detail_targets(view: object, path: object) -> tuple[tuple[str, ...], list[str] | None]:
     """`fit_detail` 的 (视角列表, 字段列表)；入参不合法时抛 `_ApiFailure`。
 
@@ -1375,11 +1410,17 @@ def fit_detail(
             只给这些字段（找不到的进该视角的 `missing`，**不静默忽略**）。
 
     Returns:
-        `result = {"ship", "meta", "views": {"<视角>": {...}}}`，形状恒定（`views` 恒为
-        1–6 条）：
+        `result = {"ship", "flags", "views": {"<视角>": {...}}}`，形状恒定（`views` 恒为
+        1–6 条，`flags` 恒为列表）：
 
-        - `meta` 比其它入口多一个 **`assumptions`**（含 512 条完整技能表）——
-          这是「完整技能表只在 detail 层给」（§10.1）的落点；
+        - **`meta` 不在 `result` 里**，它在**信封**上（`envelope["meta"]`）；detail 的信封
+          `meta` 比其它入口多一个 **`assumptions`**（含 512 条完整技能表）——
+          这是「完整技能表只在 detail 层给」（§10.1）的落点。`result` 自己**没有 `meta`**；
+        - **顶层 `flags`**：装「**不属于任何已注册视角**」的诊断 flag（`flag["view"]` 是
+          不存在的名字，或压根没有 `view`）。形状 = 完整 flag 对象（`id` / `view` /
+          `message` / `evidence`），与 L1 视角条目里的 `flags` 同形。**没有就是 `[]`**。
+          为什么要它：这些 flag 归不进任何视角，若不单独兜底，它们会在 L2 **彻底消失**
+          —— 同一个诊断 L1 看得见、深挖时反而没了，那就是「静默丢诊断」，踩红线；
         - 每个视角条目 = `{overview, provenance, unknown_reasons, confidence, flags,
           missing}`，`overview` 是**未降级**的完整列表（`resources.upgrade_space`
           的全部候选在这里，不在 L0）。
@@ -1401,7 +1442,11 @@ def fit_detail(
                 "flags": entry.get("flags"),
                 "missing": entry.get("missing"),
             }
-        return {"ship": _ship_block(ctx), "views": entries}, True
+        return {
+            "ship": _ship_block(ctx),
+            "flags": _orphan_flags(ctx),
+            "views": entries,
+        }, True
 
     return _execute(
         "detail",

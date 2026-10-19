@@ -520,7 +520,11 @@ def test_detail_defaults_to_all_views_and_filters_fields(eft_text: str) -> None:
 
     missing = api.fit_detail(eft_text, path="stability.no_such_field")
     assert missing["ok"] is True
-    assert missing["result"]["views"]["stability"]["missing"] == ["no_such_field"]
+    # 回显的是**调用方原始串**（带视角前缀），不是去掉前缀的那一段 ——
+    # 这样 agent 能把 `missing` 与它自己传进来的 `fields` 直接对上（T-56 改判）。
+    assert missing["result"]["views"]["stability"]["missing"] == [
+        "stability.no_such_field"
+    ]
 
     bad_path = api.fit_detail(eft_text, path="nope.field")
     assert bad_path["ok"] is False
@@ -2727,4 +2731,162 @@ def test_zkb_stats_transport_error_classes_are_distinct(
     } == {"rate_limited", "network_failed", "internal_error"}, (
         "三种上游情况的 kind 必须两两不同（否则 agent 分不清该等、该重试、还是该报障）"
     )
+
+
+# =============================================================================
+# 五、L2 的形状与「不丢诊断」（4/5：代理层暴露的接口侧问题）
+# =============================================================================
+
+
+GHOST_FLAG = {
+    "id": "ghost_rule_no_such_view",
+    "view": "not_a_registered_view",
+    "message": "一条 view 名字不存在的诊断规则（测试注入）",
+    "evidence": {"injected": True},
+}
+"""一条 `view` 名**不存在**的诊断 → 归不进任何视角，只能进顶层兜底桶。"""
+
+
+@pytest.fixture()
+def ghost_rule(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """把所有诊断规则**再多加一条**「视角名不存在」的。
+
+    打桩在 `noobbaozi.project.diagnostics.evaluate` 上：渲染层与 api 层的
+    `_collect_flags()` 都调它，所以三层看到的是同一批 flag（这才是真现场）。
+    """
+    from noobbaozi.project import diagnostics as diagnostics
+
+    original = diagnostics.evaluate
+
+    def with_ghost(ctx: object) -> list[dict]:
+        return [*original(ctx), dict(GHOST_FLAG)]
+
+    monkeypatch.setattr(diagnostics, "evaluate", with_ghost)
+    api.clear_caches()
+    return GHOST_FLAG
+
+
+def test_detail_keeps_flags_that_belong_to_no_view(
+    ghost_rule: dict, eft_text: str
+) -> None:
+    """`fit_detail` 的顶层 `flags` 必须装「不属于任何视角」的诊断（**一条都不许丢**）。
+
+    这是 L2 的真缺陷：`render_detail()` 只构建被请求的视角，它的 residual 在渲染层内部
+    就被丢掉了 —— 于是「同一条诊断，L0 的顶层 flags 看得见、L2 深挖时**彻底消失**」。
+    踩的是「不静默忽略」这条红线。
+    """
+    envelope = api.fit_detail(eft_text)
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    assert "flags" in result, f"detail 的 result 必须有顶层 flags 桶：{sorted(result)}"
+
+    ids = [flag.get("id") for flag in result["flags"]]
+    assert ghost_rule["id"] in ids, (
+        f"孤儿诊断必须出现在 detail 顶层 flags 里，实际 {ids}"
+    )
+    # 形状 = 完整 flag 对象（与 L1 视角条目里的 flags 同形）
+    picked = next(flag for flag in result["flags"] if flag.get("id") == ghost_rule["id"])
+    assert set(picked) >= {"id", "view", "message"}
+    assert picked["view"] == ghost_rule["view"]
+
+    # 只查一个视角时**也一样**（顶层桶的语义与本次查哪个视角无关）
+    one_view = api.fit_detail(eft_text, view="mobility")
+    assert one_view["ok"] is True
+    assert ghost_rule["id"] in [f.get("id") for f in one_view["result"]["flags"]]
+
+    # L0 也能看到同一份东西（两层不再分叉）
+    l0 = api.fit_index(eft_text)
+    assert l0["ok"] is True
+    assert ghost_rule["id"] in [f.get("id") for f in l0["result"]["flags"]]
+
+
+def test_detail_flags_bucket_is_empty_by_default(eft_text: str) -> None:
+    """没有孤儿诊断时顶层 `flags` 是 **`[]`**（形状恒定，调用方不必判类型）。"""
+    api.clear_caches()
+    envelope = api.fit_detail(eft_text)
+    assert envelope["ok"] is True, envelope
+    assert envelope["result"]["flags"] == []
+
+
+def test_detail_orphan_flags_assertion_is_not_vacuous(
+    ghost_rule: dict, eft_text: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**配对证明**：把兜底桶摘掉（`_orphan_flags` 返回 `[]`），上一条立刻不成立。
+
+    同一份输入、同一个注入，只去掉那一个函数 —— 所以它证明的不是「恰好没出现」，
+    而是「这条断言真的依赖兜底桶」。
+    """
+    monkeypatch.setattr(api, "_orphan_flags", lambda ctx: [])
+    api.clear_caches()
+    envelope = api.fit_detail(eft_text)
+    assert envelope["ok"] is True, envelope
+    assert envelope["result"]["flags"] == []
+    assert ghost_rule["id"] not in [f.get("id") for f in envelope["result"]["flags"]]
+
+
+def test_envelope_skill_tier_hash_matches_l0(eft_text: str) -> None:
+    """信封 `meta.skill_tier.hash` 与 L0 的 `result.meta.skill_tier.hash` **必须相同**。
+
+    为什么信封也要 hash：`count` 相同**不代表内容相同**（同为 512 条，某个技能 4 级 vs
+    5 级时 count 一模一样）。agent 判断「两次分析是不是同一个技能档」只能靠这个摘要。
+    """
+    api.clear_caches()
+    l0 = api.fit_index(eft_text)
+    assert l0["ok"] is True, l0
+    l0_hash = l0["result"]["meta"]["skill_tier"]["hash"]
+    assert isinstance(l0_hash, str) and len(l0_hash) > 0, (
+        f"L0 的 skill_tier 必须带 hash，实际 {l0['result']['meta']['skill_tier']}"
+    )
+
+    envelopes = {
+        "parse": api.parse_fit(eft_text),
+        "index": l0,
+        "view": api.fit_view(eft_text, "mobility"),
+        "detail": api.fit_detail(eft_text),
+    }
+    for name, envelope in envelopes.items():
+        assert envelope["ok"] is True, (name, envelope.get("error"))
+        tier = envelope["meta"]["skill_tier"]
+        assert tier.get("hash") == l0_hash, (
+            f"{name} 的信封 skill_tier.hash 与 L0 不同源：{tier.get('hash')} != {l0_hash}"
+        )
+
+    # `fit_killmail` 的输入是**另一份东西**（战报原文），档位自然不同 —— 不能拿它跟
+    # 上面那个 hash 比。它只要**带上** hash 就行；顺带用同一份输入走 L0 交叉验一次：
+    # 同输入、不同入口 → 同一个技能档 → 同一个 hash。
+    killmail_text = KILLMAIL_ZKB_PATH.read_text(encoding="utf-8")
+    killmail_envelope = api.fit_killmail(killmail_text)
+    assert killmail_envelope["ok"] is True, killmail_envelope
+    killmail_hash = killmail_envelope["meta"]["skill_tier"].get("hash")
+    assert isinstance(killmail_hash, str) and killmail_hash, (
+        "fit_killmail 的信封也必须带 skill_tier.hash"
+    )
+    same_input_l0 = api.fit_index(killmail_text)
+    assert same_input_l0["ok"] is True, same_input_l0
+    assert same_input_l0["result"]["meta"]["skill_tier"]["hash"] == killmail_hash, (
+        "同一份杀报输入：L0 与 fit_killmail 信封的技能档 hash 必须一致"
+    )
+
+    # hash 对**内容**敏感（不是常量）：换技能档必须换 hash
+    all5 = api.fit_index(eft_text, skill_tier=api.SKILL_TIER_ALL5)
+    assert all5["ok"] is True
+    assert all5["result"]["meta"]["skill_tier"]["hash"] != l0_hash, (
+        "换到 all5 档 hash 却没变 —— 那这个摘要证明不了任何事"
+    )
+
+
+def test_envelope_skill_tier_hash_assertion_is_not_vacuous(
+    eft_text: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**配对证明**：把 `hash` 从 skill_tier 块摘掉，上一条立刻不成立。"""
+
+    def without_hash(name: str, skills: dict) -> dict:
+        return {"name": name, "count": len(skills)}
+
+    monkeypatch.setattr(api, "_skill_tier_block", without_hash)
+    api.clear_caches()
+    envelope = api.fit_index(eft_text)
+    assert envelope["ok"] is True, envelope
+    assert "hash" not in envelope["meta"]["skill_tier"]
+
 

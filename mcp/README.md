@@ -566,8 +566,72 @@ zkb 原文与 ESI 原文**逐字段一致**（`attackers` 条数与每个字段�
 | `killmail_origin` | `zkillboard` / `esi` / `local` | **原文从哪来**（只有它区分 zkb 与 ESI） |
 
 实测收益（本地网络，带 items 的战报）：端到端冷调用 **2.48 s → 1.59 s**；
-回落路径（items 为空）只省掉并行那一段（约 4.26 s → 3.94 s）。热命中仍是 **0.1 ms** 量级
-（结果缓存）。
+回落路径（**`victim.items` 键不存在**时才走）只省掉并行那一段（约 4.26 s → 3.94 s）。
+热命中仍是 **0.1 ms** 量级（结果缓存）。
+
+### 4.9 L2（`fit_detail`）的形状与两个新字段
+
+#### ① `result` 的形状：`{ship, flags, views}` —— `meta` **不在**里面
+
+```jsonc
+{"ship":  {"name": "Hecate", "group": "Tactical Destroyer", "type_id": 35683},
+ "flags": [ /* 不属于任何视角的诊断，见下 */ ],
+ "views": {"resources": {...}, "stability": {...}, ...}}
+```
+
+**`meta` 在信封上**（`envelope["meta"]`），不在 `result` 里；detail 的信封 `meta` 额外带
+`assumptions`（512 条完整技能表）。三层分工记牢：
+
+| 层 | 技能档在哪 | 完整技能表 |
+|---|---|---|
+| L0 `fit_index` | `result.meta.skill_tier` = `{name, count, hash}` | ❌ |
+| L1 `fit_view` | **没有 `meta`** → 看信封 `meta.skill_tier` | ❌ |
+| L2 `fit_detail` | 看信封 `meta.skill_tier`（`result` 里没有 `meta`） | ✅ 信封 `meta.assumptions.skill_tier` |
+
+**`meta.skill_tier.hash`** 是技能档的稳定摘要（sha1 前 12 位，按 `type_id` 排序后算）。
+`count` 相同**不代表内容相同**（同为 512 条、某个技能 4 级 vs 5 级时 count 一模一样）——
+判断「两次分析是不是同一个技能档」**只能靠 hash**，且 L0 与所有入口信封的 hash **同源可对**。
+
+#### ② 顶层 `flags`：装「不属于任何视角」的诊断（一条都不许丢）
+
+`flag["view"]` 若是**不存在的视角名**（或压根没有 `view`），它归不进任何视角。这类 flag：
+
+- L0 出现在 `result.flags`（`{id, hint}` 压缩形）；
+- **L2 出现在 `result.flags`（完整形：`id` / `view` / `message` / `evidence`）**；
+- 没有时是 `[]`（形状恒定）。
+
+> 为什么必须单独兜底：`render_detail()` 只构建**被请求的**视角，它内部的 residual 会被
+> 丢掉。若不补这个桶，同一条诊断会在 L0 看得见、到 L2 深挖时**彻底消失** —— 那就是
+> 「静默丢诊断」。顶层桶的归位目标是**全部六个视角**，所以它与本次查哪个视角**无关**
+> （`view="mobility"` 也一样看得到 firepower 的孤儿 flag 不会混进来）。
+
+#### ③ `stability.cap_sensitivity[]` 的 `becomes_stable`
+
+每条 = `{module, type_id, cap_use_gj_s, stable_pct, becomes_stable, depletes_in_s,
+stable_delta_pct}`。`becomes_stable` 说的是「**只摘掉这一个模块**，电容能不能稳住」。
+
+**`becomes_stable: false` ≠ 「摘掉它也没用」**：它只回答「摘掉**这一个**够不够」，
+摘掉之后**仍可能不稳**（还有别的耗电大头）。实测跨样本 **225 条里 80 条不翻转**。
+要判断「摘掉哪些才够」得看 `stable_delta_pct` 与其它条目的组合，别把 `false` 读成
+「这模块不耗电」。
+
+#### ④ `resources.upgrade_space[]` 的 `blocked_by`
+
+每条 = `{slot, module, module_type_id, candidate, candidate_type_id, meta_level_now,
+meta_level, cpu_free, power_free, calibration_free, fits, inherits, blocked_by?}`。
+
+- `fits: true` → 候选装得上，**没有 `blocked_by` 键**；
+- `fits: false` → 多一个 **`blocked_by`**，列出**卡在哪一项**：`cpu` / `powergrid` /
+  `calibration` / `charge_capacity` 等。例：
+
+```json
+{"slot": "high", "module": "Expanded Probe Launcher I",
+ "candidate": "Core Probe Launcher II", "fits": false,
+ "blocked_by": ["charge_capacity"], "inherits": ["cpu", "powergrid"]}
+```
+
+  `blocked_by` 是「**缺什么**」的答案，`inherits` 是「这个候选**继承**了哪几项资源约束」——
+  两者不是一个意思，别互相替代。`fits: true` 时**不要**去读 `blocked_by`（它不存在）。
 
 ## 5. 返回契约
 
