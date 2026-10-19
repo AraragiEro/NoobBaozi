@@ -727,9 +727,11 @@ def _summarize_upgrade_space(rows: list) -> dict:
     三个字段都只是**数着同一份列表**，不重算、不取整、不改任何视角数值：
 
     - `slots_checked`：已完成的「槽位 × 候选」检查条数（= 列表长度）；
-    - `upgradeable_count`：其中 `fits is True` 的条数（装得下几个）；
-    - `blocked_by_resource`：有候选、但**一条都装不下**（说明卡在 CPU/PG/标定上；
+    - `upgradeable_count`：其中 `fits is True` 的条数（**自己**不引入新资源违规的候选）；
+    - `blocked_by_resource`：有候选、但**每一条都会自己引入新的资源违规**（全部 `fits=false`；
       没有候选时是 `False`——「没有升级空间」不等于「被资源卡住」）。
+      T-54 追加裁决后 `fits` 是**增量口径**（不含配装原本就有的违规），所以这里说的是
+      「升级本身就会把资源撑爆」，不是「配装已经很紧张」。
     """
     checked = [row for row in rows if isinstance(row, dict)]
     upgradeable = sum(1 for row in checked if row.get("fits") is True)
@@ -1123,6 +1125,19 @@ def render_overview(ctx: ViewContext, *, views: tuple[str, ...] | None = None) -
     }
 
 
+def _echo_path(view: str, field: str) -> str:
+    """`missing` 里回显的路径：**补回视角前缀**（已带前缀的原样返回，不重复补）。
+
+    为什么要补：`fit_detail(path="stability.no_such_field")` 传进来的是**带视角名**的串，
+    而 `render_detail` 的 `fields` 是**去掉视角名之后**的路径。不补的话调用方拿到
+    `["no_such_field"]` —— 既不是他传的串、也不能直接复制回 `path=`；补回来就是**原样回显**，
+    而且对 `fields=["stability.x"]` 这种已经带前缀的直连调用也不会变成 `stability.stability.x`。
+    """
+    if field == view or field.startswith(f"{view}."):
+        return field
+    return f"{view}.{field}"
+
+
 def render_detail(
     ctx: ViewContext, *, view: str, fields: list[str] | None = None
 ) -> dict:
@@ -1137,8 +1152,10 @@ def render_detail(
         fields: 非空时只返回这些点路径。三种写法都认：`a.b`（普通路径）、
             `cap_by_module[].cap_use_gj_s`（**逐元素**）、`tier_violations[0].kind`
             （**具体下标**，与 `get_path()` 同一套语言；未请求的元素以 `{}` 占位保位置）。
-            找不到的字段串**原样**进 `missing`，**不静默忽略**（`missing` 里是去掉视角名
-            前缀后的那一段 —— 它就是调用方传进来的 `fields` 元素本身）。
+            找不到的字段串进 `missing`，**不静默忽略**；`missing` 里回显的是**调用方传进来的
+            原始串**（`render_detail` 的 `fields` 是去视角名的，回显时补回 `view.` 前缀，
+            已带前缀的不重复补 —— 所以 `fit_detail(path="stability.x")` 会拿回
+            `["stability.x"]`，可直接复制回 `path=`）。
             `provenance` 与 `confidence` 同口径裁剪（confidence 只保留被请求字段下的
             **非 A 项**）；`[N]` 请求按元素约定 `[]` 匹配 provenance（有值就必须有三态）。
 
@@ -1170,7 +1187,9 @@ def render_detail(
 
     if fields:
         requested = [str(field) for field in fields]
-        overview, missing = _select(overview, requested)
+        overview, raw_missing = _select(overview, requested)
+        # `missing` 回显**调用方传进来的原始串**（补回视角前缀，见 `_echo_path()`）
+        missing = [_echo_path(view, field) for field in raw_missing]
         provenance = {
             path: state for path, state in provenance.items() if _covered(path, requested)
         }

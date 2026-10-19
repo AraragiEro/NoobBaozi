@@ -1223,13 +1223,24 @@ def test_detail_confidence_keeps_sparse_semantics_when_fields_are_clipped(
 
 
 def test_render_detail_reports_missing_fields(ctx: ViewContext) -> None:
-    """找不到的字段名进 `missing`，**不静默忽略**。"""
+    """找不到的字段名进 `missing`，**不静默忽略**；回显的是**带视角前缀**的可复制路径。
+
+    T-54 追加裁决（原样回显）：`render_detail` 的 `fields` 是去掉视角名的，回显时补回视角前缀
+    （`view.`）—— 于是 `fit_detail(path="mobility.no_such_field")` 拿回的就是它传的那个串，
+    可直接复制回去。
+    """
     detail = render.render_detail(
         ctx, view="mobility", fields=["speed_mps", "no_such_field", "propulsion_states.off.bogus"]
     )
 
-    assert detail["missing"] == ["no_such_field", "propulsion_states.off.bogus"]
+    assert detail["missing"] == [
+        "mobility.no_such_field",
+        "mobility.propulsion_states.off.bogus",
+    ]
     assert set(detail["overview"]) == {"speed_mps"}
+    # 已经带前缀的直连调用不重复补前缀（原样返回）
+    prefixed = render.render_detail(ctx, view="mobility", fields=["mobility.no_such_field"])
+    assert prefixed["missing"] == ["mobility.no_such_field"]
 
 
 def test_render_detail_supports_array_element_paths(ctx: ViewContext) -> None:
@@ -2671,23 +2682,23 @@ def _api():
 
 
 def test_detail_missing_is_the_requested_field_string() -> None:
-    """找不到的字段：`missing` 里是**调用方传进来的那个字段串**（去掉视角名前缀），不静默忽略。
+    """找不到的字段：`missing` **原样回显调用方传进来的串**，不静默忽略。
 
-    实测口径：请求 `stability.no_such_field` → `views.stability.missing == ["no_such_field"]`。
-    视角名已经是 envelope 的键，所以「视角 + missing 里的串」就是原请求（不丢信息）；
-    越深的路径同样原样保留（`capacitor.bogus`）。
+    T-54 追加裁决：「调用方传什么就回显什么」—— `fit_detail(path="stability.no_such_field")`
+    回来的就是 `["stability.no_such_field"]`，**可以直接复制回 `path=`**；越深的路径、越界的下标
+    也照此办理（越界 = 找不到，不是 `None`）。
     """
     api = _api()
-    for request, expected in (
-        ("stability.no_such_field", ["no_such_field"]),
-        ("stability.capacitor.bogus", ["capacitor.bogus"]),
-        ("firepower.weapons[9].name", ["weapons[9].name"]),  # 越界下标 = 找不到，不是 None
+    for request in (
+        "stability.no_such_field",
+        "stability.capacitor.bogus",
+        "firepower.weapons[9].name",  # 越界下标 = 找不到，不是 None
     ):
         view = request.split(".", 1)[0]
         envelope = api.fit_detail(DETAIL_AUDIT_EFT, path=request)
         assert envelope["ok"] is True, envelope.get("error")
         entry = envelope["result"]["views"][view]
-        assert entry["missing"] == expected, request
+        assert entry["missing"] == [request], request
         assert entry["overview"] == {}, "找不到就不许编一个空壳值出来"
 
 

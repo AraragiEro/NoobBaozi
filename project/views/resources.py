@@ -418,6 +418,8 @@ FIELD_SOURCES: dict[str, int | None] = {
     "upgrade_space[].fits": None,
     # `blocked_by` 是**原因清单**（资源维度名 / 规则类型，字符串数组），合成值 → None
     "upgrade_space[].blocked_by": None,
+    # `inherits` 是**基础配装本来就有的**资源违规维度（给原因，不算候选的错）
+    "upgrade_space[].inherits": None,
 }
 """overview 点路径 → 来源属性 ID（渲染层据此打 provenance）。
 
@@ -725,6 +727,28 @@ def _upgrade_plans(ctx: ViewContext, fitted: list[tuple[int, dict]]) -> list[dic
     return plans
 
 
+def _validation_rules(calculation: dict) -> list[dict]:
+    """`engine.calculate(..., validate=True)` → 违规的 `rule` 字典列表（形状不对的条目跳过）。"""
+    return [
+        violation.get("rule") or {}
+        for violation in (calculation.get("violations") or [])
+        if isinstance(violation, dict)
+    ]
+
+
+def _resource_dims(rules: list[dict]) -> set[str]:
+    """`rule` 列表 → **资源维度**集合（`cpu` / `powergrid` / `drone_bandwidth` / …）。
+
+    只收 `type == "resource"` 的违规；维度名优先取 `rule["resource"]`（引擎给的细分），
+    没有就退回 `rule["type"]`（仍是资源类的兜底名，不编造）。
+    """
+    return {
+        str(rule.get("resource") or rule.get("type") or "unknown")
+        for rule in rules
+        if rule.get("type") == "resource"
+    }
+
+
 def _upgrade_space(ctx: ViewContext, fitted: list[tuple[int, dict]]) -> list[dict]:
     """同组更高 meta 候选（每型取两个最近档），重算后报告资源余量与是否装得下。
 
@@ -748,14 +772,23 @@ def _upgrade_space(ctx: ViewContext, fitted: list[tuple[int, dict]]) -> list[dic
     `drone_bandwidth` / `launched_drones` 这种**不在那三个数里的资源维度**，只给 `fits=false`
     的话 agent 会得出「资源够却装不下」的矛盾结论。
     形状口径：**只有 `fits=false` 才带**（它是原因字段；`true` 的行没有「被什么挡住」可言）。
-    注意它报的是**该变体上的**违规，其中可能包含配装**原本就有**的（例如本来就超带宽），
-    不是候选「额外造成」的 —— 要区分「候选的代价」与「配装的老毛病」，得再和基础配装比一次
-    （当前未做，已登记为待办）。
+
+    **`fits` 只看「这次换装**新增**的违规」（T-54 追加裁决）**：`fits = 没有新增资源违规`，
+    `blocked_by` = **该候选自己引入**的资源维度，`inherits` = **基础配装本来就有**的资源维度
+    （仅当非空时出现）。为什么必须拆开：实测 f7 基础配装自己就 `drone.bandwidth = 175 / 50`
+    （超载），16 个候选**全部**被它连坐成 `fits=false` —— 那是拿配装的老毛病去否定候选，
+    agent 会以为「这套船永远没有升级空间」。三者关系：`fits=false ⟺ blocked_by 非空`；
+    `inherits` 与 `fits` 无关（老毛病照报，但不背锅）。
 
     没有索引库时返回 `[]`（字段规格 §4 允许：候选来源必须是自建索引，不能伪造）。
     """
     if ctx.index is None:
         return []
+
+    # 基础配装自身的资源违规维度（一次额外计算）：候选的 `fits` 要跟它比「增量」
+    base_dims = _resource_dims(
+        _validation_rules(ctx.engine.calculate(ctx.fit, validate=True))
+    )
 
     plans = _upgrade_plans(ctx, fitted)
     results: list[dict] = []
@@ -777,26 +810,18 @@ def _upgrade_space(ctx: ViewContext, fitted: list[tuple[int, dict]]) -> list[dic
                 _fit_with_swap(ctx.fit, plan["position"], int(candidate["type_id"])),
                 validate=True,
             )
-            rules = [
-                violation.get("rule") or {}
-                for violation in (calculation.get("violations") or [])
-                if isinstance(violation, dict)
-            ]
+            rules = _validation_rules(calculation)
             if any(rule.get("type") in BLOCKING_HARD_RULE_TYPES for rule in rules):
                 continue  # 尺寸/槽位就不对，不是候选
 
             after = ship_attributes(calculation)
             # 资源类违规的**维度**（cpu / powergrid / calibration / drone_bandwidth /
-            # launched_drones / …）。实测 f7 有 4 例 `fits=false` 但 cpu/pg/calibration 都 ≥0：
-            # 卡的是 `drone_bandwidth` / `launched_drones` 这类**不在那三个数里的资源维度** ——
-            # 不给原因，agent 只能看到「资源够却装不下」，一定会误读。
-            blocked_by = sorted(
-                {
-                    str(rule.get("resource") or rule.get("type") or "unknown")
-                    for rule in rules
-                    if rule.get("type") == "resource"
-                }
-            )
+            # launched_drones / …）。实测 f7 有 4 例「资源够却装不下」—— 卡它们的是
+            # `drone_bandwidth` / `launched_drones` 这种**不在那三个数里的资源维度**。
+            # 换装后的资源违规维度，减掉基础配装本来就有的 → 只剩「这次换装**新增**的」
+            candidate_dims = _resource_dims(rules)
+            blocked_by = sorted(candidate_dims - base_dims)
+            inherits = sorted(candidate_dims & base_dims)
             row: dict[str, object] = {
                 "slot": item.get("slot_type"),
                 "module": item.get("name"),
@@ -808,13 +833,15 @@ def _upgrade_space(ctx: ViewContext, fitted: list[tuple[int, dict]]) -> list[dic
                 "cpu_free": _fmt(after.get(A.ATTR_CPU_FREE)),
                 "power_free": _fmt(after.get(A.ATTR_POWER_FREE)),
                 "calibration_free": _fmt(after.get(A.ATTR_CALIBRATION_FREE)),
-                # 只看有没有资源类违规：有 = 装不下；没有 = 装得下（引擎判定）
+                # `fits` = **这次换装没有新增资源违规**（不是「变体上一条违规都没有」）
                 "fits": not blocked_by,
             }
             if blocked_by:
-                # **`fits=false` 才带**（原因字段）：`true` 的行没有「被什么挡住」可言，
-                # 带一个空列表只会让形状看起来像「查过了、没原因」。
+                # **`fits=false` 才带**（原因字段）：`true` 的行没有「被什么挡住」可言。
                 row["blocked_by"] = blocked_by
+            if inherits:
+                # 配装**本来就有的**资源违规：照报，但不算候选的错（仅当非空时出现）
+                row["inherits"] = inherits
             results.append(row)
     return results
 

@@ -313,20 +313,42 @@ def test_resources_hardpoints_drones_cargo(views: dict[str, dict], ctx: ViewCont
 
 
 def test_resources_upgrade_space_is_honest(views: dict[str, dict]) -> None:
-    """升级空间：候选来自同组索引；本样本 PG 已超 → 没有任何候选装得下。"""
+    """升级空间：候选来自同组索引；**`fits` 只说「这次换装有没有新增违规」**。
+
+    T-54 追加裁决：本样本（spike Hecate）基础配装自己就 **PG 超 3.6**，旧口径下
+    「任何候选都装不下」——那是拿配装的老毛病去否定候选。现在：
+    - `fits=True` = 候选**自己**没引入新的资源违规（未必代表三个余量都 ≥ 0）；
+    - 余量仍为负的，必须能在 `inherits` 里找到对应的资源维度（老毛病照报）；
+    - `fits=False` 才带 `blocked_by`（候选自己引入的原因）。
+    """
     entries = views["resources"]["overview"]["upgrade_space"]
     assert isinstance(entries, list)
+    assert entries, "反证：本样本必须有升级候选"
     for entry in entries:
         assert entry["meta_level"] > entry["meta_level_now"], "候选 meta 必须更高"
         assert isinstance(entry["fits"], bool)
         assert entry["candidate"] and entry["module"]
+        assert ("blocked_by" in entry) is (entry["fits"] is False), (
+            "blocked_by 必须恰好出现在 fits=false 的行上"
+        )
         if entry["fits"]:
-            # 装得下 ⇒ 三项余量都不为负（与引擎口径一致）
-            assert entry["cpu_free"] >= 0.0
-            assert entry["power_free"] >= 0.0
-            assert entry["calibration_free"] >= 0.0
-    # T-12 重标：PG 超 3.6、CPU 超 11.0 —— CPU 仍无余量，任何候选都装不下
-    assert not any(entry["fits"] for entry in entries)
+            # 装得下（没有**新增**违规）⇒ 有负余量也必须是「继承来的」，且说得清是哪一维
+            negatives = [
+                name
+                for name, value in (
+                    ("cpu", entry["cpu_free"]),
+                    ("powergrid", entry["power_free"]),
+                    ("calibration", entry["calibration_free"]),
+                )
+                if value < 0.0
+            ]
+            if negatives:
+                assert entry.get("inherits"), "负余量必须能归因到 inherits（配装老毛病）"
+                assert set(negatives) <= set(entry["inherits"]), (
+                    f"负余量 {negatives} 没被 inherits {entry.get('inherits')} 交代"
+                )
+    # 本样本 PG 本来就超：至少有候选带着 inherits 的 powergrid
+    assert any("powergrid" in (entry.get("inherits") or []) for entry in entries)
 
 
 def test_resources_floats_are_rounded(views: dict[str, dict]) -> None:
@@ -1485,12 +1507,14 @@ def test_becomes_stable_has_provenance(ctx_from_eft) -> None:
     assert view["provenance"]["cap_sensitivity[].becomes_stable"] == "assumed"
 
 
-def test_upgrade_space_blocked_by_names_the_dimension_beyond_cpu_pg_calibration() -> None:
-    """`fits=false` 必须带 `blocked_by`，并点名**不在那三个数里**的资源维度。
+def test_upgrade_space_fits_counts_only_the_candidates_own_violations() -> None:
+    """**`fits` 只看增量**：f7 基础配装自己超带宽 → 候选不许因此被判「装不下」；但必须报 `inherits`。
 
-    测试员实测（f7）：4 个候选 `fits=false` 但 `cpu_free` / `power_free` / `calibration_free`
-    都 ≥ 0 —— 卡它们的是 `drone_bandwidth` / `launched_drones`。只给 `fits=false` 的话，
-    agent 只能得出「资源够却装不下」的矛盾结论。
+    旧口径：16/16 `fits=false`（拿配装的老毛病否定候选，agent 会以为「这套船永远没有升级空间」）。
+    新口径（T-54 追加裁决）：
+    - 10 个只被老毛病连坐的候选 → `fits=true` + `inherits=["drone_bandwidth","launched_drones"]`；
+    - 6 个**自己**引入违规的候选（100MN AB / 遥修 / 改装件）→ `fits=false` + `blocked_by=["powergrid"]` 等；
+    - 三者关系：`fits=false ⟺ blocked_by 非空`；`inherits` 与 `fits` 无关。
     """
     if not F7_PATH.is_file():
         pytest.skip(f"缺少样本：{F7_PATH}")
@@ -1504,25 +1528,41 @@ def test_upgrade_space_blocked_by_names_the_dimension_beyond_cpu_pg_calibration(
     rows = entry["overview"]["upgrade_space"]
 
     assert rows, "反证：f7 必须有升级候选"
-    false_rows = [row for row in rows if not row["fits"]]
-    assert false_rows, "反证：f7 的候选都装不下"
-
     reported = {21484, 521, 19023, 11215}
-    hits = [row for row in false_rows if row["candidate_type_id"] in reported]
-    assert hits, "测试员点名的 4 个候选必须还在样本里"
-
-    for row in hits:
+    inherited_only = [row for row in rows if row["candidate_type_id"] in reported]
+    assert inherited_only, "测试员点名的 4 个候选必须还在样本里"
+    for row in inherited_only:
+        assert row["fits"] is True, "被基础配装的老毛病连坐 → 不算候选装不下"
+        assert "blocked_by" not in row, "fits=true 的行不带原因字段"
+        assert row["inherits"] == ["drone_bandwidth", "launched_drones"], (
+            "老毛病必须说出口，否则 agent 不知道是配装的问题"
+        )
         assert row["cpu_free"] >= 0.0 and row["power_free"] >= 0.0
-        assert row["calibration_free"] >= 0.0, "三个主资源都够 —— 这正是要解释的怪象"
+        assert row["calibration_free"] >= 0.0, "三个主资源都够 —— 这正是旧口径读歪的地方"
+
+    introduced = [row for row in rows if row["fits"] is False]
+    assert introduced, "反证：f7 里确实有候选会自己引入违规（100MN AB / 改装件）"
+    for row in introduced:
         blocked = row["blocked_by"]
         assert isinstance(blocked, list) and blocked, "fits=false 必须给出原因"
         assert blocked == sorted(blocked), "原因清单要排序稳定"
         assert all(isinstance(item, str) and item for item in blocked)
-        assert any(item not in {"cpu", "powergrid", "calibration"} for item in blocked), (
-            f"必须点名那个「不在 CPU/PG/标定里」的维度，实际 {blocked}"
-        )
+        # 新增的原因与继承来的原因**不重叠**（同一维度不许同时算两边）
+        assert set(blocked).isdisjoint(set(row.get("inherits") or []))
+        # 新增的资源维度必须真的吃掉了余量（否则「新增」就站不住）
+        assert any(
+            value < 0.0
+            for name, value in (
+                ("cpu", row["cpu_free"]),
+                ("powergrid", row["power_free"]),
+                ("calibration", row["calibration_free"]),
+            )
+            if name in blocked
+        ), f"blocked_by={blocked} 但对应余量不是负的"
 
-    assert entry["provenance"]["upgrade_space[].blocked_by"] == "assumed"
+    provenance = entry["provenance"]
+    assert provenance["upgrade_space[].blocked_by"] == "assumed"
+    assert provenance["upgrade_space[].inherits"] == "assumed"
 
 
 def test_upgrade_space_fits_true_rows_do_not_carry_blocked_by(ctx_from_eft) -> None:
