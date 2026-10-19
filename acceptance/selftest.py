@@ -220,7 +220,7 @@ def _good_payload(facts: ra.CaseFacts, oracle) -> dict:
             },
             "non_hardpoint": tv(0, unit="个"),
             "non_hardpoint_modules": tv([]),
-            "unclassified": tv(0, unit="个"),
+            "unattributed": tv(0, unit="个"),
         },
         "drone": {
             "bandwidth": {"used": tv(0.0, unit="Mbit/s"), "total": tv(ship.get(1271), unit="Mbit/s", source_attr=1271)},

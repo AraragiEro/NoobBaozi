@@ -2,7 +2,7 @@
 
 分类矩阵（Lead 指定）：
   隐身 / 智能炸弹 / 吸电 / 遥修 / 牵引 / 探针发射器 → `non_hardpoint`
-  `Festival Launcher` → `unclassified`
+  `Festival Launcher` → `unattributed`
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ CASES = [
     ("遥修", "Large I-ax Enduring Remote Armor Repairer", "non_hardpoint"),
     ("牵引", "Small Tractor Beam II", "non_hardpoint"),
     ("探针发射器", "Expanded Probe Launcher I", "non_hardpoint"),
-    ("节日发射器", "Festival Launcher", "unclassified"),
+    ("节日发射器", "Festival Launcher", "unattributed"),
 ]
 
 HULLS = ["Megathron", "Dominix", "Armageddon", "Raven", "Apocalypse"]
@@ -64,18 +64,18 @@ def main() -> int:
         hardpoints = ((inner.get("resources") or {}).get("hardpoints") or {})
         non_hp = hardpoints.get("non_hardpoint")
         modules = hardpoints.get("non_hardpoint_modules") or []
-        unclassified = hardpoints.get("unclassified")
+        unattributed = hardpoints.get("unattributed")
         flags = [f.get("id") for f in (inner.get("flags") or [])]
         got = None
         if isinstance(modules, list) and any(module in str(m) for m in modules):
             got = "non_hardpoint"
-        elif isinstance(unclassified, int) and unclassified >= 1:
-            got = "unclassified"
-        print(f"  {label:8s} {module:44s} → non_hardpoint={non_hp} unclassified={unclassified} "
+        elif isinstance(unattributed, int) and unattributed >= 1:
+            got = "unattributed"
+        print(f"  {label:8s} {module:44s} → non_hardpoint={non_hp} unattributed={unattributed} "
               f"modules={str(modules)[:60]} {'✅' if got == expected else '❌'}")
         if got != expected:
             defect("口径错误", "high", f"hardpoints 分类({label})", expected,
-                   f"non_hardpoint={non_hp} unclassified={unclassified} "
+                   f"non_hardpoint={non_hp} unattributed={unattributed} "
                    f"modules={str(modules)[:80]} flags={flags}")
     print()
 

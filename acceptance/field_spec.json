@@ -575,7 +575,7 @@
      "subpaths": [
       "turret",
       "launcher",
-      "unclassified"
+      "unattributed"
      ],
      "provenance": "measured",
      "confidence": "A",
@@ -585,7 +585,7 @@
       102,
       101
      ],
-     "meaning": "炮位三态 {turret:{total,used,free}, launcher:{...}, non_hardpoint, non_hardpoint_modules, unclassified}；**free 可为负**（负值=非法超装，此时出 hardpoint_violation flag）。旧字段 hardpoints_free 已删除，且**只在 resources 一处出现**（firepower 不再重复登记）",
+     "meaning": "炮位三态 {turret:{total,used,free}, launcher:{...}, non_hardpoint, non_hardpoint_modules, unattributed}；**free 可为负**（负值=非法超装，此时出 hardpoint_violation flag）。旧字段 hardpoints_free 已删除，且**只在 resources 一处出现**（firepower 不再重复登记）",
      "severe": "high",
      "since": "T-55（炮位口径修正）"
     },
@@ -1003,7 +1003,32 @@
   "forbidden_legacy_ids": [
    "propulsion_state_conflict",
    "propulsion_illegal_stack"
-  ]
+  ],
+  "drone_bandwidth_exceeded": {
+   "view": "resources",
+   "meaning": "机舱全部放飞**所需带宽**超过船体总带宽（不是「当前已放飞」）",
+   "unit": "Mbit/s",
+   "evidence_keys": [
+    "bandwidth_total",
+    "bandwidth_required",
+    "over",
+    "source"
+   ],
+   "invariant": "over == bandwidth_required - bandwidth_total（> 0 才出）",
+   "since": "T-1/5"
+  },
+  "launched_drones_exceeded": {
+   "view": "resources",
+   "meaning": "机舱全部放飞**架数**超过最大放飞数；与带宽那条**互不替代**",
+   "unit": "架",
+   "evidence_keys": [
+    "drone_count",
+    "max_launched",
+    "over"
+   ],
+   "invariant": "over == drone_count - max_launched（> 0 才出）",
+   "since": "T-1/5"
+  }
  },
  "budget_expectation": {
   "BUDGET_CHARS": 19000,
@@ -1020,5 +1045,8 @@
   "free_formula": "free == total - used，可为负（负值即非法超装）",
   "flag": "free < 0 时应出 hardpoint_violation",
   "since": "T-55"
- }
+ },
+ "notes": [
+  "`unknown_reasons.values` 里的 `unclassified` 是**兜底原因**，与 hardpoints.unattributed 无关，改名时刻意保留（Lead 2026-10-19 裁决：只改炮位那处）。"
+ ]
 }

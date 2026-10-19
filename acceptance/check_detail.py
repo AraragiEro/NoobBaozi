@@ -230,11 +230,21 @@ def free_resources(engine, enriched) -> dict:
 
 
 def check_upgrade_space(detail_resources: dict, engine, enriched) -> tuple[list[dict], int, list[str]]:
+    """`fits` 的新义（T-54）：**这次换装没有新增资源违规**。
+
+    - `inherits` = 基础配装本来就超的维度（老毛病，不背锅）；
+    - `blocked_by` = 该候选**自己引入**的维度（仅 `fits=false` 时非空）；
+    - 断言 `fits == (新增维度为空)`，并对账 `blocked_by` / `inherits`（只在能独立复算的三个维度上）。
+    """
     defects: list[dict] = []
     notes: list[str] = []
     overview = detail_resources.get("overview") or {}
     candidates = [c for c in (overview.get("upgrade_space") or []) if isinstance(c, dict)]
     items = list(enriched.get("items") or [])
+    base = free_resources(engine, enriched)
+    dim_names = {"cpu": "cpu", "powergrid": "powergrid", "calibration": "calibration"}
+    base_dims = {dim_names[key] for key, value in base.items()
+                 if isinstance(value, (int, float)) and value < -1e-9}
     checked = 0
     for entry in candidates[:4]:
         module_tid = entry.get("module_type_id")
@@ -256,16 +266,39 @@ def check_upgrade_space(detail_resources: dict, engine, enriched) -> tuple[list[
             continue
         checked += 1
         free = free_resources(engine, {**enriched, "items": next_items})
-        resource_ok = all(value is None or value >= 0 for value in free.values())
+        cand_dims = {dim_names[key] for key, value in free.items()
+                     if isinstance(value, (int, float)) and value < -1e-9}
+        new_dims = cand_dims - base_dims
         claimed = entry.get("fits")
-        if claimed is True and not resource_ok:
+        if claimed is not None and bool(claimed) is not (not new_dims):
             defects.append({"category": "口径错误", "severity": "high",
                             "where": f"upgrade_space(candidate={candidate_tid}).fits",
-                            "expected": "fits=true 时资源必须够",
-                            "actual": f"我重算 free={free}"})
-        if claimed is False and resource_ok:
-            notes.append(f"candidate={candidate_tid}: fits=false 但资源够（free={free}）"
-                         f" → 可能由非资源类硬规则触发，detail 未给 reason")
+                            "expected": f"{not new_dims}（新增维度={sorted(new_dims)}，"
+                                        f"基础已有={sorted(base_dims)}）",
+                            "actual": repr(claimed)})
+        if claimed is False:
+            blocked = set(entry.get("blocked_by") or [])
+            if blocked != new_dims:
+                defects.append({"category": "口径错误", "severity": "medium",
+                                "where": f"upgrade_space(candidate={candidate_tid}).blocked_by",
+                                "expected": sorted(new_dims), "actual": sorted(blocked)})
+        else:
+            if entry.get("blocked_by"):
+                defects.append({"category": "口径错误", "severity": "medium",
+                                "where": f"upgrade_space(candidate={candidate_tid}).blocked_by",
+                                "expected": "fits=true 时不应带 blocked_by",
+                                "actual": entry.get("blocked_by")})
+        inherits = set(entry.get("inherits") or [])
+        # 只在我能独立复算的三个维度上对账；无人机维度无法独立算，留观察
+        drone_dims = inherits - set(dim_names.values())
+        # inherits = 基础就有 **且换装后仍然** 超的维度（换装修好的不算继承）
+        still = base_dims & cand_dims
+        if (inherits & set(dim_names.values())) != still:
+            defects.append({"category": "口径错误", "severity": "medium",
+                            "where": f"upgrade_space(candidate={candidate_tid}).inherits",
+                            "expected": sorted(still), "actual": sorted(inherits)})
+        if drone_dims:
+            notes.append(f"{candidate_tid}: inherits 含无人机维度 {sorted(drone_dims)}（我无法独立复算）")
         for key, attr_key in (("cpu_free", "cpu"), ("power_free", "powergrid"),
                               ("calibration_free", "calibration")):
             reported, mine = entry.get(key), free.get(attr_key)

@@ -305,3 +305,82 @@ f25（电容敏感，nos/neut）、f26（航母）、f33（货舱）、f48（Gno
 用它的正则在 270 行），几分钟后自行消失。**不是稳定缺陷**，但提醒：验收跑在“编辑中的树”上时，
 瞬时红可能是假信号，**必须复跑确认**。
 
+## 16. 改名 `unattributed` + 两条无人机 flag（本轮同步与验收）
+
+### 16.1 改名（已同步）
+
+| 文件 | 改动 |
+|---|---|
+| `field_spec.json` | `resources.hardpoints.subpaths` 的 `unclassified` → **`unattributed`**（L578）；`meaning` 同步（L588） |
+| `check_hardpoints_classes.py` | 判据、取值、打印、缺陷文案全部改（L5/25/67/72/73/74/78） |
+| `selftest.py` | 硬点载荷 `"unclassified": tv(0)` → **`"unattributed"`**（L223） |
+
+**一处偏差（我按你的原则没改，请确认）**：`field_spec.json` L982/985 的 `unclassified`
+**不是炮位字段**，而是 `unknown_reasons.values` 的**兜底原因**（`hard_gate: "unclassified 必须报缺陷"`），
+语义与 `hardpoints.unattributed` 无关、与 `run_acceptance.py` L1520-1584 那处同类。
+按你「不要动 unknown_reasons 的 unclassified」的原则，我只改了炮位那两处，并在 spec 里加了说明。
+**结果：`git diff` 里 `unknown_reasons` 一字未动。**
+
+### 16.2 两条新 flag 验证（✅ 0 缺陷）
+
+**① 互不替代（Dominix 5×Warrior II + 1×Ogre II）**
+
+```
+bandwidth = 50.0 / 125.0（够）
+flags     = ['launched_drones_exceeded', 'resource_slack']
+evidence  = {"drone_count": 6, "max_launched": 5, "over": 1}
+```
+
+→ **只出架数那条**，没有 `drone_bandwidth_exceeded`、也没有「over = −75」的自相矛盾 ✅
+
+**② f7（25 架 / 175 带宽）**
+
+```
+bandwidth = 175.0 / 50.0
+flags     = ['drone_bandwidth_exceeded', 'launched_drones_exceeded']
+evidence  = {"bandwidth_total": 50.0, "bandwidth_required": 175.0, "over": 125.0,
+             "source": "engine:drone_bandwidth"}
+feasible  = True   （我按 cpu/pg/cal 重算 = True）
+```
+
+→ 两条同时命中、**`feasible` 仍为 true**（口径未变，缺口由两条 flag 表达）✅
+
+**③ 全样本扫描（65 个 fixture）**
+
+- 命中 `drone_bandwidth_exceeded` **6** 个、`launched_drones_exceeded` **8** 个；
+- 6/6 带宽 flag 的证据满足 `over == bandwidth_required − bandwidth_total`；
+- 凡 `bandwidth.used > total` 的样本**都有**该 flag（无漏报）；
+- 65/65 样本 `feasible == (cpu.free ≥ 0 ∧ pg.free ≥ 0 ∧ cal.free ≥ 0)` —— 无人机不参与 feasible ✅
+
+**变异证明**：把两条合并成一条 → 抓到；把 `over` 少算 1 → 抓到。
+
+### 16.3 口径写进报告（你要求的 ③）
+
+`drone.bandwidth.used` = **机舱全部放飞所需**，不是「当前已放飞」；本产品没有「已放飞」维度。
+所以 f7 的 `175 / 50` 正确读法是：**如果 25 架全部放飞**需要 175 Mbit/s，总带宽只有 50。
+验收里我按这个口径解释所有带宽数字（`required == used` 已校验，±0.5）。
+
+### 16.4 附带发现：`upgrade_space[].fits` 的语义变了（T-54）
+
+上一轮我验到的 `fits=false`（f1 那 16 个候选）在这一轮变成 `fits=true` —— 读代码确认这是
+**T-54 的追加裁决**，不是回归：
+
+- `fits = 这次换装**没有新增**资源违规`（不再要求「变体上一条违规都没有」）；
+- `inherits` = 基础配装本来就有、**换装后仍然**超的维度（换装修好的不算继承）；
+- `blocked_by` = 该候选**自己引入**的维度（仅 `fits=false` 带）。
+
+我据此把 L2 的 ③ 断言重写成 `fits == (新增维度为空)`、`blocked_by == 新增维度`、
+`inherits == 基础 ∩ 候选`，**15 条假缺陷归零**。
+这条**语义变更没有出现在你给我的 changelog 里**，建议记进台账（否则下一个验收员还会踩）。
+
+### 16.5 一键脚本数字（本轮全部重跑）
+
+| 脚本 | 结果 |
+|---|---|
+| `selftest.py` | exit 0（全绿） |
+| `check_hardpoints_classes.py` | **7/7**，0 缺陷（改名后 `unattributed` 生效） |
+| `check_detail.py` | **0 缺陷**（51 cap 条目 / 29 敏感 / 32 候选 / 5,120 条技能） |
+| `check_drone_flags.py` | **0 缺陷**（Dominix 互不替代 + f7 两条 + 65 样本扫描） |
+| `run_acceptance.py`（65×43） | **2,795/2,795**，`status=pass`（27 条 low，0 条 medium+） |
+| `pytest`（我自己跑） | **1,101 passed** |
+
