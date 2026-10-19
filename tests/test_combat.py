@@ -897,3 +897,268 @@ def test_fleet_size_has_practical_range_and_degenerate_flag(p1_apocalypse, p1_at
 
 
 
+
+# =============================================================================
+# 11. P6-B5：本地回复必须进 TTK，状态不许静默假设（事故复现）
+# =============================================================================
+
+ORTHRUS_EFT = """[Orthrus, kite]
+Ballistic Control System II
+Ballistic Control System II
+Ballistic Control System II
+
+50MN Microwarpdrive II
+Large Shield Extender II
+Warp Disruptor II
+Sensor Booster II
+
+Heavy Missile Launcher II, Scourge Fury Heavy Missile
+Heavy Missile Launcher II, Scourge Fury Heavy Missile
+Heavy Missile Launcher II, Scourge Fury Heavy Missile
+Heavy Missile Launcher II, Scourge Fury Heavy Missile
+Heavy Missile Launcher II, Scourge Fury Heavy Missile
+"""
+"""事故攻方：重导 Orthrus（5×HML II + Scourge Fury + 50MN MWD）。"""
+
+VAGABOND_ABYSSAL_EFT = """[Vagabond, kite]
+Damage Control II
+Gyrostabilizer II
+Gyrostabilizer II
+Tracking Enhancer II
+
+100MN Afterburner II
+Large Abyssal Shield Booster
+Republic Fleet Large Cap Battery
+Warp Disruptor II
+
+220mm Vulcan AutoCannon II, Barrage M
+220mm Vulcan AutoCannon II, Barrage M
+220mm Vulcan AutoCannon II, Barrage M
+220mm Vulcan AutoCannon II, Barrage M
+220mm Vulcan AutoCannon II, Barrage M
+"""
+"""事故守方原样：Abyssal 大盾修 + 共和舰队大电池 + 100MN AB。"""
+
+VAGABOND_STANDARD_EFT = VAGABOND_ABYSSAL_EFT.replace(
+    "Large Abyssal Shield Booster", "Large Shield Booster II"
+)
+"""把 Abyssal 换成正牌 **Large Shield Booster II**：用来验证「回复真的生效」这条路径。
+
+为什么必须换：**Abyssal/突变模块的数值不在 SDE 里**（类型 47789 只有 2 个 dogma 属性，
+shieldBonus/duration 全是 0），所以引擎就算模块是 active 也只能给 0 回复。
+事故的 `repair_total_hp_s = 0.0` 根因是这个数据缺口，**不是** state_policy。
+"""
+
+
+@pytest.fixture(scope="module")
+def orthrus_ctx(engine, index) -> ViewContext:
+    return _ctx(engine, index, ORTHRUS_EFT)
+
+
+@pytest.fixture(scope="module")
+def vagabond_abyssal_ctx(engine, index) -> ViewContext:
+    return _ctx(engine, index, VAGABOND_ABYSSAL_EFT)
+
+
+@pytest.fixture(scope="module")
+def vagabond_standard_ctx(engine, index) -> ViewContext:
+    return _ctx(engine, index, VAGABOND_STANDARD_EFT)
+
+
+def _defender_speed(ctx) -> float:
+    from noobbaozi.project.views.base import ship_attributes  # noqa: PLC0415
+
+    return ship_attributes(ctx.variant())[37]
+
+
+def _type_id(index, name: str) -> int:
+    hits = index.search_types(name, limit=1)
+    assert hits, f"索引库里找不到 {name!r}"
+    return int(hits[0]["type_id"])
+
+
+def test_incident_abyssal_booster_is_never_silent(orthrus_ctx, vagabond_abyssal_ctx) -> None:
+    """事故复现：Abyssal 盾修 → 回复 0，但**必须有 flag**（不许静默）。"""
+    result = combat.engagement(
+        orthrus_ctx, vagabond_abyssal_ctx, range_m=25000.0, angular_vel=0.0,
+        target_velocity=_defender_speed(vagabond_abyssal_ctx),
+    )
+    repair = result["defender_survival"]["repair"]
+    assert repair["hps"] == 0.0
+    assert repair["module_ehp_s"] == 0.0
+    assert repair["state"] == "active_but_zero_effect"
+    assert repair["reason"] == "module_active_but_no_repair_attributes"
+    assert repair["source"] == "passive_shield_regen"  # 只剩被动回充，不能冒充盾修
+
+    flags = result["flags"]
+    assert any(f.startswith("local_repair_not_active") for f in flags), flags
+    assert any(f.startswith("local_repair_zero_effect") for f in flags), flags
+    assert any(f.startswith("inconsistent_module_states") for f in flags), flags
+
+    # 没算回复 → 仍然给一个数（不是 null），但上面三条 flag 已经说明它不可信
+    ttk = result["defender_survival"]["time_to_kill_s"]
+    assert ttk["value"] is not None
+    assert ttk["reason"] is None
+    assert ttk["net_incoming_dps"] == pytest.approx(
+        result["totals"]["effective_dps"] - repair["ehp_s"], rel=1e-3
+    )
+
+
+def test_incident_standard_booster_out_heals_incoming(orthrus_ctx, vagabond_standard_ctx) -> None:
+    """换成正牌盾修：回复 > 有效 DPS → TTK 必须 null + reason，不能给一个假秒数。"""
+    result = combat.engagement(
+        orthrus_ctx, vagabond_standard_ctx, range_m=25000.0, angular_vel=0.0,
+        target_velocity=_defender_speed(vagabond_standard_ctx),
+    )
+    repair = result["defender_survival"]["repair"]
+    assert repair["hps"] > 0.0
+    assert repair["module_ehp_s"] > 0.0
+    assert repair["state"] == "active"
+
+    ttk = result["defender_survival"]["time_to_kill_s"]
+    assert result["totals"]["effective_dps"] < repair["ehp_s"]
+    assert ttk["value"] is None
+    assert ttk["reason"] == "out_heals_incoming"
+    assert ttk["net_incoming_dps"] == 0.0
+    # 电容撑不住：仍给 null，但必须标 partial + 说明
+    assert ttk["partial"] is True
+    assert "repair_cap_unsustainable" in ttk["partial_reasons"]
+    assert any(f.startswith("repair_cap_unsustainable") for f in result["flags"])
+
+
+def test_states_can_force_booster_offline(index, orthrus_ctx, vagabond_standard_ctx) -> None:
+    """`states` 能把盾修强制关掉：回复归零 + flag（证明参数真的生效）。"""
+    booster = _type_id(index, "Large Shield Booster II")
+    result = combat.engagement(
+        orthrus_ctx, vagabond_standard_ctx, range_m=25000.0,
+        target_velocity=_defender_speed(vagabond_standard_ctx),
+        states={booster: "offline"},
+    )
+    repair = result["defender_survival"]["repair"]
+    assert repair["hps"] == 0.0
+    assert repair["module_ehp_s"] == 0.0
+    assert repair["state"] == "inactive"
+    assert any(f.startswith("local_repair_not_active") for f in result["flags"])
+    assert result["inputs"]["states"] == {booster: "offline"}
+
+
+def test_ttk_subtracts_repair_exactly(p1_attacker, vagabond_standard_ctx, index) -> None:
+    """非永真：把回复从 TTK 里去掉 → 这里红。
+
+    Exequror（650 dps）打 Vagabond（盾修 ~262 EHP/s）：净 DPS = dps − rep，
+    TTK 必须严格等于 `ehp / (dps − rep)`，且比「关掉盾修」更慢。
+    """
+    booster = _type_id(index, "Large Shield Booster II")
+    on = combat.engagement(p1_attacker, vagabond_standard_ctx, range_m=0.0)
+    off = combat.engagement(p1_attacker, vagabond_standard_ctx, range_m=0.0,
+                            states={booster: "offline"})
+    on_ttk = on["defender_survival"]["time_to_kill_s"]
+    off_ttk = off["defender_survival"]["time_to_kill_s"]
+    assert on_ttk["value"] is not None and off_ttk["value"] is not None
+
+    ehp = on["defender_survival"]["ehp"]["value"]
+    dps = on["totals"]["effective_dps"]
+    rep = on["defender_survival"]["repair"]["ehp_s"]
+    assert rep > 0.0 and dps > rep
+    assert on_ttk["value"] == pytest.approx(ehp / (dps - rep), rel=1e-3)
+    assert on_ttk["value"] > off_ttk["value"], "开了盾修的击穿时间必须更长"
+
+
+def test_repair_zero_is_flagged_in_every_state(orthrus_ctx, vagabond_standard_ctx, index) -> None:
+    """遍历三种状态：要么回复 > 0，要么必须有 flag —— 不允许「0 且无提示」。"""
+    booster = _type_id(index, "Large Shield Booster II")
+    for states in (None, {booster: "offline"}, {booster: "online"}):
+        result = combat.engagement(
+            orthrus_ctx, vagabond_standard_ctx, range_m=25000.0, states=states,
+        )
+        repair = result["defender_survival"]["repair"]
+        if repair["module_ehp_s"] <= 0.0:
+            assert any(f.startswith("local_repair_not_active") for f in result["flags"]), states
+        else:
+            assert repair["state"] == "active"
+
+
+def test_states_rejects_unknown_keys(orthrus_ctx, vagabond_standard_ctx) -> None:
+    with pytest.raises(ValueError, match="type_id"):
+        combat.engagement(orthrus_ctx, vagabond_standard_ctx, range_m=1000.0,
+                          states={99999999: "active"})
+    with pytest.raises(ValueError, match="非法"):
+        combat.engagement(orthrus_ctx, vagabond_standard_ctx, range_m=1000.0,
+                          states={"index:0": "on"})
+    with pytest.raises(ValueError, match="超出"):
+        combat.engagement(orthrus_ctx, vagabond_standard_ctx, range_m=1000.0,
+                          states={"index:99": "offline"})
+
+# ---- 状态 × 距离矩阵：每条都必须守住「回复要么>0，要么有 flag」----
+
+BOOSTER_KINDS = ("abyssal", "standard")
+STATE_CASES = (None, "offline", "online", "active", "overload")
+RANGE_CASES = (0.0, 8000.0, 25000.0, 50000.0)
+
+ABYSSAL_BOOSTER_TYPE = 47789
+"""`Large Abyssal Shield Booster` 的 type_id（SDE 实测；dogma 只有 2 个属性 → 回复必然 0）。"""
+
+
+@pytest.mark.parametrize("booster", BOOSTER_KINDS)
+@pytest.mark.parametrize("state", STATE_CASES)
+@pytest.mark.parametrize("range_m", RANGE_CASES)
+def test_repair_invariants_matrix(request, index, orthrus_ctx, booster, state, range_m) -> None:
+    """48 格状态×距离矩阵：每一格都必须满足「回复或 flag」与「TTK 恒等式」。"""
+    defender = request.getfixturevalue(f"vagabond_{booster}_ctx")
+    if state is None:
+        states = None
+    elif booster == "abyssal":
+        states = {ABYSSAL_BOOSTER_TYPE: state}
+    else:
+        states = {_type_id(index, "Large Shield Booster II"): state}
+
+    result = combat.engagement(orthrus_ctx, defender, range_m=range_m, states=states)
+    survival = result["defender_survival"]
+    repair = survival["repair"]
+    ttk = survival["time_to_kill_s"]
+    dps = result["totals"]["effective_dps"]
+    ehp = survival["ehp"]["value"]
+
+    assert repair["module_ehp_s"] >= 0.0
+    if repair["module_ehp_s"] <= 0.0:
+        assert any(f.startswith("local_repair_not_active") for f in result["flags"]), (
+            booster, state, range_m, result["flags"])
+    else:
+        assert repair["state"] == "active"
+        assert not any(f.startswith("local_repair_not_active") for f in result["flags"])
+
+    expected_net = max(dps - repair["ehp_s"], 0.0)
+    assert ttk["net_incoming_dps"] == pytest.approx(expected_net, rel=1e-3)
+
+    if ehp is None or dps <= 0.0 or expected_net <= 0.0:
+        assert ttk["value"] is None
+        assert ttk["reason"] in {"ehp_unknown", "no_incoming_damage", "out_heals_incoming"}
+    else:
+        assert ttk["value"] == pytest.approx(ehp / expected_net, rel=1e-3)
+        assert ttk["reason"] is None
+
+
+# ---- 攻守 × 距离矩阵：TTK 恒等式不依赖具体武器类型 ----
+
+
+@pytest.mark.parametrize("attacker_fixture",
+                         ("turret_ctx", "missile_ctx", "p1_attacker", "orthrus_ctx"))
+@pytest.mark.parametrize("defender_fixture", ("vagabond_standard_ctx", "p1_defender"))
+@pytest.mark.parametrize("range_m", (0.0, 3000.0, 25000.0))
+def test_ttk_identity_matrix(request, attacker_fixture, defender_fixture, range_m) -> None:
+    """24 格：`ttk == ehp / max(dps − repair.ehp_s, 0)`（或 null + reason）。"""
+    attacker = request.getfixturevalue(attacker_fixture)
+    defender = request.getfixturevalue(defender_fixture)
+    result = combat.engagement(attacker, defender, range_m=range_m)
+    survival = result["defender_survival"]
+    ttk = survival["time_to_kill_s"]
+    ehp = survival["ehp"]["value"]
+    dps = result["totals"]["effective_dps"]
+    net = max(dps - survival["repair"]["ehp_s"], 0.0)
+
+    if ehp is None or net <= 0.0:
+        assert ttk["value"] is None
+        assert ttk["reason"] in {"ehp_unknown", "no_incoming_damage", "out_heals_incoming"}
+    else:
+        assert ttk["value"] == pytest.approx(ehp / net, rel=1e-3)
+    assert ttk["net_incoming_dps"] == pytest.approx(net, rel=1e-3)

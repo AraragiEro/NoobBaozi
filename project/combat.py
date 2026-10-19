@@ -138,6 +138,30 @@ TURRET_FAMILIES: frozenset[str] = frozenset({"hybrid", "laser", "projectile"})
 DISINTEGRATOR_HINT = "Entropic Disintegrator"
 """分解器的 group/名字特征：**既不是炮台也不是导弹**（伤害有 ramp，本层不建模）。"""
 
+LOCAL_REPAIR_GROUPS: frozenset[str] = frozenset({
+    "Shield Booster",
+    "Ancillary Shield Booster",
+    "Armor Repair Unit",
+    "Ancillary Armor Repairer",
+    "Hull Repair Unit",
+})
+"""**本地**修复模块的 SDE group 名。远端修（Remote Shield Booster / Remote Armor Repairer /
+Remote Hull Repairer / Mutadaptive Remote Armor Repairer）**不在**这里：它们修别人，不修自己。"""
+
+PROPULSION_GROUP: str = "Propulsion Module"
+"""推进模块 group 名（AB / MWD）。用来做「推进开着、修复关着」的状态一致性检查。"""
+
+STATE_VALUES: frozenset[str] = frozenset({"offline", "online", "active", "overload"})
+"""`states` 覆盖允许的取值（与引擎的 State 枚举同名）。"""
+
+_REPAIR_GROUP_LABELS: dict[str, str] = {
+    "Shield Booster": "local_shield_booster",
+    "Ancillary Shield Booster": "local_shield_booster",
+    "Armor Repair Unit": "local_armor_repairer",
+    "Ancillary Armor Repairer": "local_armor_repairer",
+    "Hull Repair Unit": "local_hull_repairer",
+}
+
 _INT_PREFIX = "type_"
 
 
@@ -242,14 +266,19 @@ def _raw_attr(attrs: Mapping | dict, attribute_id: int) -> float | None:
     return float(entry)
 
 
-def _raw_ship_attrs(ctx) -> dict[int, float]:
-    """船体属性的**原始值** `{id: float}`（空值跳过，不补 0）。"""
-    raw = (ctx.variant().get("ship") or {}).get("attributes") or {}
+def _raw_ship_attrs_of(calculation: Mapping) -> dict[int, float]:
+    """从**任意一份** calculation 里取船体原始属性（含 `calculate_variant` 的结果）。"""
+    raw = (calculation.get("ship") or {}).get("attributes") or {}
     return {
         int(key): float(entry.get("value") if isinstance(entry, Mapping) else entry)
         for key, entry in raw.items()
         if (entry.get("value") if isinstance(entry, Mapping) else entry) is not None
     }
+
+
+def _raw_ship_attrs(ctx) -> dict[int, float]:
+    """船体属性的**原始值** `{id: float}`（空值跳过，不补 0）。"""
+    return _raw_ship_attrs_of(ctx.variant())
 
 
 def _ship_speed(ctx) -> float:
@@ -450,6 +479,144 @@ def _missile_range_m(raw_attrs: dict[int, float], charge_attrs: dict[int, float]
 # =============================================================================
 
 
+def _module_rows(ctx, calculation: Mapping) -> list[dict]:
+    """calculation 的逐件状态 + 身份（`name` / `group` / `state`）。"""
+    calc_items = calculation.get("items") or []
+    src_items = (ctx.fit or {}).get("items") or []
+    rows: list[dict] = []
+    for position, item in enumerate(calc_items):
+        source = src_items[position] if position < len(src_items) else {}
+        type_id = source.get("type_id")
+        type_row = (
+            ctx.index.get_type(type_id)
+            if (ctx.index is not None and isinstance(type_id, int)) else None
+        )
+        rows.append({
+            "type_id": type_id,
+            "name": (type_row or {}).get("name"),
+            "group": (type_row or {}).get("group_name"),
+            "state": item.get("state"),
+        })
+    return rows
+
+
+def _defender_calculation(defender_ctx, states: Mapping | None) -> tuple[dict, str]:
+    """守方的 calculation；`states` 非空时先改状态再用**引擎重算**（属性仍全交引擎）。
+
+    `states` 的键：`int` = **type_id**（该型全部件）；`"index:3"` = 第 4 件的下标。
+    只作用于**守方**（修复/状态一致性都发生在守方身上），键对不上就 `ValueError`。
+    """
+    if not states:
+        return defender_ctx.variant(), "base"
+
+    items = [dict(item) for item in ((defender_ctx.fit or {}).get("items") or [])]
+    by_type: dict[int, list[int]] = {}
+    for index, item in enumerate(items):
+        by_type.setdefault(item.get("type_id"), []).append(index)
+
+    for key, state in states.items():
+        if state not in STATE_VALUES:
+            raise ValueError(f"states[{key!r}]={state!r} 非法；允许 {sorted(STATE_VALUES)}")
+        if isinstance(key, str) and key.startswith("index:"):
+            try:
+                index = int(key.split(":", 1)[1])
+            except ValueError as exc:
+                raise ValueError(f"states 的字符串键必须形如 'index:3'，收到 {key!r}") from exc
+            if not 0 <= index < len(items):
+                raise ValueError(f"states 里的 index={index} 超出守方配装件数 {len(items)}")
+            targets = [index]
+        elif isinstance(key, int) and not isinstance(key, bool):
+            targets = by_type.get(key) or []
+            if not targets:
+                raise ValueError(f"states 里的 type_id={key} 不在守方配装里")
+        else:
+            raise ValueError(f"states 的键必须是 type_id(int) 或 'index:N'，收到 {key!r}")
+        for index in targets:
+            items[index]["state"] = state
+
+    variant_fit = {**(defender_ctx.fit or {}), "items": items}
+    cache_key = "combat_states_" + "_".join(
+        sorted(f"{key}={state}" for key, state in states.items())
+    )
+    return defender_ctx.calculate_variant(cache_key, variant_fit), cache_key
+
+
+def _repair_block(defender_ctx, calculation: Mapping) -> dict:
+    """本地修复：raw hps（面板值）与 effective EHP/s（**用来扣 DPS 的量**）。
+
+    量纲：`effective_dps`（原始伤害/秒）与 `ehp`（原始伤害）同一口径，所以 TTK 要用
+    **effective** 修复速率（`-50/-48/-49/-52`），不是面板的 raw hp/s（`-47/-45/-46`）。
+    """
+    ship = _raw_ship_attrs_of(calculation)
+    components = {
+        "shield_active": {
+            "raw_hps": ship.get(A.ATTR_SHIELD_BOOST_RATE) or 0.0,
+            "ehp_s": ship.get(A.ATTR_SHIELD_EFFECTIVE_BOOST_RATE) or 0.0,
+        },
+        "armor_active": {
+            "raw_hps": ship.get(A.ATTR_ARMOR_REPAIR_RATE) or 0.0,
+            "ehp_s": ship.get(A.ATTR_ARMOR_EFFECTIVE_REPAIR_RATE) or 0.0,
+        },
+        "hull_active": {
+            "raw_hps": ship.get(A.ATTR_HULL_REPAIR_RATE) or 0.0,
+            "ehp_s": ship.get(A.ATTR_HULL_EFFECTIVE_REPAIR_RATE) or 0.0,
+        },
+        "shield_passive": {
+            "raw_hps": ship.get(A.ATTR_PASSIVE_SHIELD_RECHARGE) or 0.0,
+            "ehp_s": ship.get(A.ATTR_PASSIVE_SHIELD_EFFECTIVE_RECHARGE) or 0.0,
+        },
+    }
+    # `hps` / `module_ehp_s` 只算**主动修复模块**（面板上那个数）；被动盾回充单独一列，
+    # 但它也真的在回血，所以 TTK 用的 `ehp_s` = 模块 + 被动。
+    module_raw_hps = sum(
+        components[name]["raw_hps"] for name in ("shield_active", "armor_active", "hull_active")
+    )
+    active_ehp_s = sum(
+        components[name]["ehp_s"] for name in ("shield_active", "armor_active", "hull_active")
+    )
+    passive_ehp_s = components["shield_passive"]["ehp_s"]
+    ehp_s = active_ehp_s + passive_ehp_s
+
+    modules = [row for row in _module_rows(defender_ctx, calculation)
+               if row["group"] in LOCAL_REPAIR_GROUPS]
+    active_modules = [m for m in modules if m["state"] in ("active", "overload")]
+    labels = sorted({_REPAIR_GROUP_LABELS.get(m["group"], "local_repair") for m in active_modules})
+
+    if not modules and active_ehp_s <= 0.0:
+        state, reason = "none", "no_local_repair_module"
+    elif active_ehp_s > 0.0:
+        state, reason = "active", None
+    elif modules and not active_modules:
+        state, reason = "inactive", "module_not_active"
+    else:
+        state, reason = "active_but_zero_effect", "module_active_but_no_repair_attributes"
+
+    if active_ehp_s > 0.0:
+        source = "+".join(labels) if labels else "local_repair"
+    elif passive_ehp_s > 0.0:
+        source = "passive_shield_regen"
+    else:
+        source = "none"
+
+    cap_stable = ship.get(A.ATTR_CAP_STABLE_PCT)
+    ancillary = any((m["group"] or "").startswith("Ancillary") for m in active_modules)
+
+    return {
+        "hps": units.fmt(module_raw_hps),
+        "ehp_s": units.fmt(ehp_s),
+        "module_ehp_s": units.fmt(active_ehp_s),
+        "passive_ehp_s": units.fmt(passive_ehp_s),
+        "source": source,
+        "active": active_ehp_s > 0.0,
+        "state": state,
+        "reason": reason,
+        "cap_sustainable": None if cap_stable is None else bool(cap_stable > 0.0),
+        "assumes": "unlimited_charges" if ancillary else ("cap_fed" if active_ehp_s > 0.0 else "n/a"),
+        "modules": modules,
+        "components": components,
+    }
+
+
 def engagement(
     attacker_ctx,
     defender_ctx,
@@ -459,8 +626,9 @@ def engagement(
     target_velocity: float = 0.0,
     include_wrecking: bool = True,
     ammo=None,
+    states: Mapping | None = None,
 ) -> dict:
-    """A 打 B：命中率 / 应用系数 / 有效 DPS / 理论击穿时间。
+    """A 打 B：命中率 / 应用系数 / 有效 DPS / 理论击穿时间（**已扣本地回复**）。
 
     Args:
         attacker_ctx / defender_ctx: 两个 `ViewContext`（属性只读）。
@@ -472,9 +640,13 @@ def engagement(
             False 时归一到纸面口径（完美应用 = 1.0）。
         ammo: 只接受 `None`（用配装里已装填的弹药）；显式指定其它弹药会
             `ValueError` —— 换弹属于「重算属性」的第 ① 层，不在本层职责内。
+        states: **守方**模块状态覆盖，如 `{47789: "active", "index:3": "offline"}`。
+            不传 = 用引擎默认状态（`engine_default`）。覆盖会触发一次引擎重算，
+            属性仍全部来自引擎。
 
     Returns:
-        dict（见模块 docstring；`hp_pool` 与 `ehp` 两个口径都给，并各自注明用途）。
+        dict；`defender_survival.repair` 给出回复项，`time_to_kill_s` 已扣回复，
+        回复 ≥ 有效 DPS 时 `time_to_kill_s = None` 且带 `reason`。
     """
     if ammo is not None:
         raise ValueError(
@@ -484,7 +656,8 @@ def engagement(
         raise ValueError(f"range_m 必须是非负数，收到 {range_m!r}")
 
     weapons = _weapon_entries(attacker_ctx)
-    defender_sig = _raw_ship_attrs(defender_ctx).get(A.ATTR_SIGNATURE_RADIUS) or 0.0
+    defender_calc, defender_variant = _defender_calculation(defender_ctx, states)
+    defender_sig = _raw_ship_attrs_of(defender_calc).get(A.ATTR_SIGNATURE_RADIUS) or 0.0
     flags: list[str] = []
     if not weapons:
         flags.append("no_weapons: 攻方没有任何可识别武器 → 有效 DPS 为 0")
@@ -541,7 +714,13 @@ def engagement(
             entry["effective_dps"] = units.fmt(entry["nominal_dps"] * entry["application"])
 
     totals = _totals(weapons)
-    survival = _survival(defender_ctx, totals["effective_dps"], totals["coverage"], flags)
+    if defender_variant == "base":
+        # 默认状态走 4 个位置参数：外部（api.py 的守卫测试）会 monkeypatch `_survival`
+        # 并用自己的 4 参包装函数，这里保持向后兼容。
+        survival = _survival(defender_ctx, totals["effective_dps"], totals["coverage"], flags)
+    else:
+        survival = _survival(defender_ctx, totals["effective_dps"], totals["coverage"], flags,
+                             calculation=defender_calc)
 
     return {
         "kind": "engagement",
@@ -553,6 +732,8 @@ def engagement(
             "target_velocity": units.fmt(target_velocity),
             "include_wrecking": bool(include_wrecking),
             "ammo": "loaded",
+            "states": dict(states) if states else "engine_default",
+            "defender_variant": defender_variant,
         },
         "assumptions": _assumptions(attacker_ctx, defender_ctx, include_wrecking),
         "weapons": weapons,
@@ -608,26 +789,81 @@ def _totals(weapons: list[dict]) -> dict:
     }
 
 
-def _survival(defender_ctx, effective_dps: float, coverage: float, flags: list[str]) -> dict:
-    """守方的两个血量口径 + 击穿时间。
+def _survival(defender_ctx, effective_dps: float, coverage: float, flags: list[str],
+              *, calculation: Mapping | None = None) -> dict:
+    """守方的血量口径 + **已扣本地回复**的击穿时间。
 
-    - `hp_pool` = 盾/甲/结构 HP 之和，**与战报 `damage_taken` 同量纲**（P6-B1 实测：
-      3 条样本 damage_taken/HP池 = 0.50/0.84/1.02，而 /EHP = 0.16/0.40/0.42）；
-    - `ehp` = 引擎 `-43`（uniform 伤害剖面），是**原始伤害**口径，用来算击穿时间；
-    - `time_to_kill_s` = `ehp / effective_dps`（两者都是原始伤害口径，量纲一致）。
+    - `hp_pool` = 盾/甲/结构 HP 之和，**与战报 `damage_taken` 同量纲**；
+    - `ehp` = 引擎 `-43`（uniform 剖面），原始伤害口径；
+    - `repair` = 本地修复（raw hps 是面板值，`ehp_s` 是用来扣 DPS 的原始伤害当量）；
+    - `time_to_kill_s` = `ehp / max(effective_dps − repair.ehp_s, 0)`；
+      回复 ≥ 有效 DPS → `None` + `reason="out_heals_incoming"`（**空值必须带原因**）。
+
+    `calculation` 是可选的关键字参数（状态覆盖后的引擎结果）；不传就用 `ctx.variant()`。
+    保持前四个位置参数不变，是为了不破坏外部对 `_survival` 的 monkeypatch/包装。
     """
-    ship = _raw_ship_attrs(defender_ctx)
+    if calculation is None:
+        calculation = defender_ctx.variant()
+    ship = _raw_ship_attrs_of(calculation)
     shield = ship.get(A.ATTR_SHIELD_CAPACITY) or 0.0
     armor = ship.get(A.ATTR_ARMOR_HP) or 0.0
     hull = ship.get(A.ATTR_HULL_HP) or 0.0
     hp_pool = shield + armor + hull
     ehp = ship.get(A.ATTR_EHP)
+    repair = _repair_block(defender_ctx, calculation)
 
-    ttk = None
-    if ehp is not None and effective_dps > 0.0:
-        ttk = units.fmt(ehp / effective_dps)
+    rows = _module_rows(defender_ctx, calculation)
+    local_repair_rows = [row for row in rows if row["group"] in LOCAL_REPAIR_GROUPS]
+    propulsion_active = any(
+        row["group"] == PROPULSION_GROUP and row["state"] in ("active", "overload")
+        for row in rows
+    )
+
+    # ---- 状态一致性 / 不许静默给 0 ----
+    if local_repair_rows and repair["module_ehp_s"] <= 0.0:
+        flags.append(
+            "local_repair_not_active: 有本地修复模块但回复为 0"
+            f"（state={repair['state']}），time_to_kill_s **未计入回复**"
+        )
+        if repair["state"] == "active_but_zero_effect":
+            flags.append(
+                "local_repair_zero_effect: 修复模块处于 active 但属性为 0"
+                "（Abyssal/突变模块的数值不在 SDE 里，类型库给不出）"
+            )
+        if propulsion_active:
+            flags.append(
+                "inconsistent_module_states: 同一份结果里推进器是 active、本地修复却没生效 —— "
+                "这不是一个自洽的战斗状态（要么都开，要么都不开）"
+            )
+    if repair["module_ehp_s"] > 0.0 and repair["cap_sustainable"] is False:
+        flags.append(
+            "repair_cap_unsustainable: 电容撑不住持续修复，回复可能中断；"
+            "time_to_kill_s 按「回复一直有效」算，偏乐观"
+        )
     if coverage < 1.0:
         flags.append("partial_coverage: 有武器未建模 → 有效 DPS 偏低，击穿时间是上界")
+
+    # ---- 扣回复后的净击穿时间 ----
+    net_incoming = 0.0
+    if ehp is not None:
+        net_incoming = max(float(effective_dps) - float(repair["ehp_s"]), 0.0)
+
+    ttk = None
+    reason = None
+    if ehp is None:
+        reason = "ehp_unknown"
+    elif effective_dps <= 0.0:
+        reason = "no_incoming_damage"
+    elif net_incoming <= 0.0:
+        reason = "out_heals_incoming"
+    else:
+        ttk = units.fmt(ehp / net_incoming)
+
+    partial_reasons: list[str] = []
+    if coverage < 1.0:
+        partial_reasons.append("partial_coverage")
+    if repair["ehp_s"] > 0.0 and repair["cap_sustainable"] is False:
+        partial_reasons.append("repair_cap_unsustainable")
 
     return {
         "hp_pool": {
@@ -640,12 +876,16 @@ def _survival(defender_ctx, effective_dps: float, coverage: float, flags: list[s
             "value": None if ehp is None else units.fmt(ehp),
             "unit": "hp",
             "profile": "uniform",
-            "compare_with": "原始伤害与击穿时间（EHP / 有效 DPS）",
+            "compare_with": "原始伤害与击穿时间（EHP / 净有效 DPS）",
         },
+        "repair": repair,
         "time_to_kill_s": {
             "value": ttk,
-            "method": "ehp / effective_dps（都是原始伤害口径）",
-            "partial": coverage < 1.0,
+            "reason": reason,
+            "net_incoming_dps": units.fmt(net_incoming),
+            "method": "ehp / (effective_dps − repair.ehp_s)",
+            "partial": bool(partial_reasons),
+            "partial_reasons": partial_reasons,
         },
     }
 
@@ -943,12 +1183,17 @@ def timeline(
     a_survival = battle["b_on_a"]["defender_survival"]
     a_ehp = a_survival["ehp"]["value"] or 0.0
     b_ehp = b_survival["ehp"]["value"] or 0.0
-    # 死亡时刻用「EHP ÷ 有效 DPS」的**全精度**值（`time_to_kill_s` 是 3 位小数，
+    # 同 P6-B5：时间线也必须扣本地回复（`repair.ehp_s` 是原始伤害当量）。
+    a_repair = a_survival["repair"]["ehp_s"]
+    b_repair = b_survival["repair"]["ehp_s"]
+    a_net = max(float(b_dps) - float(a_repair), 0.0)   # A 每秒净掉血
+    b_net = max(float(a_dps) - float(b_repair), 0.0)   # B 每秒净掉血
+    # 死亡时刻用「EHP ÷ 净有效 DPS」的**全精度**值（`time_to_kill_s` 是 3 位小数，
     # 直接拿它当时间线终点会在最后一格留下 0.05 点残血，看着像 bug）。
-    b_ttk = units.fmt(b_ehp / a_dps) if (a_dps > 0.0 and b_ehp > 0.0) else None  # A 打死 B
-    a_ttk = units.fmt(a_ehp / b_dps) if (b_dps > 0.0 and a_ehp > 0.0) else None  # B 打死 A
-    b_death = b_ehp / a_dps if (a_dps > 0.0 and b_ehp > 0.0) else None
-    a_death = a_ehp / b_dps if (b_dps > 0.0 and a_ehp > 0.0) else None
+    b_ttk = units.fmt(b_ehp / b_net) if (b_net > 0.0 and b_ehp > 0.0) else None  # A 打死 B
+    a_ttk = units.fmt(a_ehp / a_net) if (a_net > 0.0 and a_ehp > 0.0) else None  # B 打死 A
+    b_death = b_ehp / b_net if (b_net > 0.0 and b_ehp > 0.0) else None
+    a_death = a_ehp / a_net if (a_net > 0.0 and a_ehp > 0.0) else None
 
     candidates = [value for value in (a_death, b_death) if value is not None]
     horizon = duration_s if duration_s is not None else (max(candidates) if candidates else 60.0)
@@ -957,8 +1202,8 @@ def timeline(
     samples: list[dict] = []
     for index in range(points):
         t = horizon * index / (points - 1)
-        b_remaining = max(0.0, b_ehp - a_dps * t)
-        a_remaining = max(0.0, a_ehp - b_dps * t)
+        b_remaining = max(0.0, b_ehp - b_net * t)
+        a_remaining = max(0.0, a_ehp - a_net * t)
         samples.append({
             "t_s": units.fmt(t),
             "a_remaining_ehp": units.fmt(a_remaining),
@@ -1221,7 +1466,19 @@ def fleet_engagement(
     fleet_dps = single_dps * count
     survival = single["defender_survival"]
     ehp = survival["ehp"]["value"]
-    ttk = units.fmt(ehp / fleet_dps) if (ehp and fleet_dps > 0) else None
+    repair_ehp_s = survival["repair"]["ehp_s"]
+    net = max(fleet_dps - repair_ehp_s, 0.0)
+    if ehp and net > 0:
+        ttk = units.fmt(ehp / net)
+        ttk_reason = None
+    else:
+        ttk = None
+        if not ehp:
+            ttk_reason = "ehp_unknown"
+        elif fleet_dps <= 0:
+            ttk_reason = "no_incoming_damage"
+        else:
+            ttk_reason = "out_heals_incoming"
 
     window_block = None
     if window_s is not None:
@@ -1266,9 +1523,12 @@ def fleet_engagement(
         "defender_survival": {
             "hp_pool": survival["hp_pool"],
             "ehp": survival["ehp"],
+            "repair": survival["repair"],
             "time_to_kill_s": {
                 "value": ttk,
-                "method": "ehp / (单船有效 DPS × count)",
+                "reason": ttk_reason,
+                "net_incoming_dps": units.fmt(net),
+                "method": "ehp / (单船有效 DPS × count − repair.ehp_s)",
                 "fleet_assumption": True,
             },
         },
