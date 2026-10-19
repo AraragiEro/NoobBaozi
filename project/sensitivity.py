@@ -8,20 +8,38 @@ P3 三件里的第三件（`detail` / `explain` 已完成，本模块补 `sensit
 
 | `op.kind` | 语义 | 实现 | 说明 |
 |---|---|---|---|
-| `disable_item` | 关掉第 N 件已装模块 | `items[N].state = "offline"` | 与「拆掉」数值等价（实测 f1/f12 上 `stable_pct` / `cap_load` 逐位相同），但**不删件**：模块仍在 fit 里，只是不生效 |
+| `disable_item` | 关掉第 N 件已装模块 | `items[N].state = "offline"` | 与「拆掉」**对电容**数值等价（实测 f1/f12/f15 上 `stable_pct` / `cap_load` 逐位相同），但**不删件**：模块仍在 fit 里，只是不生效（mass / 槽位占用不变，见下节） |
 | `set_state` | 把第 N 件设为 `offline` / `online` / `active` / `overload` | 同上（`off` 接受为 `offline` 的别名） | 状态语义与 `views/base.VARIANTS["overload"]` / `engine/scenarios.py` 同一套 |
 | `set_mode` | T3C/T3D 模式切换 | `ship["mode"] = mode_id`（走 `engine/scenarios.build_variant` 或直接写 ship） | 模式清单来自 `Index.modes_for_ship()`（与 `render._modes_block` 同源） |
 
 三种 op 都**只改输入、不改引擎**：每个变体都交给 `engine.calculate()` 独立重算一次，
 所以 `changes[i].value` 是「真的到引擎里跑出来的值」，不是算术推的。
 
-## 与三个既有碎片的关系（复用，不重写）
+## 与另外两处「关一件」的关系（复用，但**不统一**）
 
-| 既有碎片 | 它做的事 | 本模块怎么对上 |
-|---|---|---|
-| `stability.cap_sensitivity[]` | **摘掉**耗电最高的几件，看 `stable_pct` | `disable_item` 就是单件版；实测同一模块 `remove` 与 `offline` 的 `stable_pct` / `cap_load` **逐位相同** → 交叉验证可过 |
-| `mobility.propulsion_states.single` | 只留一个推进启用（**联合操作**：其余全 offline） | 本模块是**逐件** op，不合成联合操作；单件结果是它的分量（`propulsion_states.single` 的语义「同时只开一个」无法用逐件 op 表达，如实说明、不统一） |
-| `firepower.overload.off/on` | **全部模块**同时过载 | 同上：`set_state(scope=全件)` 才能对齐；本模块 `set_state` 是逐件的。一次 `set_state` 单件过载的结果是它的分量 |
+同一件事在项目里有三种实现，语义**不同**、各有各的用处。并排写清只有一个目的：
+防止下一个人「顺手把它们统一掉」—— **统一是设计裁决，不是实现细节**。
+
+| 实现 | 「关一件」的语义 | 删件 | 能表达「联合」吗 |
+|---|---|---|---|
+| `stability.cap_sensitivity[]` | **拆件**：`_fit_without` 把那一件从 `items` 里删掉 | **删** | 不能（逐件摘） |
+| `sensitivity.disable_item` / `set_state(offline)` | **置 offline**：件还在 `items` 里，只是不生效 | **不删** | 不能（逐件 op） |
+| `mobility.propulsion_states.single` | **联合操作**：只留一个推进启用、其余全部 offline，一次变体改多件 | 不删 | **能** |
+
+（`firepower.overload.off/on` 是另一类「**全件过载**」：同理只能由一次全件 `set_state` 表达，
+本模块逐件 `set_state` 的结果只是它的分量。）
+
+三条已知边界，决定了它们不能互相冒充：
+
+1. **对电容逐位等价**：同一件模块「拆掉」与「置 offline」在 `stable_pct` / `cap_load` 上逐位相同
+   （模块不生效时既不耗电也不生产）。`tests/test_sensitivity.py::test_cross_validation_with_cap_sensitivity`
+   在 **7 艘不同船 / 7 种电容配置**上钉住这一点（拆件 vs 置 offline 的对拍）。
+2. **对 mass / 槽位占用不一定等价**：拆件会让件数 / 质量 / 槽位占用**真的变小**，置 offline 不会。
+   所以要看 `mass` 类指标时，**不能**拿 `disable_item` 冒充「拆件」—— 那是另一个变体。
+3. **逐件 op 合成不出联合操作**：`propulsion_states.single` 的「同时只开一个」是**一次变体改多件**，
+   把 N 次单件 op 的结果拼起来 ≠ 那个变体（两个推进器各关一次 ≠ 只留一个的联合状态）。
+
+在此之前请按上表**按需选用**，不要发明第四种「关一件」。
 
 `set_mode` 的**可应用性**由本模块先判（不靠引擎兜底）：模式必须在该船 `_modes()` 的可枚举清单里。
 不在清单里（含「该船在本 SDE 索引里根本枚举不到模式」，如 T3C 未收录模式）→ **跳过**并记
@@ -38,9 +56,23 @@ P3 三件里的第三件（`detail` / `explain` 已完成，本模块补 `sensit
   + **被 `max_ops` 截断** + **变体算不出来**（`variant_error` / `metric_missing_after_change`）。
 
 为什么空操作也进 `ops_planned`：否则「计划 40 / 执行 32 / skipped 0」三个数互相打架，调用方
-无法回答「少掉的 8 条去哪了」。每一类跳过原因都在 `warnings[].kind`（`noop` / `truncated` /
-`variant_error` / `metric_missing_after_change` / `mode_not_available` / `modes_unknown` /
-`duplicate_op`），`skipped` 只是总数。
+无法回答「少掉的 8 条去哪了」。`skipped` 只是**总数**，每一类跳过的原因都在 `warnings[].kind`：
+
+```
+noop / truncated / variant_error / metric_missing_after_change /
+mode_not_available / modes_unknown / no_index / invalid_op / invalid_ops
+```
+
+就是这 **9 个**（没有第 10 个）。三点容易误读的口径：
+
+- `invalid_op` / `invalid_ops` 是**输入不合法**（未知 kind / 越界 / 货舱件 / 非法 state /
+  `ops` 压根不是数组）：那条 op **没有进计划**，所以**不计入** `skipped`，只在 `warnings` 里；
+- `mode_not_available` / `modes_unknown` 相反，是**合法但不可应用 / 无法判断**：计入 `skipped`
+  （折进 `noop.count`）。其中 `modes_unknown` 也会出现在**自动计划**里 —— 那时它只是告知
+  「模式这一维没有覆盖」，没有对应的 op，所以不影响计数；
+- **重复 op 不单独发一个 kind**：它与「已 offline 的件再关一次」同一条判据（合法但无意义），
+  折进 `noop.count` —— 所以这里不再存在「重复 op 专用 kind」这种名字（折进 `noop` 才能让
+  `ops_planned == ops_executed + skipped` 保持单一来源）。
 
 ## 硬纪律
 
