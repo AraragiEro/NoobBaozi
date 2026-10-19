@@ -1,6 +1,6 @@
 # noobbaozi MCP · Docker 容器化（HTTP 传输 · 局域网访问）
 
-把 `noobbaozi/mcp_server.py` 的五个工具包成一个 **HTTP MCP 服务**，跑在容器里，局域网内其他机器
+把 `noobbaozi/mcp_server.py` 的**工具集**（`TOOL_NAMES`，含 `fit_*` / `zkb_*`）包成一个 **HTTP MCP 服务**，跑在容器里，局域网内其他机器
 （或别人的 agent）可以用 `http://<宿主机IP>:8080/mcp` 接上来。
 
 ```
@@ -136,8 +136,10 @@ curl -i -X POST http://192.168.5.6:8080/mcp \
 | 认证 | 无。不要往 `headers` 里塞 token —— 服务端根本不看（见 §7） |
 | 替代写法 | Claude Desktop 系可用 `"url"` 字段直接给 URL，效果相同；本仓库没在客户端上实测过（§8） |
 
-连上之后的调用约定与 stdio 完全一致：先 `tools/list`（应看到 5 个工具），再按
-`fit_parse → fit_index → fit_view / fit_get → fit_detail` 的顺序调。
+连上之后的调用约定与 stdio 完全一致：先 `tools/list`（条数 = `/health` 的 `tools`，
+两处同源、不抄数字），再按
+`fit_parse → fit_index → fit_view / fit_get → fit_detail → fit_explain / fit_sensitivity`
+的顺序调。
 工具语义、错误码、返回信封见 `noobbaozi/mcp/README.md` §3–§4。
 
 ---
@@ -208,7 +210,7 @@ sudo chown -R 1000:1000 noobbaozi/data          # 让 data/ 归容器用户
 
 ## 7. 安全提示（请务必读完）
 
-- **HTTP 传输没有鉴权、没有 TLS。** 任何能连到 `8080` 的人都能调这五个工具。
+- **HTTP 传输没有鉴权、没有 TLS。** 任何能连到 `8080` 的人都能调**全部**工具（就是 `tools/list` 那份）。
 - **只在可信局域网内使用。** 不要把 `8080` 直接发布到公网（不要 DMZ、不要路由器端口映射、不要 `0.0.0.0` + 公网 IP）。
 - 想缩小暴露面：compose 里把端口改成 `"127.0.0.1:8080:8080"` 只给宿主机；需要跨机时前面挂一层反代。
 - **对外暴露必须加反向代理 + 认证**，例如 nginx/Caddy 前置 TLS + Basic Auth / OAuth / mTLS，并且：
@@ -236,7 +238,7 @@ sudo chown -R 1000:1000 noobbaozi/data          # 让 data/ 归容器用户
 | **入口命令在本机原生可跑** | `run-native.ps1 -Host 127.0.0.1 -Port 18080` 真起服务，服务端日志：`noobbaozi 1.0.0 启动（http）：POST http://127.0.0.1:18080/mcp · GET http://127.0.0.1:18080/health` / `工具就绪：['fit_parse','fit_index','fit_view','fit_get','fit_detail']（43ms）` |
 | `GET /health` 实测 | `curl.exe http://127.0.0.1:18080/health` → `HTTP 200` + `{"ok":true,"server":"noobbaozi","version":"1.0.0","transport":"http","tools":5,"sessions":0}` |
 | **healthcheck 命令双向量过** | 服务在 → `EXIT=0`；把 `NOOBBAOZI_PORT` 指到没人监听的端口 → `EXIT=1`。证明探针**不是永真**，且判据（`ok is True`）有效 |
-| `POST /mcp` 实测 | `initialize` 返回 `protocolVersion/ capabilities.tools / serverInfo{"noobbaozi","1.0.0"}`；`tools/list` 返回 5 个工具（`fit_*`）；响应是 SSE（`event: message` + `data:`） |
+| `POST /mcp` 实测 | `initialize` 返回 `protocolVersion/ capabilities.tools / serverInfo{"noobbaozi","1.0.0"}`；`tools/list` 返回工具清单（`fit_*`；那次实测是 5 个，现在条数见 `/health`）；响应是 SSE（`event: message` + `data:`） |
 | 工具链事实 | 本机 `docker --version` → **命令不存在**；`uv 0.9.18` 可用；`sh`/`bash`/WSL 均不可用（见上） |
 
 > 上述 `/health` 与 `/mcp` 的实测，用的是**工作区当前（未提交）的 T-47 HTTP 实现**，跑在**宿主机原生 Python** 上，

@@ -2890,3 +2890,460 @@ def test_envelope_skill_tier_hash_assertion_is_not_vacuous(
     assert "hash" not in envelope["meta"]["skill_tier"]
 
 
+
+# =============================================================================
+# 二十、归因（P3 explain）：fit_explain 的三类口径 / 参数错误 / 幂等
+# =============================================================================
+#
+# 为什么这三类必须分开断言：`Σ contribution == value` 只对 A 可加类成立。B 乘性类
+# 给的是因子（factor），把因子相加没有意义；C 投影类是按公式回放的（`层 HP ÷ 共振率`）。
+# 用一条断言糊住三类，验收会立刻变成永真或永假（`project/explain.py` 模块 docstring）。
+
+EXPLAIN_A_METRIC = "survivability.ehp_mixed"
+EXPLAIN_B_METRIC = "mobility.speed_mps"
+EXPLAIN_C_METRIC = "survivability.thinnest.armor.ehp"
+EXPLAIN_METRIC_CASES = (
+    (EXPLAIN_A_METRIC, "additive"),
+    (EXPLAIN_B_METRIC, "multiplicative"),
+    (EXPLAIN_C_METRIC, "multiplicative"),
+)
+
+
+def _explain_close(left: float, right: float, rel: float = 1e-9) -> bool:
+    """`explain` 自带的容差口径（相对 1e-9 + 绝对 1e-9）。"""
+    return abs(left - right) <= max(rel * abs(right), 1e-9)
+
+
+def _explain_sum(result: dict) -> float:
+    """A 类：所有非空 `contribution` 之和（`None` 是「这类没有贡献量」，不是 0）。"""
+    return sum(
+        float(entry["contribution"])
+        for entry in result["sources"]
+        if entry.get("contribution") is not None
+    )
+
+
+@pytest.mark.parametrize(("metric", "combine"), EXPLAIN_METRIC_CASES)
+def test_fit_explain_covers_all_three_classes(eft_text: str, metric: str, combine: str) -> None:
+    """A / B / C 各一个指标：信封成功、`combine` 与类一致、源链非空。"""
+    api.clear_caches()
+    envelope = api.fit_explain(eft_text, metric)
+    assert envelope["ok"] is True, envelope.get("error")
+    result = envelope["result"]
+    assert result["metric"] == metric
+    assert result["combine"] == combine
+    assert result["sources"], f"{metric} 必须有源链"
+    assert result["value"] is not None
+    # 形状：`explain` 的契约字段一个都不许被接口层裁掉
+    for key in (
+        "view", "unit", "includes_base", "base", "unexplained", "truncated_at_depth",
+        "truncated_nodes", "minimality", "has_offsets", "tolerance", "provenance",
+    ):
+        assert key in result, f"{metric} 缺字段 {key}"
+
+
+def test_fit_explain_additive_terms_sum_to_value(eft_text: str) -> None:
+    """A 可加类：**各项 contribution 之和 == value**（相对 1e-9），`unexplained` 是真 0。"""
+    api.clear_caches()
+    result = api.fit_explain(eft_text, EXPLAIN_A_METRIC)["result"]
+    total = _explain_sum(result)
+    assert _explain_close(total, result["value"]), (
+        f"可加类加不上：Σ={total!r} value={result['value']!r}"
+    )
+    assert result["sum_of_contributions"] == result["value"]
+    assert result["unexplained"] == 0.0
+    assert all(entry["factor"] is None for entry in result["sources"]), "可加类不许出现因子"
+
+
+def test_fit_explain_multiplicative_is_a_factor_chain_not_a_sum(eft_text: str) -> None:
+    """B 乘性类：给 `base` + 因子链，**因子不能相加**（contribution 一律 None）。"""
+    api.clear_caches()
+    result = api.fit_explain(eft_text, EXPLAIN_B_METRIC)["result"]
+    assert result["base"] is not None
+    factors = [entry for entry in result["sources"] if entry["factor"] is not None]
+    assert factors, "乘性类必须有因子"
+    assert all(entry["contribution"] is None for entry in factors), (
+        "因子不是贡献量：contribution 必须是 None（否则 agent 会把因子加成一个和）"
+    )
+    assert result["replay_ok"] is True, "回放必须落回 value"
+    assert _explain_close(result["replayed"], result["value"])
+
+
+def test_fit_explain_projection_gives_formula_and_two_terms(eft_text: str) -> None:
+    """C 投影类：`value = 层 HP ÷ 共振率`，两条源 = 被除数 + 除数，且带 `formula`。"""
+    api.clear_caches()
+    result = api.fit_explain(eft_text, EXPLAIN_C_METRIC)["result"]
+    assert result["formula"], "投影类必须给 formula（否则读者只能猜公式）"
+    assert len(result["sources"]) == 2, "投影类恒为两项（层 HP + 共振率）"
+    hp_entry, resonance_entry = result["sources"]
+    assert hp_entry["contribution"] is not None, "第一项是被除的那个数"
+    assert resonance_entry["factor"] is not None, "第二项是除数"
+    assert _explain_close(hp_entry["contribution"] / resonance_entry["factor"], result["value"])
+    assert result["replay_ok"] is True
+
+
+def test_fit_explain_value_is_full_precision(eft_text: str) -> None:
+    """**`value` 是全精度**（不是 L1 的 3 位小数）：这是 A 类加和判据能成立的前提。"""
+    api.clear_caches()
+    result = api.fit_explain(eft_text, EXPLAIN_A_METRIC)["result"]
+    value = result["value"]
+    assert isinstance(value, float)
+    assert value != round(value, 3), (
+        "value 被舍成 3 位了 —— A 类的 Σ == value 会立刻失效（这才是要钉的那件事）"
+    )
+
+
+def test_fit_explain_meta_carries_the_version_triplet(eft_text: str) -> None:
+    """信封 `meta` 与其它入口一致：版本三元组 + 技能档 hash + 两个回显参数 + 输入形态。"""
+    api.clear_caches()
+    envelope = api.fit_explain(eft_text, EXPLAIN_A_METRIC)
+    assert envelope["ok"] is True
+    meta = envelope["meta"]
+    assert meta["spec_version"] == api.SPEC_VERSION
+    assert meta["engine_version"] and meta["sde_build"]
+    assert meta["source_format"] == "eft"
+    assert meta["damage_profile"] == "uniform"
+    assert meta["state_policy"] == "engine_default"
+    assert meta["skill_tier"]["count"] > 0 and meta["skill_tier"]["hash"]
+    # 三元组必须与 L0 是**同一份引擎事实**（不是各写一份）
+    l0_meta = api.fit_index(eft_text)["meta"]
+    for key in ("spec_version", "engine_version", "sde_build"):
+        assert meta[key] == l0_meta[key], f"meta.{key} 与 fit_index 不同源"
+    assert meta["skill_tier"]["hash"] == api.fit_index(eft_text)["result"]["meta"]["skill_tier"]["hash"]
+
+
+def test_fit_explain_accepts_every_registered_metric(eft_text: str) -> None:
+    """登记表里的每个指标在 f1 上都可归因（**一个都不许漏**，也不许有半成品）。
+
+    不写死条数：条数属于 `explain.supported_metrics()`，这里只要求「登记了就必须能算」。
+    写死数字就成了第二份清单（加一个指标要改两处，迟早漏一处）。
+    """
+    assert api.EXPLAIN_METRICS, "登记表不能为空"
+    for metric in api.EXPLAIN_METRICS:
+        api.clear_caches()
+        envelope = api.fit_explain(eft_text, metric)
+        assert envelope["ok"] is True, f"{metric} 失败：{envelope.get('error')}"
+        assert envelope["result"]["metric"] == metric
+
+
+@pytest.mark.parametrize("depth", [0, 3, -1, 99, True, False, "2", 2.0, None])
+def test_fit_explain_bad_depth_is_invalid_argument(eft_text: str, depth: object) -> None:
+    """`depth ∉ 1..2`（含 bool / 字符串 / 浮点）→ `invalid_argument` + `field=depth`。"""
+    api.clear_caches()
+    envelope = api.fit_explain(eft_text, EXPLAIN_A_METRIC, depth=depth)  # type: ignore[arg-type]
+    assert envelope["ok"] is False, f"depth={depth!r} 不该成功"
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["field"] == "depth"
+    assert envelope["error"]["hint"] == [1, 2]
+
+
+@pytest.mark.parametrize("metric", ["nope", "survivability", "mobility.speed", "survivability.ehp_mixed[]"])
+def test_fit_explain_unknown_metric_is_invalid_path_with_hint(eft_text: str, metric: str) -> None:
+    """不在登记表 → `invalid_path`，`hint` **就是**可用指标全集（agent 据此换参数）。"""
+    api.clear_caches()
+    envelope = api.fit_explain(eft_text, metric)
+    assert envelope["ok"] is False
+    error = envelope["error"]
+    assert error["kind"] == "invalid_path", error
+    assert error["path"] == metric
+    assert error["hint"] == list(api.EXPLAIN_METRICS), "hint 必须是登记表全集"
+    assert error["message"]
+
+
+def test_fit_explain_empty_metric_is_invalid_path_with_hint(eft_text: str) -> None:
+    """空 metric 也是 `invalid_path`（不是 `value:null`，也不是泛化 internal_error）。"""
+    api.clear_caches()
+    envelope = api.fit_explain(eft_text, "")
+    assert envelope["ok"] is False
+    assert envelope["error"]["kind"] == "invalid_path"
+    assert envelope["error"]["hint"] == list(api.EXPLAIN_METRICS)
+
+
+def test_fit_explain_is_idempotent_and_does_not_share_state(eft_text: str) -> None:
+    """同一 metric 两次调用结果相同；**就地改第一次的 result 不许污染缓存**。"""
+    api.clear_caches()
+    first = api.fit_explain(eft_text, EXPLAIN_A_METRIC)
+    second = api.fit_explain(eft_text, EXPLAIN_A_METRIC)
+    assert first["result"] == second["result"], "两次调用结果必须逐位相同"
+
+    # 模拟「调用方原地改了一把」——explain 的 LRU 是共享对象，接口层必须已经深拷贝过
+    first["result"]["value"] = -1.0
+    first["result"]["sources"].clear()
+    third = api.fit_explain(eft_text, EXPLAIN_A_METRIC)
+    assert third["result"]["value"] == second["result"]["value"], (
+        "改坏第一次的返回影响了后续调用 —— 说明接口层没把 explain 的共享缓存隔离开"
+    )
+    assert third["result"]["sources"]
+
+
+def test_api_clear_caches_also_clears_the_explain_lru(
+    eft_text: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`api.clear_caches()` 必须**连 `explain` 的 LRU 一起清**（否则拿到上一条用例的旧结果）。"""
+    calls: list[str] = []
+    real = api._explain.explain
+
+    def counted(ctx, metric, *, depth=api.EXPLAIN_MAX_DEPTH):  # type: ignore[no-untyped-def]
+        calls.append(metric)
+        return real(ctx, metric, depth=depth)
+
+    monkeypatch.setattr(api._explain, "explain", counted)
+    api.clear_caches()
+    api.fit_explain(eft_text, EXPLAIN_A_METRIC)
+    assert len(calls) == 1
+    api.fit_explain(eft_text, EXPLAIN_A_METRIC)  # 这次应该命中某一层缓存
+    assert len(calls) == 1, "第二次调用不该重新构建"
+    api.clear_caches()
+    api.fit_explain(eft_text, EXPLAIN_A_METRIC)
+    assert len(calls) == 2, "api.clear_caches 没有清 explain 的 LRU（旧结果会串到新用例里）"
+
+
+def test_fit_explain_additive_sum_guard_is_not_vacuous(
+    eft_text: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**配对证明**：把 `value` 舍到 3 位，A 类的「Σ == value」必须立刻不成立。
+
+    这正是 `explain._entry` 里那句「**不做 3 位小数舍入**」的守卫：舍入会让残差升到
+    1e-7 量级，验收判据当场失效。若本测试里 `_explain_close` 仍然为真，说明那条断言
+    是永真的（舍不舍入都过），A 类的契约就是空话。
+    """
+    real = api._explain.explain
+
+    def rounded(ctx, metric, *, depth=api.EXPLAIN_MAX_DEPTH):  # type: ignore[no-untyped-def]
+        result = real(ctx, metric, depth=depth)
+        if result is None:
+            return None
+        broken = dict(result)
+        broken["value"] = round(float(result["value"]), 3)
+        return broken
+
+    monkeypatch.setattr(api._explain, "explain", rounded)
+    api.clear_caches()
+    envelope = api.fit_explain(eft_text, EXPLAIN_A_METRIC)
+    assert envelope["ok"] is True, envelope.get("error")
+    result = envelope["result"]
+    assert not _explain_close(_explain_sum(result), result["value"]), (
+        "value 被舍成 3 位后，Σ 与 value 仍然相等 —— A 类的加和判据是永真的"
+    )
+
+
+# =============================================================================
+# 二十一、灵敏度（P3 sensitivity）：fit_sensitivity 的 combine 三态 / 四个计数 / 错误映射
+# =============================================================================
+#
+# 与 `explain` 的关键区别：这里**没有** `Σ == value` 那类判据（它给的是 op 前后的差）。
+# 唯一可自证的等式是逐条的 `delta == value - baseline` —— 四个计数（planned / executed /
+# skipped / truncated）各自独立，混成一个数会立刻说谎。
+
+SENSITIVITY_CASES = (
+    ("survivability.ehp_mixed", "additive"),
+    ("mobility.speed_mps", "multiplicative"),
+    ("resources.cpu.free", "single"),
+)
+
+
+@pytest.mark.parametrize(("metric", "combine"), SENSITIVITY_CASES)
+def test_fit_sensitivity_covers_all_combine_values(
+    eft_text: str, metric: str, combine: str
+) -> None:
+    """`combine` 的三种取值（additive / multiplicative / **single**）都能取到，且形状完整。"""
+    api.clear_caches()
+    envelope = api.fit_sensitivity(eft_text, metric)
+    assert envelope["ok"] is True, envelope.get("error")
+    result = envelope["result"]
+    assert result["metric"] == metric
+    assert result["combine"] == combine
+    assert isinstance(result["baseline"], float)
+    assert result["changes"], "自动计划必须给出至少一个 change"
+    for key in (
+        "warnings", "ops_planned", "ops_executed", "skipped", "truncated", "max_ops",
+        "provenance", "tolerance",
+    ):
+        assert key in result, f"{metric} 缺字段 {key}"
+
+
+def test_fit_sensitivity_delta_equals_value_minus_baseline(eft_text: str) -> None:
+    """每条 `delta` 必须**逐位**等于 `value - baseline`（这是唯一可自证的等式）。"""
+    api.clear_caches()
+    result = api.fit_sensitivity(eft_text, "survivability.ehp_mixed")["result"]
+    baseline = result["baseline"]
+    for change in result["changes"]:
+        assert change["delta"] == change["value"] - baseline, (
+            f"delta 与 value-baseline 不一致：{change!r}（baseline={baseline!r}）"
+        )
+        assert change["op"]["kind"] in {"disable_item", "set_state", "set_mode"}
+        assert result["ops_executed"] == len(result["changes"])
+
+
+def test_fit_sensitivity_delta_pct_is_a_ratio_and_null_when_baseline_is_zero(
+    eft_text: str,
+) -> None:
+    """`delta_pct` 是**比例**（`delta/baseline`）；基线为 0 时是 `null`（不是 0/inf）。"""
+    api.clear_caches()
+    result = api.fit_sensitivity(eft_text, "resources.cpu.free")["result"]
+    baseline = result["baseline"]
+    assert baseline != 0.0, "反证：这个样本的基线不是 0，才有比例可看"
+    for change in result["changes"]:
+        assert change["delta_pct"] == pytest.approx(change["delta"] / baseline)
+
+    api.clear_caches()
+    zero = api.fit_sensitivity(eft_text, "stability.capacitor.stable_pct")["result"]
+    assert zero["baseline"] == 0.0, "反证：这个样本的基线是 0"
+    assert zero["changes"], "反证：有 change 才谈得上 delta_pct"
+    assert all(change["delta_pct"] is None for change in zero["changes"]), (
+        "基线为 0 时 delta_pct 必须是 null（拿 0 或 inf 冒充就是把「不适用」说成「没变化」）"
+    )
+
+
+def test_fit_sensitivity_max_ops_truncates_and_says_so(eft_text: str) -> None:
+    """`max_ops` 截断：`changes` 只留前 N 条、`truncated=true`、**另给一条 warning**。"""
+    api.clear_caches()
+    full = api.fit_sensitivity(eft_text, "resources.cpu.free")["result"]
+    assert full["ops_planned"] > 3, "反证：计划数大于 3 才谈得上截断"
+    assert full["truncated"] is False
+
+    api.clear_caches()
+    cut = api.fit_sensitivity(eft_text, "resources.cpu.free", max_ops=3)["result"]
+    assert len(cut["changes"]) == 3
+    assert cut["ops_executed"] == 3
+    assert cut["ops_planned"] == full["ops_planned"], "计划数不因 max_ops 而变"
+    assert cut["truncated"] is True
+    assert cut["max_ops"] == 3
+    kinds = [warning["kind"] for warning in cut["warnings"]]
+    assert "truncated" in kinds, f"截断必须说出来，实际 warnings={kinds}"
+
+
+def test_fit_sensitivity_explicit_ops_and_bad_ops(eft_text: str) -> None:
+    """显式 `ops` 只跑给的那一条；**坏 op 是数据问题**（warnings + 跳过），不是错误信封。"""
+    api.clear_caches()
+    single = api.fit_sensitivity(
+        eft_text, "resources.cpu.free", ops=[{"kind": "disable_item", "item_index": 0}]
+    )
+    assert single["ok"] is True, single.get("error")
+    result = single["result"]
+    assert result["ops_planned"] == 1 and result["ops_executed"] == 1
+    assert result["changes"][0]["op"]["kind"] == "disable_item"
+    assert result["changes"][0]["op"]["item_index"] == 0
+    assert result["changes"][0]["op"]["label"], "op 描述里要有人看得懂的名字"
+
+    api.clear_caches()
+    broken = api.fit_sensitivity(
+        eft_text,
+        "resources.cpu.free",
+        ops=[{"kind": "bogus"}, {"kind": "disable_item", "item_index": 999}],
+    )
+    assert broken["ok"] is True, "坏 op 不该让整个调用失败（它是数据问题）"
+    assert broken["result"]["ops_executed"] == 0
+    assert broken["result"]["changes"] == []
+    kinds = [warning["kind"] for warning in broken["result"]["warnings"]]
+    assert kinds.count("invalid_op") == 2, f"两个坏 op 各报一条，实际 {kinds}"
+
+
+def test_fit_sensitivity_cache_key_separates_ops_and_max_ops(eft_text: str) -> None:
+    """自动计划 / 显式 ops / 不同 `max_ops` 是**三个不同的缓存条目**（不串味）。"""
+    api.clear_caches()
+    auto = api.fit_sensitivity(eft_text, "resources.cpu.free")["result"]
+    explicit = api.fit_sensitivity(
+        eft_text, "resources.cpu.free", ops=[{"kind": "disable_item", "item_index": 0}]
+    )["result"]
+    cut = api.fit_sensitivity(eft_text, "resources.cpu.free", max_ops=2)["result"]
+    assert auto["ops_planned"] != explicit["ops_planned"]
+    assert explicit["ops_planned"] == 1
+    assert cut["max_ops"] == 2 and len(cut["changes"]) == 2
+    # 再把自动计划要一遍：必须还是原样（没被后两次调用污染）
+    again = api.fit_sensitivity(eft_text, "resources.cpu.free")["result"]
+    assert again == auto
+
+
+@pytest.mark.parametrize("max_ops", [0, -1, True, False, "8", 1.5, None])
+def test_fit_sensitivity_bad_max_ops_is_invalid_argument(eft_text: str, max_ops: object) -> None:
+    """`max_ops` 非正整数（含 bool / 字符串 / 浮点）→ `invalid_argument` + `field=max_ops`。"""
+    api.clear_caches()
+    envelope = api.fit_sensitivity(
+        eft_text, "resources.cpu.free", max_ops=max_ops  # type: ignore[arg-type]
+    )
+    assert envelope["ok"] is False, f"max_ops={max_ops!r} 不该成功"
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["field"] == "max_ops"
+    assert envelope["error"]["hint"]["min"] == 1
+
+
+@pytest.mark.parametrize("metric", ["nope", "resources.cpu", "ehp_mixed"])
+def test_fit_sensitivity_unknown_metric_is_invalid_path_with_hint(
+    eft_text: str, metric: str
+) -> None:
+    """不在登记表 → `invalid_path`，`hint` **就是** 14 个可用指标（agent 据此换参数）。"""
+    api.clear_caches()
+    envelope = api.fit_sensitivity(eft_text, metric)
+    assert envelope["ok"] is False
+    assert envelope["error"]["kind"] == "invalid_path"
+    assert envelope["error"]["path"] == metric
+    assert envelope["error"]["hint"] == list(api.SENSITIVITY_METRICS)
+
+
+def test_fit_sensitivity_accepts_every_registered_metric(eft_text: str) -> None:
+    """登记表里每个指标在 f1 上都能算出基线（**一个都不许漏**）；条数不写死。"""
+    assert api.SENSITIVITY_METRICS, "登记表不能为空"
+    assert set(api.SENSITIVITY_METRICS) >= set(api.EXPLAIN_METRICS), (
+        "sensitivity 的指标表必须包含 explain 的那 9 个（它就建在上面）"
+    )
+    for metric in api.SENSITIVITY_METRICS:
+        api.clear_caches()
+        envelope = api.fit_sensitivity(eft_text, metric, max_ops=2)
+        assert envelope["ok"] is True, f"{metric} 失败：{envelope.get('error')}"
+        assert envelope["result"]["metric"] == metric
+
+
+def test_fit_sensitivity_meta_carries_the_version_triplet(eft_text: str) -> None:
+    """信封 `meta` 与其它入口一致（版本三元组 + 技能档 hash + 输入形态）。"""
+    api.clear_caches()
+    envelope = api.fit_sensitivity(eft_text, "resources.cpu.free", max_ops=2)
+    assert envelope["ok"] is True
+    meta = envelope["meta"]
+    for key in ("spec_version", "engine_version", "sde_build"):
+        assert meta.get(key), f"信封 meta 缺 {key}"
+    assert meta["source_format"] == "eft"
+    assert meta["skill_tier"]["hash"] == (
+        api.fit_index(eft_text)["result"]["meta"]["skill_tier"]["hash"]
+    )
+
+
+def test_fit_sensitivity_is_idempotent_and_isolated(eft_text: str) -> None:
+    """两次调用结果相同；就地改第一次的返回**不许**污染后面的调用。"""
+    api.clear_caches()
+    first = api.fit_sensitivity(eft_text, "resources.cpu.free", max_ops=3)
+    second = api.fit_sensitivity(eft_text, "resources.cpu.free", max_ops=3)
+    assert first["result"] == second["result"]
+
+    first["result"]["baseline"] = -1.0
+    first["result"]["changes"].clear()
+    third = api.fit_sensitivity(eft_text, "resources.cpu.free", max_ops=3)
+    assert third["result"]["baseline"] == second["result"]["baseline"]
+    assert third["result"]["changes"] == second["result"]["changes"]
+
+
+def test_fit_sensitivity_delta_guard_is_not_vacuous(
+    eft_text: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**配对证明**：把每条 `value` 舍到 3 位，`delta == value - baseline` 必须立刻不成立。"""
+    real = api._sensitivity.sensitivity
+
+    def rounded(ctx, metric, *, ops=None, max_ops=api.SENSITIVITY_MAX_OPS):  # type: ignore[no-untyped-def]
+        result = real(ctx, metric, ops=ops, max_ops=max_ops)
+        if result is None:
+            return None
+        broken = dict(result)
+        broken["changes"] = [
+            {**change, "value": round(float(change["value"]), 3)} for change in result["changes"]
+        ]
+        return broken
+
+    monkeypatch.setattr(api._sensitivity, "sensitivity", rounded)
+    api.clear_caches()
+    envelope = api.fit_sensitivity(eft_text, "survivability.ehp_mixed", max_ops=4)
+    assert envelope["ok"] is True, envelope.get("error")
+    result = envelope["result"]
+    baseline = result["baseline"]
+    assert any(change["delta"] != change["value"] - baseline for change in result["changes"]), (
+        "value 被舍成 3 位后 delta 仍然等于 value-baseline —— 这条自证等式是永真的"
+    )

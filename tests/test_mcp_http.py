@@ -790,3 +790,108 @@ def test_transport_uses_only_stdlib() -> None:
         }
     }
     assert not third_party, f"mcp_http 引入了第三方依赖：{sorted(third_party)}"
+
+
+# =============================================================================
+# 七、`fit_explain` 走完整 HTTP 线：成功信封 + 业务失败（不是协议失败）
+# =============================================================================
+
+
+def test_fit_explain_roundtrip_over_http(http_server: str, eft_text: str) -> None:
+    """A 可加类经 `/mcp` 回来：`content[0].text` 与 `structuredContent` 是同一份信封。"""
+    session = _initialize(http_server)[2]
+    call_result, envelope = _call(
+        http_server,
+        "fit_explain",
+        {"fit": eft_text, "metric": "survivability.ehp_mixed", "depth": 2},
+        session=session,
+    )
+    assert call_result.get("isError") is not True, "成功调用不该带 isError"
+    assert envelope["ok"] is True, envelope.get("error")
+    body = envelope["result"]
+    assert body["combine"] == "additive" and body["sources"]
+    total = sum(
+        entry["contribution"] for entry in body["sources"] if entry["contribution"] is not None
+    )
+    value = body["value"]
+    assert abs(total - value) <= max(1e-9 * abs(value), 1e-9), (
+        f"HTTP 回来的 A 类加不上：Σ={total!r} value={value!r}"
+    )
+    # 线上体量必须仍然是「紧凑 JSON + 信封」，不能悄悄变成双份
+    assert call_result["structuredContent"] == envelope
+
+
+def test_fit_explain_business_errors_survive_http(http_server: str, eft_text: str) -> None:
+    """`depth=3` / `metric=nope` 走 HTTP 仍是 `isError:true` 的业务失败（不是 4xx/5xx）。"""
+    session = _initialize(http_server)[2]
+
+    call_result, envelope = _call(
+        http_server,
+        "fit_explain",
+        {"fit": eft_text, "metric": "survivability.ehp_mixed", "depth": 3},
+        session=session,
+        request_id=101,
+    )
+    assert call_result["isError"] is True
+    assert envelope["error"]["kind"] == "invalid_argument"
+
+    call_result, envelope = _call(
+        http_server,
+        "fit_explain",
+        {"fit": eft_text, "metric": "nope"},
+        session=session,
+        request_id=102,
+    )
+    assert call_result["isError"] is True
+    assert envelope["error"]["kind"] == "invalid_path"
+    assert envelope["error"]["hint"] == list(api.EXPLAIN_METRICS)
+
+
+def test_fit_sensitivity_roundtrip_over_http(http_server: str, eft_text: str) -> None:
+    """灵敏度经 `/mcp` 回来：`combine=single` 可见、`delta == value - baseline` 仍成立。"""
+    session = _initialize(http_server)[2]
+    call_result, envelope = _call(
+        http_server,
+        "fit_sensitivity",
+        {"fit": eft_text, "metric": "resources.cpu.free", "max_ops": 2},
+        session=session,
+        request_id=111,
+    )
+    assert call_result.get("isError") is not True, "成功调用不该带 isError"
+    assert envelope["ok"] is True, envelope.get("error")
+    body = envelope["result"]
+    assert body["combine"] == "single"
+    assert len(body["changes"]) == 2
+    baseline = body["baseline"]
+    for change in body["changes"]:
+        assert abs((change["value"] - baseline) - change["delta"]) <= max(
+            1e-9 * abs(change["value"]), 1e-9
+        )
+    assert call_result["structuredContent"] == envelope
+
+
+def test_fit_sensitivity_business_errors_survive_http(http_server: str, eft_text: str) -> None:
+    """`max_ops=0` / `metric=nope` 走 HTTP 仍是 `isError:true` 的业务失败（不是 4xx/5xx）。"""
+    session = _initialize(http_server)[2]
+
+    call_result, envelope = _call(
+        http_server,
+        "fit_sensitivity",
+        {"fit": eft_text, "metric": "resources.cpu.free", "max_ops": 0},
+        session=session,
+        request_id=112,
+    )
+    assert call_result["isError"] is True
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["field"] == "max_ops"
+
+    call_result, envelope = _call(
+        http_server,
+        "fit_sensitivity",
+        {"fit": eft_text, "metric": "nope"},
+        session=session,
+        request_id=113,
+    )
+    assert call_result["isError"] is True
+    assert envelope["error"]["kind"] == "invalid_path"
+    assert envelope["error"]["hint"] == list(api.SENSITIVITY_METRICS)

@@ -131,6 +131,8 @@ TOOL_NAMES: tuple[str, ...] = (
     "fit_view",
     "fit_get",
     "fit_detail",
+    "fit_explain",
+    "fit_sensitivity",
     "zkb_search",
     "zkb_stats",
 )
@@ -142,8 +144,10 @@ TOOL_NAMES: tuple[str, ...] = (
 1. `fit_parse` —— 先确认这套配装被正确读懂了；
 2. `fit_killmail` —— 分析一条战报时拿上下文（损失价值 / 参战方 / 伤害构成）；
 3. `fit_index` / `fit_view` / `fit_get` / `fit_detail` —— 六维度从摘要到深挖；
-4. `zkb_search` —— 先按条件筛出 `killmail_id`，再回头对具体那条用 `fit_killmail`；
-5. `zkb_stats` —— 看一个实体（角色 / 公司 / 联盟）的画像：值不值得往下翻战报。
+4. `fit_explain` —— 某个数「为什么是这个数」（归因链，A 可加 / B 乘性 / C 投影）；
+5. `fit_sensitivity` —— 改一个输入（关模块 / 切状态 / 切模式），这个数会变多少；
+6. `zkb_search` —— 先按条件筛出 `killmail_id`，再回头对具体那条用 `fit_killmail`；
+7. `zkb_stats` —— 看一个实体（角色 / 公司 / 联盟）的画像：值不值得往下翻战报。
 
 加工具的正确姿势：往这个元组里加一个名字、在 `_HANDLERS` 里加实现、在
 `_TOOL_DESCRIPTIONS` 里加文案、(必要时) 在 `_schema_for()` 里加 schema ——
@@ -402,6 +406,36 @@ def _path_argument(arguments: dict) -> str:
     return text
 
 
+def _metric_argument(arguments: dict) -> str:
+    """取出 `fit_explain` 的 `metric`（必填、必须是字符串）。
+
+    **不在这里校验「指标在不在登记表里」**：那件事的正确答案是 `invalid_path` + 一份
+    `supported_metrics()` 列表，只有 `api.fit_explain` 给得出来（本层拒绝会变成 `-32602`
+    「参数错了」，把「换一个指标」误导成「调用方式错了」）。本层只挡类型。
+    """
+    if "metric" not in arguments:
+        raise _InvalidParams(
+            "缺少必填参数 metric", field="metric", hint=list(_api().EXPLAIN_METRICS)
+        )
+    metric = arguments.get("metric")
+    if not isinstance(metric, str):
+        raise _InvalidParams(
+            f"metric 必须是字符串，收到 {type(metric).__name__}", field="metric"
+        )
+    return metric
+
+
+def _depth_argument(arguments: dict) -> dict:
+    """`fit_explain` 的可选 `depth`：**只搬值，不判合法性**。
+
+    `depth=3` / `depth="2"` 的正确答案是 `invalid_argument` + `field=depth`（业务失败，
+    agent 该去改参数），而不是 `-32602`（协议层参数错）—— 与 `metric` 同一条纪律。
+    没给或给 `None` 时**不传**，交给 `api` 自己的默认值（2）。
+    """
+    depth = arguments.get("depth")
+    return {} if depth is None else {"depth": depth}
+
+
 def _view_argument(arguments: dict, *, required: bool) -> str | None:
     """取出 `view`（可选 / 必填按工具而定）。
 
@@ -491,6 +525,52 @@ def _tool_fit_detail(arguments: dict) -> dict:
     )
 
 
+def _tool_fit_explain(arguments: dict) -> dict:
+    """`fit_explain` → `api.fit_explain()`（`metric` 必填、`depth` 可选，**不做任何加工**）。
+
+    `metric` 的登记表校验与 `depth` 的 1..2 校验都在 `api` 层：那里给 `invalid_path` +
+    `supported_metrics()` / `invalid_argument` + `field=depth`，比本层抛 `-32602` 更能
+    告诉 agent「下一步改什么」。
+    """
+    return _api().fit_explain(
+        _fit_argument(arguments),
+        _metric_argument(arguments),
+        **_depth_argument(arguments),
+        **_common_arguments(arguments),
+    )
+
+
+def _tool_fit_sensitivity(arguments: dict) -> dict:
+    """`fit_sensitivity` → `api.fit_sensitivity()`（`metric` 必填，`ops` / `max_ops` 可选）。
+
+    与 `fit_explain` 同一条纪律：指标登记表 / `max_ops` 的正整数校验都在 `api` 层
+    （`invalid_path` + 指标全集 / `invalid_argument` + `field=max_ops`），本层只挡类型。
+    """
+    return _api().fit_sensitivity(
+        _fit_argument(arguments),
+        _metric_argument(arguments),
+        **_sensitivity_options(arguments),
+        **_common_arguments(arguments),
+    )
+
+
+def _sensitivity_options(arguments: dict) -> dict:
+    """`fit_sensitivity` 的两个可选参数：`ops`（数组，原样递）与 `max_ops`（整数，原样递）。
+
+    **都只搬值**：坏 op（未知 kind / 越界下标 / 货舱件）是**数据问题**，由 `sensitivity`
+    写进 `warnings` 并跳过；`max_ops` 不是正整数才是参数错误，由 `api` 给它
+    `invalid_argument` + `field`。
+    """
+    params: dict[str, object] = {}
+    ops = arguments.get("ops")
+    if ops is not None:
+        params["ops"] = ops
+    max_ops = arguments.get("max_ops")
+    if max_ops is not None:
+        params["max_ops"] = max_ops
+    return params
+
+
 _ZKB_INJECTION_KEYS: tuple[str, ...] = ("requester", "clock", "sleeper")
 """`api.zkb_search` 的三个**测试注入点**：MCP 层不转发（客户端不该能塞一个请求替身）。"""
 
@@ -532,6 +612,8 @@ _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "fit_view": _tool_fit_view,
     "fit_get": _tool_fit_get,
     "fit_detail": _tool_fit_detail,
+    "fit_explain": _tool_fit_explain,
+    "fit_sensitivity": _tool_fit_sensitivity,
     "zkb_search": _tool_zkb_search,
     "zkb_stats": _tool_zkb_stats,
 }
@@ -616,6 +698,29 @@ _TOOL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
         "（meta.assumptions.skill_tier，512 条）。限制：不指定 view 时返回**六个视角全部**，"
         "体量很大（实测 10 KB 起）—— 先 fit_view 定位，再 fit_detail(view=\"...\")；path 走 "
         "'<视角>.<字段>'；工具不做截断：宁可大也不悄悄少东西。",
+    ),
+    "fit_explain": (
+        "为什么某个指标是这个数（归因链）",
+        "想知道某个数为什么这么大、由什么构成时用它：回答「这个数和它上面的数从哪来」。"
+        "返回 value / combine / base + sources 源链（depth 2 再展开每项的子源）。"
+        "**三类口径别混**：可加类（combine=additive：ehp_mixed / dps.base / cpu.load / "
+        "powergrid.load）各项 contribution 之和 == value；乘性类（speed_mps / "
+        "capacitor.peak_recharge）给 base + 有序因子链，**factor 不能相加**；投影类"
+        "（thinnest.*.ehp）给 formula + 两项。"
+        "限制：explain.value 是全精度（与 L1 的 3 位小数不同，要展示请自己舍入）；"
+        "dps.base / cpu.load 源链约 6 KB；depth 只支持 1–2；metric 不在登记表给 "
+        "invalid_path + 可用列表。",
+    ),
+    "fit_sensitivity": (
+        "改一个输入看指标怎么变（逐件关闭 / 状态 / 模式）",
+        "想知道「拆掉那件 / 关掉它 / 换个模式，这个数会变多少」时用它：回答「哪件模块在撑着"
+        "这个数」。返回 baseline + changes[]（每条的 op 与 value / delta / delta_pct / note）"
+        "+ warnings / ops_planned / ops_executed / skipped / truncated / max_ops。"
+        "ops 不给 = 自动计划（每件已装模块关一次 + 每个非当前模式切一次）。"
+        "**delta_pct 是比例**（delta/baseline），基线为 0 时是 null —— 不是 0，也不是无限大。"
+        "限制：每个 op 一次引擎重算，默认 max_ops=32，超了截断（truncated=true + warning）；"
+        "只给数值变化，**不给「该不该拆」的判词**；combine 可能是 additive / multiplicative / "
+        "single（单值指标）；metric 不在表里给 invalid_path + 可用列表。",
     ),
     "zkb_search": (
         "战报列表检索（谁在打谁 / 最近损失了什么）",
@@ -840,12 +945,119 @@ def _stats_input_schema() -> dict:
     }
 
 
+def _explain_input_schema() -> dict:
+    """`fit_explain` 的 `inputSchema`：公共属性 + 必填 `metric` + 可选 `depth`。
+
+    `metric` **刻意不给 enum**：给了 enum，客户端 / 网关可能先按 schema 拒掉，agent 就
+    只能拿到一个协议层报错；不给 enum，`api.fit_explain` 才能回 `invalid_path` + 一份
+    当前登记表（`supported_metrics()`）—— 那才是「下一步该换哪个指标」的答案。
+    `depth` 给 enum [1, 2] + `default: 2`（这是**取值域**，不是业务判断）。
+    """
+    properties = _common_properties()
+    properties["metric"] = {
+        "type": "string",
+        "minLength": 1,
+        "description": (
+            "要归因的指标路径（叶子指标，不是任意路径）：可加 survivability.ehp_mixed / "
+            "firepower.dps.base / resources.cpu.load / resources.powergrid.load；"
+            "乘性 mobility.speed_mps / stability.capacitor.peak_recharge；"
+            "投影 survivability.thinnest.{shield,armor,hull}.ehp。"
+            "不在登记表 → invalid_path，hint 给可用全集。"
+        ),
+    }
+    properties["depth"] = {
+        "type": "integer",
+        "enum": list(range(1, _api().EXPLAIN_MAX_DEPTH + 1)),
+        "default": _api().EXPLAIN_MAX_DEPTH,
+        "description": (
+            "归因深度：1 = 只看直接贡献者；2（默认）= 再展开每个贡献者自己的源。"
+            "其它值 → invalid_argument。"
+        ),
+    }
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": ["fit", "metric"],
+    }
+
+
+def _sensitivity_input_schema() -> dict:
+    """`fit_sensitivity` 的 `inputSchema`：公共属性 + 必填 `metric` + 可选 `ops` / `max_ops`。
+
+    `metric` 同 `fit_explain`：**不给 enum**（否则客户端先按 schema 拒掉，agent 只能拿到
+    协议层报错；不给枚举，`api` 才能回 `invalid_path` + 当前登记表）。
+    `ops` 是显式操作列表（不给 = 自动计划），三项形状写在 items 里；坏 op 由模块写进
+    `warnings` 并跳过 —— 所以这里不收紧 `required`。
+    """
+    properties = _common_properties()
+    properties["metric"] = {
+        "type": "string",
+        "minLength": 1,
+        "description": (
+            "要算灵敏度的指标：explain 的 9 个（ehp_mixed / dps.base / cpu.load / "
+            "powergrid.load / speed_mps / capacitor.peak_recharge / thinnest.*.ehp）+ 5 个单值"
+            "（capacitor.stable_pct / capacitor.peak_load / capacitor.capacity / "
+            "resources.cpu.free / resources.powergrid.free）。不在表里 → invalid_path + 清单。"
+        ),
+    }
+    properties["ops"] = {
+        "type": "array",
+        "description": (
+            "显式操作列表；不给 = 自动计划（每件已装模块 disable_item 一次 + 每个非当前模式 "
+            "set_mode 一次）。坏 op 会进 warnings 并跳过，不猜。"
+        ),
+        "items": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["disable_item", "set_state", "set_mode"],
+                },
+                "item_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "第几件已装模块（disable_item / set_state 必填）",
+                },
+                "state": {
+                    "type": "string",
+                    "enum": ["off", "offline", "online", "active", "overload"],
+                    "description": "set_state 的目标状态（off 是 offline 的别名）",
+                },
+                "mode_id": {
+                    "type": "integer",
+                    "description": "set_mode 的目标模式 type_id（T3C / T3D）",
+                },
+            },
+            "required": ["kind"],
+        },
+    }
+    properties["max_ops"] = {
+        "type": "integer",
+        "minimum": 1,
+        "default": _api().SENSITIVITY_MAX_OPS,
+        "description": (
+            "最多执行几个 op（默认 = "
+            f"{_api().SENSITIVITY_MAX_OPS}）：每个 op 一次引擎重算，超了截断并给 warning。"
+            "非正整数 → invalid_argument。"
+        ),
+    }
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": ["fit", "metric"],
+    }
+
+
 def _schema_for(name: str) -> dict:
     """工具 → `inputSchema`（`zkb_search` / `zkb_stats` 不是配装工具，各走自己那一套）。"""
     if name == "zkb_search":
         return _zkb_input_schema()
     if name == "zkb_stats":
         return _stats_input_schema()
+    if name == "fit_explain":
+        return _explain_input_schema()
+    if name == "fit_sensitivity":
+        return _sensitivity_input_schema()
     return _input_schema(
         view={"fit_view": "required", "fit_detail": "optional"}.get(name, "none"),
         path={"fit_get": "required", "fit_detail": "optional"}.get(name, "none"),
@@ -891,11 +1103,13 @@ INSTRUCTIONS: str = (
     "noobbaozi 配装分析（EVE Online）。按这个顺序用：\n"
     "① fit_parse 先确认读懂了（船 / 模块件数 / warnings）；\n"
     "② fit_killmail 分析战报时拿上下文（价值 / 参战方 / 伤害）；\n"
-    "③ fit_index 默认入口：六维度摘要，先看 flags；\n"
+    "③ fit_index 默认入口：六维度摘要 + flags；\n"
     "④ fit_view 展开可疑维度；⑤ fit_get 只取一个数（带 provenance）；\n"
     "⑥ fit_detail 深挖，返回很大，按需；\n"
-    "⑦ zkb_search 要先找战报：筛 killmail_id 再回 ②。\n"
-    "⑧ zkb_stats 先看实体画像：这实体值不值得深挖，再决定用⑦翻哪些战报。\n"
+    "⑦ fit_explain 归因：某个数为什么这么大（可加类：各项之和 == value；乘性因子不能相加）；\n"
+    "⑧ fit_sensitivity 灵敏度：改一个输入看指标变多少（关件 / 切状态 / 切模式）；\n"
+    "⑨ zkb_search 要先找战报：筛 killmail_id 再回 ②。\n"
+    "⑩ zkb_stats 先看实体画像：值不值得深挖，再决定用⑨翻哪些战报。\n"
     "三条判读纪律：\n"
     "1) unknown 不是 0：provenance=unknown 别用常识补数，看 unknown_reasons"
     "（not_applicable=本配装不适用、不是「不知道」；input_incomplete=输入不足；"

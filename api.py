@@ -130,7 +130,9 @@ from typing import Callable
 from noobbaozi.config import paths as _paths
 from noobbaozi.engine import adapter, normalize
 from noobbaozi.engine.assumptions import default_assumptions
+from noobbaozi.project import explain as _explain
 from noobbaozi.project import render
+from noobbaozi.project import sensitivity as _sensitivity
 from noobbaozi.project import summary as _summary
 from noobbaozi.project.eft import EftError
 from noobbaozi.project.eft import emit as eft_emit
@@ -412,6 +414,10 @@ def clear_caches() -> None:
         _UNIVERSE_SYSTEMS.clear()
     with _UNIVERSE_NAMES_GATE_LOCK:
         _UNIVERSE_NAMES_LAST_START = None
+    # `explain` 自带一层 LRU（key = fit 内容哈希 + metric + depth）。它**不在**上面这个
+    # 缓存里，所以必须单独清 —— 否则「改完实现测试仍绿」的老坑（拿到上一条用例的旧信封）
+    # 会在归因入口重演一遍。
+    _explain.clear_cache()
 
 
 def _cache_get(key: tuple) -> dict | None:
@@ -1452,6 +1458,262 @@ def fit_detail(
         "detail",
         fit,
         (targets, tuple(fields) if fields else None),
+        skill_tier=skill_tier,
+        damage_profile=damage_profile,
+        state_policy=state_policy,
+        compute=compute,
+    )
+
+
+# =============================================================================
+# 十一之二、归因（P3 `explain`）：`fit_explain`
+# =============================================================================
+#
+# 为什么参数校验放在 `_execute` 外面
+# ----------------------------------
+# `metric` / `depth` 的合法性**与配装无关**（登记表是模块级常量、depth 是 1..2），
+# 先在入口判掉有三个好处：① 省一次归一化 + 一次引擎 `sources=True` 计算（实测 2.95 ms）；
+# ② `invalid_path` 的 `hint` 必须是**当前**的 `supported_metrics()`，早判不会被缓存命中
+# 绕过去；③ 与 `fit_get` 的「空 path 先判」保持同一条纪律。
+#
+# 为什么结果要 `deepcopy`
+# -----------------------
+# `explain.explain()` 返回的是**它自己 LRU 里的那个对象**（同一次调用第二次直接命中）。
+# 本层的 `_cache_put` 会深拷贝，但**首次**返回的信封仍持有同一个引用 —— 调用方一旦
+# 就地改一个字段，`explain` 的缓存就被污染，"同一指标两次调用结果相同" 立刻失效。
+# 5–6 KB 的拷贝换掉这个隐患（`fit_detail` 的 10 KB 都不在乎这一次拷贝）。
+
+EXPLAIN_MAX_DEPTH: int = _explain.MAX_DEPTH
+"""`fit_explain` 的 `depth` 上限（= `explain.MAX_DEPTH`，目前 2：不解释到单条 modifier 之外）。"""
+
+EXPLAIN_METRICS: tuple[str, ...] = _explain.supported_metrics()
+"""可归因的指标路径（import 时快照；顺序 A 可加 → B 乘性 → C 投影）。"""
+
+
+def fit_explain(
+    fit: object,
+    metric: str,
+    *,
+    depth: int = EXPLAIN_MAX_DEPTH,
+    skill_tier: str = SKILL_TIER_ALL4,
+    damage_profile: str = DAMAGE_PROFILE_UNIFORM,
+    state_policy: str = STATE_POLICY_ENGINE_DEFAULT,
+) -> dict:
+    """某个指标**为什么**是这个数（`project/explain.py` 的组装层，**不改形状**）。
+
+    Args:
+        fit: 四形态输入。
+        metric: 可归因的指标路径，见 `EXPLAIN_METRICS`：
+            A 可加 `survivability.ehp_mixed` / `firepower.dps.base` /
+            `resources.cpu.load` / `resources.powergrid.load`；
+            B 乘性 `mobility.speed_mps` / `stability.capacitor.peak_recharge`；
+            C 投影 `survivability.thinnest.{shield,armor,hull}.ehp`。
+        depth: `1` 或 `2`（默认 2）。`1` = 只看直接贡献者；`2` = 再展开每个贡献者自己的源。
+
+    Returns:
+        成功时 `result` **就是** `explain.explain(ctx, metric, depth=depth)` 的返回，
+        本层不加字段、不裁剪、不取整（字段清单见 `project/explain.py` 模块 docstring）：
+
+        - 公共：`metric` / `view` / `value` / `unit` / `combine` / `includes_base` / `base` /
+          `sources[]` / `folded_noops` / `unexplained` / `truncated_at_depth` /
+          `truncated_nodes` / `minimality` / `has_offsets` / `tolerance` / `provenance`；
+        - A 可加（`combine == "additive"`）**另有** `sum_of_contributions` / `additive_only`，
+          且 **`Σ sources[].contribution == value`**（`unexplained` 是真 0）；
+        - B 乘性 / C 投影（`combine == "multiplicative"`）**另有** `replayed` / `replay_ok`；
+          C 类还带 `formula` / `damage_type` / `tied`。B 类的 `factor` **不是贡献量**，
+          不能相加；C 类的两条 source 是「层 HP」与「该层共振率」。
+        - **`value` 是全精度**（不是 L1 的 3 位小数）：A 类的加和判据只能在全精度上成立，
+          要展示请自己舍入。`dps.base` / `cpu.load` 的源链体量 5–6 KB。
+
+        业务失败：
+
+        - `metric` 不在 `EXPLAIN_METRICS` 里 → `invalid_path`，`hint` 给可用指标全集；
+        - `metric` 在登记表里但当前配装取不到值（该属性没有源）→ 同样 `invalid_path`；
+        - `depth` ∉ 1..2（含 `True` / `"2"` 这类）→ `invalid_argument`，`field="depth"`。
+
+    Note:
+        返回值已从 `explain` 的缓存对象**深拷贝**出来，调用方可以放心就地改；但本层缓存
+        与其它入口一样**只存成功结果**。
+    """
+    text = str(metric or "").strip()
+    metrics = _explain.supported_metrics()
+
+    # `depth` 先判：它是**参数**错误（invalid_argument），与「指标不存在」（invalid_path）
+    # 是两类事。`bool` 是 `int` 的子类，必须显式排除，否则 `True` 会被当成 depth=1。
+    if isinstance(depth, bool) or not isinstance(depth, int) or not 1 <= depth <= EXPLAIN_MAX_DEPTH:
+        return _failure(
+            _ApiFailure(
+                "invalid_argument",
+                f"depth 只能是 1..{EXPLAIN_MAX_DEPTH}，收到 {depth!r}",
+                field="depth",
+                hint=list(range(1, EXPLAIN_MAX_DEPTH + 1)),
+            ).payload()
+        )
+    if not text:
+        return _failure(
+            _ApiFailure(INVALID_PATH_KIND, "metric 不能为空", hint=list(metrics)).payload()
+        )
+    if text not in metrics:
+        return _failure(
+            _ApiFailure(
+                INVALID_PATH_KIND,
+                f"metric {text!r} 不在可归因指标表里（只归因登记过的叶子指标，不做通用路径）",
+                path=text,
+                hint=list(metrics),
+            ).payload()
+        )
+
+    def compute(ctx: ViewContext, _parsed: dict) -> tuple[object, bool]:
+        result = _explain.explain(ctx, text, depth=depth)
+        if result is None:
+            # 登记表里有、但这个上下文取不到值（属性没有源）—— 不拿空壳冒充。
+            raise _ApiFailure(
+                INVALID_PATH_KIND,
+                f"metric {text!r} 在当前配装上下文里取不到源（该指标对本配装可能不适用）",
+                path=text,
+                hint=list(metrics),
+            )
+        return copy.deepcopy(result), False
+
+    return _execute(
+        "explain",
+        fit,
+        (text, depth),
+        skill_tier=skill_tier,
+        damage_profile=damage_profile,
+        state_policy=state_policy,
+        compute=compute,
+    )
+
+
+# =============================================================================
+# 十一之三、灵敏度（P3 `sensitivity`）：`fit_sensitivity`
+# =============================================================================
+#
+# 与 `fit_explain` 的分工
+# ----------------------
+# `explain` 回答「这个数**由什么构成**」（一次计算的源链）；`sensitivity` 回答
+# 「**改一个输入**，这个数怎么变」（每个 op 重新进引擎算一遍，实测 0.1–0.33 ms/次）。
+# 两者共用同一套指标语言，但 `sensitivity` 的指标表**更大**（+5 个单值指标，见下）。
+
+SENSITIVITY_MAX_OPS: int = _sensitivity.MAX_OPS
+"""`fit_sensitivity` 的 `ops` 默认上限（= `sensitivity.MAX_OPS`，目前 32：每个 op 一次重算）。"""
+
+SENSITIVITY_METRICS: tuple[str, ...] = _sensitivity.supported_metrics()
+"""可算灵敏度的指标（import 时快照）：`explain` 的 9 个 + 5 个单值指标（`combine == "single"`）。"""
+
+
+def _sensitivity_ops_key(ops: object) -> str | None:
+    """`ops` → 缓存 key 片段（**必须可哈希且确定**：`_execute` 的 key 要进 dict）。
+
+    `ops` 是「对象数组」，直接放进 key 会 `TypeError: unhashable`。这里按 JSON 规范化
+    （`sort_keys` + 紧凑分隔符）—— 同一份 op 列表的两种键序得到**同一个** key，
+    不同 op 列表绝不串味。`None`（自动计划）单独给 `"auto"`，不与任何显式列表撞。
+    """
+    if ops is None:
+        return None
+    try:
+        return json.dumps(ops, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        # 不可 JSON 化的 ops：交给 `sensitivity` 自己写进 warnings（它判 `invalid_ops`）。
+        # key 里给一个**唯一**标记，避免与其它 ops 共用缓存条目。
+        return f"<unserializable:{id(ops)}>"
+
+
+def fit_sensitivity(
+    fit: object,
+    metric: str,
+    *,
+    ops: object = None,
+    max_ops: int = SENSITIVITY_MAX_OPS,
+    skill_tier: str = SKILL_TIER_ALL4,
+    damage_profile: str = DAMAGE_PROFILE_UNIFORM,
+    state_policy: str = STATE_POLICY_ENGINE_DEFAULT,
+) -> dict:
+    """某指标对「逐件关闭 / 状态切换 / 模式切换」的灵敏度（`project/sensitivity.py` 的组装层）。
+
+    Args:
+        fit: 四形态输入。
+        metric: 可算灵敏度的指标，见 `SENSITIVITY_METRICS`（`explain` 的 9 个 + 5 个单值：
+            `stability.capacitor.{stable_pct,peak_load,capacity}` /
+            `resources.cpu.free` / `resources.powergrid.free`，后 5 个 `combine == "single"`）。
+        ops: 显式 op 列表（`[{"kind": "disable_item", "item_index": N}` /
+            `{"kind": "set_state", "item_index": N, "state": "overload"}` /
+            `{"kind": "set_mode", "mode_id": M}]`）；`None` = **自动计划**（每件已装模块
+            `disable_item` 一次 + 每个非当前模式 `set_mode` 一次）。
+        max_ops: 最多执行几个 op（默认 32）。非正整数 → `invalid_argument`。
+
+    Returns:
+        成功时 `result` **就是** `sensitivity.sensitivity(...)` 的返回（本层不改形状）：
+
+        - `{metric, combine, baseline, changes[], warnings[], ops_planned, ops_executed,
+          skipped, truncated, max_ops, provenance, tolerance}`；
+        - 每条 `changes[i] = {op: {kind, item_index|mode_id, label, state?, mode_name?},
+          value, delta, delta_pct, note}`；`delta = value - baseline`、
+          `delta_pct = delta / baseline`（**基线为 0 时是 `null`**，不是 0 也不是 inf）；
+        - `combine` 多一个枚举值 **`"single"`**（单值指标：既不是相加也不是相乘）；
+        - `ops_executed` 是**真的跑出来**的条数（变体算不出来的进 `warnings` 并跳过，
+          所以它可能小于 `ops_planned`；`truncated` 由 `max_ops` 决定）。
+
+        业务失败：
+
+        - `metric` 不在 `SENSITIVITY_METRICS` 里（含空串）→ `invalid_path` +
+          `hint` = 可用指标全集；
+        - `metric` 在表里但基线取不到（该属性没有值）→ 同样 `invalid_path`；
+        - `max_ops` 不是正整数（`0` / `-1` / `true` / `"8"`）→ `invalid_argument` +
+          `field="max_ops"`。
+
+    Note:
+        返回的 dict 是**每次调用新建的**（`sensitivity` 没有跨调用共享的结果对象；它只
+        缓存引擎变体），所以本层不需要像 `fit_explain` 那样深拷贝。
+    """
+    text = str(metric or "").strip()
+    metrics = _sensitivity.supported_metrics()
+
+    # `max_ops` 先判：它是参数错误（invalid_argument），与「指标不支持」（invalid_path）
+    # 是两类事。`bool` 是 `int` 的子类，必须显式排除（否则 `True` 会被当成 1）。
+    if isinstance(max_ops, bool) or not isinstance(max_ops, int) or max_ops < 1:
+        return _failure(
+            _ApiFailure(
+                "invalid_argument",
+                f"max_ops 必须是正整数，收到 {max_ops!r}",
+                field="max_ops",
+                hint={"min": 1, "default": SENSITIVITY_MAX_OPS},
+            ).payload()
+        )
+    if not text:
+        return _failure(
+            _ApiFailure(INVALID_PATH_KIND, "metric 不能为空", hint=list(metrics)).payload()
+        )
+    if text not in metrics:
+        return _failure(
+            _ApiFailure(
+                INVALID_PATH_KIND,
+                f"metric {text!r} 不在可算灵敏度的指标表里（只算登记过的指标）",
+                path=text,
+                hint=list(metrics),
+            ).payload()
+        )
+
+    ops_key = _sensitivity_ops_key(ops)
+
+    def compute(ctx: ViewContext, _parsed: dict) -> tuple[object, bool]:
+        # `ops` 原样递进去：坏 op（未知 kind / 越界下标 / 货舱件 / 非法 state）由模块写进
+        # `warnings` 并跳过 —— 那是**数据问题**，不是参数错误，不该在接口层 500 掉。
+        result = _sensitivity.sensitivity(ctx, text, ops=ops, max_ops=max_ops)
+        if result is None:
+            raise _ApiFailure(
+                INVALID_PATH_KIND,
+                f"metric {text!r} 在当前配装上下文里取不到基线（该指标对本配装可能不适用）",
+                path=text,
+                hint=list(metrics),
+            )
+        return result, False
+
+    return _execute(
+        "sensitivity",
+        fit,
+        (text, ops_key, max_ops),
         skill_tier=skill_tier,
         damage_profile=damage_profile,
         state_policy=state_policy,
@@ -4171,6 +4433,8 @@ __all__ = [
     "ESI_UNIVERSE_IDS_API",
     "ESI_UNIVERSE_NAMES_API",
     "ESI_UNIVERSE_SYSTEM_API",
+    "EXPLAIN_MAX_DEPTH",
+    "EXPLAIN_METRICS",
     "HIGHSEC_THRESHOLD",
     "KILLMAIL_EHP_NOTE",
     "KILLMAIL_EHP_PATH",
@@ -4184,6 +4448,8 @@ __all__ = [
     "SECURITY_BAND_LOWSEC",
     "SECURITY_BAND_NULLSEC",
     "SECURITY_BAND_WORMHOLE",
+    "SENSITIVITY_MAX_OPS",
+    "SENSITIVITY_METRICS",
     "SKILL_TIERS",
     "SKILL_TIER_ALL4",
     "SKILL_TIER_ALL5",
@@ -4237,9 +4503,11 @@ __all__ = [
     "fetch_killmail",
     "fetch_killmail_report",
     "fit_detail",
+    "fit_explain",
     "fit_get",
     "fit_index",
     "fit_killmail",
+    "fit_sensitivity",
     "fit_view",
     "get_engine",
     "get_index",

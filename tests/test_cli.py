@@ -700,3 +700,244 @@ def test_module_entry_point_knows_stats() -> None:
     assert completed.returncode == 0, completed.stderr
     for token in ("--character", "--corporation", "--alliance", "--include", "--json"):
         assert token in completed.stdout, f"--help 里应提到 {token}：\n{completed.stdout}"
+
+
+# =============================================================================
+# 六、`explain`：三类口径各有一条人话出口 + 错误口径走 stderr
+# =============================================================================
+
+
+def test_explain_human_additive_lists_terms_and_sum(
+    eft_text: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A 可加类的人话：逐项 `数值 · 名字 · 占比` + `Σ == value`。"""
+    code, out, err = _run_cli(
+        ["explain", "--fit-file", str(EFT_PATH), "--metric", "survivability.ehp_mixed"], capsys
+    )
+    assert code == cli.EXIT_OK, err
+    assert err == ""
+    assert out.splitlines()[0].startswith("survivability.ehp_mixed = ")
+    assert "可加类" in out and "Σ" in out and "= value" in out
+    for label in ("ehpShield", "ehpArmor", "ehpHull"):
+        assert label in out, f"人话里缺少那一项：{label}"
+    assert "%" in out, "可加类应给每项占比"
+    assert "|" not in out and "┌" not in out
+
+
+def test_explain_human_multiplicative_shows_converted_chain(
+    eft_text: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """B 乘性类的人话：`base` → 因子链 → 结果，且乘数**已按算子语义折算**。
+
+    这条盯的是一类会骗人的写法：把 `factor` 原样当乘数印出来（`post_percent 586.45`
+    其实要按 `1 + 586.45/100` = ×6.8645 解释）。人话里出现 `× 586` 就是错的。
+    """
+    code, out, err = _run_cli(
+        ["explain", "--fit-file", str(EFT_PATH), "--metric", "mobility.speed_mps"], capsys
+    )
+    assert code == cli.EXIT_OK, err
+    assert "base = 180 m/s" in out
+    assert "→" in out and "replay_ok=True" in out
+    assert "× 6.8645" in out, f"post_percent 586.45 必须折算成 ×6.8645：\n{out}"
+    assert "× 586" not in out, f"把 post_percent 的原始值当乘数印出来了：\n{out}"
+    assert "不能相加" in out, "乘性类必须写上「因子不能相加」"
+
+
+def test_explain_human_projection_shows_formula(
+    eft_text: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """C 投影类的人话：先给 `formula`，再给「层 HP」与被除数/除数两项。"""
+    code, out, err = _run_cli(
+        [
+            "explain", "--fit-file", str(EFT_PATH),
+            "--metric", "survivability.thinnest.armor.ehp",
+        ],
+        capsys,
+    )
+    assert code == cli.EXIT_OK, err
+    assert "公式：" in out, f"投影类必须给公式：\n{out}"
+    assert "层 HP = " in out
+    assert "÷ " in out, "投影类第二项是除数"
+    assert "replay_ok=True" in out
+
+
+def test_explain_json_matches_api(eft_text: str, capsys: pytest.CaptureFixture[str]) -> None:
+    """`--json` 就是 api 信封原样（人话才做展示舍入）。"""
+    code, out, err = _run_cli(
+        [
+            "explain", "--fit-file", str(EFT_PATH),
+            "--metric", "survivability.ehp_mixed", "--json",
+        ],
+        capsys,
+    )
+    assert code == cli.EXIT_OK, err
+    envelope = json.loads(out)
+    api.clear_caches()
+    assert envelope == api.fit_explain(eft_text, "survivability.ehp_mixed")
+
+
+def test_explain_depth_out_of_range_is_api_failure(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--depth 3` 是**业务失败**（退出码 1、`invalid_argument`），不是 argparse 的 2。"""
+    code, out, err = _run_cli(
+        [
+            "explain", "--fit-file", str(EFT_PATH),
+            "--metric", "survivability.ehp_mixed", "--depth", "3",
+        ],
+        capsys,
+    )
+    assert code == cli.EXIT_API_FAILURE, f"应走 api 的 invalid_argument，不是参数错：{err}"
+    assert out == ""
+    assert "invalid_argument" in err and "depth" in err
+
+
+def test_explain_unknown_metric_is_api_failure_with_hint(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """不在登记表 → 退出码 1 + `invalid_path` + 可用指标列表（stderr）。"""
+    code, out, err = _run_cli(
+        ["explain", "--fit-file", str(EFT_PATH), "--metric", "nope"], capsys
+    )
+    assert code == cli.EXIT_API_FAILURE
+    assert out == ""
+    assert "invalid_path" in err
+    assert "survivability.ehp_mixed" in err, "失败信息里必须给可用指标"
+
+
+def test_explain_requires_metric(capsys: pytest.CaptureFixture[str]) -> None:
+    """`--metric` 是必填：缺了就是 argparse 的用法错误（退出码 2）。"""
+    code, out, err = _run_cli(["explain", "--fit-file", str(EFT_PATH)], capsys)
+    assert code == cli.EXIT_USAGE
+    assert out == ""
+    assert "--metric" in err
+
+
+def test_module_entry_point_knows_explain() -> None:
+    """真起子进程：`python -m noobbaozi.cli explain --help` 里有这一组选项。"""
+    completed = _subprocess_cli(["explain", "--help"])
+    assert completed.returncode == 0, completed.stderr
+    for token in ("--metric", "--depth", "--killmail-id", "--json"):
+        assert token in completed.stdout, f"--help 里应提到 {token}：\n{completed.stdout}"
+
+
+# =============================================================================
+# 七、`sensitivity`：人话出口（delta / 四个计数 / warnings）+ 三种错误归属
+# =============================================================================
+
+
+def test_sensitivity_human_is_readable(
+    eft_text: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """人话：基线 + 计划/执行/跳过/截断 + 逐条 delta（含比例），并说明 delta_pct 口径。"""
+    code, out, err = _run_cli(
+        [
+            "sensitivity", "--fit-file", str(EFT_PATH),
+            "--metric", "resources.cpu.free", "--max-ops", "3",
+        ],
+        capsys,
+    )
+    assert code == cli.EXIT_OK, err
+    assert err == ""
+    first = out.splitlines()[0]
+    assert first.startswith("resources.cpu.free = ")
+    assert "combine=single" in first
+    assert "计划" in out and "执行" in out and "截断 True" in out
+    assert "disable_item" in out
+    assert "注意：delta_pct = delta ÷ baseline" in out, "必须交代 delta_pct 是比例"
+    assert "warnings(" in out, "截断必须说出来"
+    assert "|" not in out and "┌" not in out
+
+
+def test_sensitivity_json_matches_api(
+    eft_text: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--json` 就是 api 信封原样。"""
+    code, out, err = _run_cli(
+        [
+            "sensitivity", "--fit-file", str(EFT_PATH),
+            "--metric", "resources.cpu.free", "--max-ops", "2", "--json",
+        ],
+        capsys,
+    )
+    assert code == cli.EXIT_OK, err
+    envelope = json.loads(out)
+    api.clear_caches()
+    assert envelope == api.fit_sensitivity(eft_text, "resources.cpu.free", max_ops=2)
+
+
+def test_sensitivity_ops_json_array_is_forwarded(
+    eft_text: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--ops-json` 的合法数组原样透传（一条 disable_item → 一条 change）。"""
+    code, out, err = _run_cli(
+        [
+            "sensitivity", "--fit-file", str(EFT_PATH),
+            "--metric", "resources.cpu.free",
+            "--ops-json", '[{"kind": "disable_item", "item_index": 0}]',
+            "--json",
+        ],
+        capsys,
+    )
+    assert code == cli.EXIT_OK, err
+    result = json.loads(out)["result"]
+    assert result["ops_planned"] == 1 and result["ops_executed"] == 1
+    assert result["changes"][0]["op"]["state"] == "offline"
+
+
+def test_sensitivity_bad_ops_json_is_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    """`--ops-json` 解析失败 / 顶层不是数组 → **参数错误（退出码 2）**，不拿去问引擎。"""
+    for payload in ("[not json", '{"kind": "disable_item"}'):
+        code, out, err = _run_cli(
+            [
+                "sensitivity", "--fit-file", str(EFT_PATH),
+                "--metric", "resources.cpu.free", "--ops-json", payload,
+            ],
+            capsys,
+        )
+        assert code == cli.EXIT_USAGE, f"payload={payload!r} 应退出 2：{err}"
+        assert out == ""
+        assert "--ops-json" in err
+
+
+def test_sensitivity_bad_max_ops_is_api_failure(capsys: pytest.CaptureFixture[str]) -> None:
+    """`--max-ops 0` 是**业务失败**（退出码 1、`invalid_argument`），不是 argparse 的 2。"""
+    code, out, err = _run_cli(
+        [
+            "sensitivity", "--fit-file", str(EFT_PATH),
+            "--metric", "resources.cpu.free", "--max-ops", "0",
+        ],
+        capsys,
+    )
+    assert code == cli.EXIT_API_FAILURE, f"应走 api 的 invalid_argument：{err}"
+    assert out == ""
+    assert "invalid_argument" in err and "max_ops" in err
+
+
+def test_sensitivity_unknown_metric_is_api_failure_with_hint(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """不在登记表 → 退出码 1 + `invalid_path` + 可用指标列表（stderr）。"""
+    code, out, err = _run_cli(
+        ["sensitivity", "--fit-file", str(EFT_PATH), "--metric", "nope"], capsys
+    )
+    assert code == cli.EXIT_API_FAILURE
+    assert out == ""
+    assert "invalid_path" in err
+    assert "resources.cpu.free" in err, "失败信息里必须给可用指标"
+
+
+def test_sensitivity_requires_metric(capsys: pytest.CaptureFixture[str]) -> None:
+    """`--metric` 必填（缺了是 argparse 的用法错误，退出码 2）。"""
+    code, out, err = _run_cli(["sensitivity", "--fit-file", str(EFT_PATH)], capsys)
+    assert code == cli.EXIT_USAGE
+    assert out == ""
+    assert "--metric" in err
+
+
+def test_module_entry_point_knows_sensitivity() -> None:
+    """真起子进程：`python -m noobbaozi.cli sensitivity --help` 里有这一组选项。"""
+    completed = _subprocess_cli(["sensitivity", "--help"])
+    assert completed.returncode == 0, completed.stderr
+    for token in ("--metric", "--max-ops", "--ops-json", "--json"):
+        assert token in completed.stdout, f"--help 里应提到 {token}：\n{completed.stdout}"

@@ -147,6 +147,14 @@ def _count_states(table: object) -> str:
     return " ".join(f"{state}={count}" for state, count in counts.items())
 
 
+_HINT_CHARS: int = 600
+"""失败信封里 `hint` 的展示上限（比普通字段宽得多）。
+
+为什么单独放宽：`hint` 常常是**可用值全集**（`metric` 的 14 个指标、六个视角名…），
+按 160 字符截断会把「照抄就能用」变成「只看到前四个 + 一个省略号」—— 那比不给提示更糟。
+"""
+
+
 def _human_error(error: object) -> str:
     """失败信封的 `error` → 人话（`kind` / `message` + 附带字段逐条给）。"""
     if not isinstance(error, dict):
@@ -155,7 +163,8 @@ def _human_error(error: object) -> str:
     for key, value in error.items():
         if key in ("kind", "message"):
             continue
-        lines.append(f"{_INDENT}{key}: {_compact(value)}")
+        limit = _HINT_CHARS if key == "hint" else TRUNCATE_CHARS
+        lines.append(f"{_INDENT}{key}: {_compact(value, limit)}")
     return "\n".join(lines)
 
 
@@ -512,6 +521,192 @@ def _human_stats(result: dict, meta: dict) -> str:
     return "\n".join(lines)
 
 
+_EXPLAIN_ROWS: int = 12
+"""`explain` 人话摘要里最多铺几行源（完整清单永远在 `--json` 里）。"""
+
+
+def _num(value: object, digits: int = 4) -> str:
+    """数值 → 人话（`digits` 位小数、千分位，末尾零去掉）；非数值原样给。
+
+    **只用于展示**：`explain.value` 是全精度，`--json` 里那份不做任何舍入
+    （A 类的「各项之和 == value」只在全精度上成立，展示层不许把结论建立在舍入值上）。
+    """
+    if value is None:
+        return "-"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return str(value)
+    text = f"{value:,.{digits}f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def _explain_step(entry: dict) -> str:
+    """B / C 类的一条因子 → `× 6.8645（post_percent +586.45%）` 形式的一步。
+
+    **为什么不直接印 `factor` 当乘数**：`factor` 是引擎的**算子原始值**——
+    `post_percent` 要按 `1 + factor/100` 解释、`post_div` 是除数、`pre/post_mul` 要按
+    堆叠惩罚 `1 + (factor-1)·penalty` 折算。把原始值写进 `base × 因子链` 会得到一个
+    算不回去的等式（实测 `speed_mps` 的 `post_percent 586.45` 实际是 ×6.8645）。
+    这里给**折算后的乘数**，原始值与算子名放在括号里可溯源。
+    """
+    operator = entry.get("operator")
+    factor = entry.get("factor")
+    if not isinstance(factor, (int, float)):
+        return f"{operator} {factor}"
+    penalty = entry.get("penalty")
+    weight = 1.0 if penalty is None else float(penalty)
+    if operator == "post_percent":
+        multiplier = 1.0 + (float(factor) / 100.0) * weight
+        return f"× {_num(multiplier)}（post_percent +{_num(factor)}%）"
+    if operator in ("pre_mul", "post_mul"):
+        multiplier = 1.0 + (float(factor) - 1.0) * weight
+        suffix = f"（{operator} {_num(factor)}）" if multiplier != float(factor) else ""
+        return f"× {_num(multiplier)}{suffix}"
+    if operator == "post_div":
+        divisor = 1.0 + (float(factor) - 1.0) * weight
+        suffix = f"（post_div {_num(factor)}）" if divisor != float(factor) else ""
+        return f"÷ {_num(divisor)}{suffix}"
+    return f"{operator} {_num(factor)}"
+
+
+def _human_explain(result: dict, _meta: dict) -> str:
+    """`explain` 的人话摘要（三类口径分开铺，**不混算**）。
+
+    A 可加：逐项 `+ 数值 · 名字 · 占比`，末尾给 `Σ == value`；
+    B 乘性：`base` → 因子链（折算后的乘数，带算子名）→ 结果（附 `replay_ok`）；
+    C 投影：先给 `formula`，再给「层 HP」与「共振因子」两项。
+
+    完整精度与全部字段在 `--json`（人话这里只舍入展示）。
+    """
+    metric = result.get("metric")
+    unit = result.get("unit")
+    unit_text = f" {unit}" if unit else ""
+    combine = result.get("combine")
+    head = (
+        f"{metric} = {_num(result.get('value'))}{unit_text}"
+        f" · combine={combine} · provenance={result.get('provenance')}"
+    )
+    if result.get("tied"):
+        head += " · 四系并列"
+    lines = [head]
+
+    sources = result.get("sources") if isinstance(result.get("sources"), list) else []
+    value = result.get("value")
+
+    if combine == "additive":
+        lines.append(
+            f"{_INDENT}可加类：各项 contribution 之和 == value"
+            f"（unexplained={_num(result.get('unexplained'))}）"
+        )
+        for entry in sources[:_EXPLAIN_ROWS]:
+            contribution = entry.get("contribution")
+            share = ""
+            if isinstance(contribution, (int, float)) and isinstance(value, (int, float)) and value:
+                share = f" · {contribution / value * 100:.1f}%"
+            sign = "-" if isinstance(contribution, (int, float)) and contribution < 0 else "+"
+            amount = abs(contribution) if isinstance(contribution, (int, float)) else None
+            lines.append(
+                f"{_INDENT}{sign} {_num(amount)}{unit_text} · {entry.get('label')}"
+                f"（{entry.get('operator')}）{share}"
+            )
+        if len(sources) > _EXPLAIN_ROWS:
+            lines.append(f"{_INDENT}…还有 {len(sources) - _EXPLAIN_ROWS} 项（--json 取全量）")
+        total = result.get("sum_of_contributions")
+        if total is not None:
+            lines.append(f"{_INDENT}Σ = {_num(total)}{unit_text} = value")
+        return "\n".join(lines)
+
+    # B / C 类：base → 因子链 → 结果。`factor` 一律按算子语义折算后再展示。
+    formula = result.get("formula")
+    if formula:
+        # C 投影类：`base` 就是「层 HP」，它下面那条 contribution 就是同一个数 ——
+        # 只铺一次，别让读者以为有两项。
+        lines.append(f"{_INDENT}公式：{formula}")
+    base = result.get("base")
+    if base is not None and not formula:
+        lines.append(f"{_INDENT}base = {_num(base)}{unit_text}")
+    for entry in sources[:_EXPLAIN_ROWS]:
+        label = entry.get("label") or "?"
+        contribution = entry.get("contribution")
+        if entry.get("factor") is not None:
+            lines.append(f"{_INDENT}{_explain_step(entry)} · {label}")
+        elif contribution is not None:
+            # 投影类的「层 HP」项：它是被除的那个数（pre_assign），不是因子
+            prefix = "层 HP = " if formula else "= "
+            lines.append(f"{_INDENT}{prefix}{_num(contribution)}{unit_text} · {label}")
+    if len(sources) > _EXPLAIN_ROWS:
+        lines.append(f"{_INDENT}…还有 {len(sources) - _EXPLAIN_ROWS} 项（--json 取全量）")
+    lines.append(
+        f"{_INDENT}→ {_num(result.get('replayed'))}{unit_text}"
+        f"（replay_ok={result.get('replay_ok')}，残差 {_num(result.get('unexplained'))}）"
+    )
+    lines.append(f"{_INDENT}注意：乘性因子不能相加（contribution 一律 None）")
+    return "\n".join(lines)
+
+
+_SENSITIVITY_ROWS: int = 12
+"""`sensitivity` 人话摘要里最多铺几行 change（完整清单在 `--json`）。"""
+
+
+def _human_sensitivity(result: dict, _meta: dict) -> str:
+    """`sensitivity` 的人话摘要：基线 + 计划/执行计数 + 逐条 `Δ`（+ warnings）。
+
+    `delta_pct` 是**比例**（`delta / baseline`），所以展示时 ×100；基线为 0 时模块给
+    `null`（不是 0、也不是无限大），这里如实写「比例不适用」。
+    """
+    metric = result.get("metric")
+    combine = result.get("combine")
+    lines = [
+        f"{metric} = {_num(result.get('baseline'))} · combine={combine}"
+        f" · provenance={result.get('provenance')}"
+    ]
+    lines.append(
+        f"{_INDENT}计划 {result.get('ops_planned')} · 执行 {result.get('ops_executed')}"
+        f" · 跳过 {result.get('skipped')} · 截断 {result.get('truncated')}"
+        f"（max_ops={result.get('max_ops')}）"
+    )
+    changes = result.get("changes") if isinstance(result.get("changes"), list) else []
+    for change in changes[:_SENSITIVITY_ROWS]:
+        op = change.get("op") if isinstance(change.get("op"), dict) else {}
+        kind = op.get("kind")
+        detail = ""
+        if kind == "set_mode":
+            detail = f"（→ {op.get('label') or op.get('mode_name') or op.get('mode_id')}）"
+        elif kind == "set_state":
+            detail = f"（→ {op.get('state')}）"
+        label = op.get("label") or f"item_index={op.get('item_index')}"
+        delta = change.get("delta")
+        pct = change.get("delta_pct")
+        if pct is None:
+            pct_text = "基线为 0，比例不适用"
+        elif isinstance(pct, (int, float)):
+            pct_text = f"{pct * 100:+.1f}%"
+        else:
+            pct_text = str(pct)
+        sign = "+" if isinstance(delta, (int, float)) and delta > 0 else ""
+        lines.append(
+            f"{_INDENT}{sign}{_num(delta)} · {kind} · {label}{detail}"
+            f" → {_num(change.get('value'))}（{pct_text}）"
+        )
+        note = change.get("note")
+        if note:
+            lines.append(f"{_INDENT * 2}note: {note}")
+    if len(changes) > _SENSITIVITY_ROWS:
+        lines.append(f"{_INDENT}…还有 {len(changes) - _SENSITIVITY_ROWS} 条（--json 取全量）")
+    lines.append(
+        f"{_INDENT}注意：delta_pct = delta ÷ baseline；基线为负时百分比符号会反过来，"
+        "看 delta 更直观；基线为 0 时比例不适用（null）"
+    )
+    warnings = result.get("warnings") or []
+    if warnings:
+        lines.append(f"{_INDENT}warnings({len(warnings)}):")
+        for warning in warnings:
+            message = warning.get("message") if isinstance(warning, dict) else warning
+            lines.append(f"{_INDENT * 2}- {message}")
+    return "\n".join(lines)
+
+
 _HUMAN: dict[str, Callable[[dict, dict], str]] = {
     "parse": lambda result, _meta: _human_parse(result),
     "killmail": lambda result, _meta: _human_killmail(result, _meta),
@@ -519,6 +714,8 @@ _HUMAN: dict[str, Callable[[dict, dict], str]] = {
     "view": lambda result, _meta: _human_view(result),
     "get": lambda result, _meta: _human_get(result),
     "detail": _human_detail,
+    "explain": _human_explain,
+    "sensitivity": _human_sensitivity,
     "search": _human_search,
     "stats": _human_stats,
 }
@@ -683,6 +880,63 @@ def build_parser() -> argparse.ArgumentParser:
     detail_cmd.add_argument("--view", metavar="NAME", help="只给这个视角（默认六个全给）")
     detail_cmd.add_argument("--path", metavar="PATH", help="只给这些字段（<视角>.<字段>）")
 
+    explain_cmd = subparsers.add_parser(
+        "explain", help="某个指标为什么是这个数（归因链：A 可加 / B 乘性 / C 投影）"
+    )
+    _add_common(explain_cmd)
+    explain_cmd.add_argument(
+        "--metric",
+        metavar="PATH",
+        required=True,
+        help=(
+            "要归因的指标（如 survivability.ehp_mixed / firepower.dps.base / "
+            "mobility.speed_mps / survivability.thinnest.shield.ehp）；"
+            "不在登记表 → invalid_path + 可用列表"
+        ),
+    )
+    explain_cmd.add_argument(
+        "--depth",
+        type=int,
+        default=api.EXPLAIN_MAX_DEPTH,
+        metavar="N",
+        help=(
+            f"归因深度 1 或 2（默认 {api.EXPLAIN_MAX_DEPTH}）：1 只看直接贡献者，"
+            "2 再展开子源；其它值由 api 报 invalid_argument"
+        ),
+    )
+
+    sensitivity_cmd = subparsers.add_parser(
+        "sensitivity", help="改一个输入看指标怎么变（逐件关闭 / 状态 / 模式）"
+    )
+    _add_common(sensitivity_cmd)
+    sensitivity_cmd.add_argument(
+        "--metric",
+        metavar="PATH",
+        required=True,
+        help=(
+            "要算灵敏度的指标（如 resources.cpu.free / stability.capacitor.stable_pct）；"
+            "不在登记表 → invalid_path + 可用列表"
+        ),
+    )
+    sensitivity_cmd.add_argument(
+        "--max-ops",
+        type=int,
+        default=api.SENSITIVITY_MAX_OPS,
+        metavar="N",
+        help=(
+            f"最多执行几个 op（默认 {api.SENSITIVITY_MAX_OPS}）：每个 op 一次引擎重算，"
+            "超了截断并给 warning；非正整数由 api 报 invalid_argument"
+        ),
+    )
+    sensitivity_cmd.add_argument(
+        "--ops-json",
+        metavar="JSON",
+        help=(
+            '显式 op 列表（JSON 数组），如 [{"kind":"disable_item","item_index":0}]；'
+            "不给 = 自动计划（每件已装模块关一次 + 每个非当前模式切一次）"
+        ),
+    )
+
     search_cmd = subparsers.add_parser(
         "search", help="战报列表检索（谁在打谁 / 这个公司最近损失了什么）"
     )
@@ -763,7 +1017,36 @@ def _dispatch(args: argparse.Namespace, fit: object) -> dict:
         return api.fit_view(fit, args.view, **params)
     if args.command == "get":
         return api.fit_get(fit, args.path, **params)
+    if args.command == "explain":
+        return api.fit_explain(fit, args.metric, depth=args.depth, **params)
+    if args.command == "sensitivity":
+        return api.fit_sensitivity(
+            fit,
+            args.metric,
+            ops=getattr(args, "ops", None),
+            max_ops=args.max_ops,
+            **params,
+        )
     return api.fit_detail(fit, getattr(args, "view", None), getattr(args, "path", None), **params)
+
+
+def _pick_ops(text: str | None) -> tuple[object | None, str | None]:
+    """`--ops-json` → `ops` 参数（`None` = 自动计划）。
+
+    Returns:
+        `(ops, 错误信息)`。**JSON 解析失败 / 顶层不是数组**是参数错误（退出码 2）——
+        连"要操作什么"都没说清时，不该拿去问引擎；而**数组里的单个坏 op** 是数据问题，
+        由 `sensitivity` 写进 `warnings` 并跳过（退出码 0，结果照给）。
+    """
+    if not text or not str(text).strip():
+        return None, None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return None, f"--ops-json 不是合法 JSON：{exc}"
+    if not isinstance(parsed, list):
+        return None, f"--ops-json 必须是 JSON 数组，收到 {type(parsed).__name__}"
+    return parsed, None
 
 
 def _dispatch_search(args: argparse.Namespace) -> dict:
@@ -872,6 +1155,14 @@ def main(argv: list[str] | None = None) -> int:
     if problem is not None:
         print(f"参数错误：{problem}", file=sys.stderr)
         return EXIT_USAGE
+
+    if args.command == "sensitivity":
+        # `--ops-json` 的**顶层**形态是参数问题（退出码 2）；数组里的坏 op 走 warnings。
+        ops, problem = _pick_ops(getattr(args, "ops_json", None))
+        if problem is not None:
+            print(f"参数错误：{problem}", file=sys.stderr)
+            return EXIT_USAGE
+        args.ops = ops
 
     return _report(args, _dispatch(args, fit))
 

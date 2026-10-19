@@ -21,6 +21,7 @@ from pathlib import Path
 import esf_dogma_engine as dogma
 import pytest
 
+from noobbaozi import api
 from noobbaozi.config import attributes as A
 from noobbaozi.engine import adapter
 from noobbaozi.engine.assumptions import default_assumptions, derive_skill_tier
@@ -103,6 +104,24 @@ def legion(engine, index) -> ViewContext:
 def damnation(engine, index) -> ViewContext:
     """f14（Command Damnation）：多模块堆叠惩罚的**二次验证**样本。"""
     return _ctx(engine, index, "f14-command-damnation.json")
+
+
+@pytest.fixture(scope="module")
+def empty_fit(engine, index) -> ViewContext:
+    """f58：**0 模块**（只有船头一行）。"""
+    return _ctx(engine, index, "f58-empty-fit.eft")
+
+
+@pytest.fixture(scope="module")
+def drones_only(engine, index) -> ViewContext:
+    """f29：火力全来自无人机（`-12` 含无人机，见 `views/firepower.py:69-70`）。"""
+    return _ctx(engine, index, "f29-drones-only.json")
+
+
+@pytest.fixture(scope="module")
+def no_charge(engine, index) -> ViewContext:
+    """f65：有武器、**没有弹药**（`dps.base` 该是 0，不是「取不到」）。"""
+    return _ctx(engine, index, "f65-weapon-no-charge.eft")
 
 
 @pytest.fixture(autouse=True)
@@ -589,3 +608,158 @@ def test_envelope_has_every_contract_field(hecate: ViewContext) -> None:
                 "truncated",
                 "children",
             } <= set(entry), f"{metric} 的 source 缺字段"
+
+
+# =============================================================================
+# 十、边界样本（0 模块 / 全 offline / 只 drone / 无 charge）
+# =============================================================================
+
+
+def test_zero_module_fit_keeps_additive_identity(empty_fit: ViewContext) -> None:
+    """0 模块：`cpu.load` / `powergrid.load` 的值是 **0**，源链是空数组 —— 加和恒等式照样成立。
+
+    「A 类还给不给项」的答案：**给一个空数组**（刻意不给零项，见 `folded_noops`），
+    所以 `Σ contributions = 0`、`unexplained = 0`、`minimality = filtered_noops`。
+    """
+    for metric in ("resources.cpu.load", "resources.powergrid.load"):
+        result = explain.explain(empty_fit, metric)
+        assert result is not None, metric
+        assert result["value"] == 0.0
+        assert result["sources"] == []
+        assert result["combine"] == "additive"
+        assert result["sum_of_contributions"] == 0.0
+        assert _close(_sum_contributions(result), result["value"])
+        assert result["unexplained"] == 0.0
+        assert result["minimality"] == "filtered_noops"
+
+
+def test_zero_module_fit_still_explains_ship_body_metrics(empty_fit: ViewContext) -> None:
+    """0 模块时，船体自带的指标仍然可归因（EHP / 速度 / 电容 / 三层投影）。"""
+    for metric in (
+        "survivability.ehp_mixed",
+        "mobility.speed_mps",
+        "stability.capacitor.peak_recharge",
+        "survivability.thinnest.shield.ehp",
+        "survivability.thinnest.armor.ehp",
+        "survivability.thinnest.hull.ehp",
+    ):
+        result = explain.explain(empty_fit, metric)
+        assert result is not None, metric
+        assert result["value"] > 0.0
+        assert result["unexplained"] == 0.0
+
+
+def test_zero_module_fit_dps_has_no_engine_source_and_is_not_faked(
+    empty_fit: ViewContext,
+) -> None:
+    """0 模块时 `firepower.dps.base` **没有引擎源** → `explain` 明明在登记表里也给 `None`。
+
+    这是**刻意的差异**（不是 bug）：
+    - `explain` 需要引擎 `sources`，没有武器的船体压根不发 `-12` 属性 → `invalid_path`；
+    - `fit_get` 走投影层的 `firepower.dps` 字段，能给出 `0.0`（「确实没有火力」）。
+    把 `explain` 补一个 0 空壳，就等于宣称「这个 0 可归因」，那是编。
+    """
+    assert (empty_fit.fit.get("items") or []) == []
+    assert explain.explain(empty_fit, "firepower.dps.base") is None
+
+    text = (FIXTURES / "f58-empty-fit.eft").read_text(encoding="utf-8")
+    envelope = api.fit_explain(text, "firepower.dps.base")
+    assert envelope.get("ok") is False
+    assert envelope["error"]["kind"] == "invalid_path"
+
+    get_envelope = api.fit_get(text, "firepower.dps.base")
+    assert get_envelope.get("ok") is True, "投影层对「没有火力」是有答案的（0.0）"
+    assert get_envelope["result"]["value"] == 0.0
+
+
+def test_all_offline_fit_behaves_like_a_ship_without_modules(hecate: ViewContext) -> None:
+    """全 offline ≡ 空配装：船体指标逐位相同（模块不生效时既不贡献也不生产）。
+
+    唯一的例外是 `firepower.dps.base`：空配装**取不到**源（`None`），全 offline 配装取到
+    `0.0`（引擎仍然发了那条 `-12`，只是所有来源都不生效）—— 两种「0」来源不同，都如实给。
+    """
+    items = [{**item, "state": "offline"} for item in hecate.fit["items"]]
+    offline = ViewContext(
+        engine=hecate.engine,
+        index=hecate.index,
+        fit={**hecate.fit, "items": items},
+        assumptions=hecate.assumptions,
+        meta=hecate.meta,
+    )
+    empty = _ctx(hecate.engine, hecate.index, "f58-empty-fit.eft")
+    assert empty.fit["ship"]["type_id"] == offline.fit["ship"]["type_id"], "前提：同一条船"
+
+    same = (
+        "survivability.ehp_mixed",
+        "resources.cpu.load",
+        "resources.powergrid.load",
+        "mobility.speed_mps",
+        "stability.capacitor.peak_recharge",
+        "survivability.thinnest.shield.ehp",
+        "survivability.thinnest.armor.ehp",
+        "survivability.thinnest.hull.ehp",
+    )
+    for metric in same:
+        left = explain.explain(offline, metric)
+        right = explain.explain(empty, metric)
+        assert left is not None and right is not None, metric
+        assert left["value"] == pytest.approx(right["value"], rel=REL), (
+            f"{metric}: 全 offline={left['value']!r} vs 空配装={right['value']!r}"
+        )
+        assert left["unexplained"] == 0.0 and right["unexplained"] == 0.0
+
+    assert explain.explain(offline, "firepower.dps.base")["value"] == 0.0
+    assert explain.explain(empty, "firepower.dps.base") is None
+
+
+def test_drones_only_dps_attribution_aligns(drones_only: ViewContext) -> None:
+    """只有无人机：`dps.base` 的源**全部**来自无人机，`subtotals.drones == value`。"""
+    result = explain.explain(drones_only, "firepower.dps.base")
+    assert result is not None
+    assert result["includes_drones"] is True
+    assert _close(_sum_contributions(result), result["value"])
+    assert result["unexplained"] == 0.0
+
+    subtotals = result["subtotals"]
+    assert subtotals["drones"] == pytest.approx(result["value"], rel=REL)
+    assert subtotals["weapons"] == 0.0
+    assert subtotals["fighters"] == 0.0
+    assert sum(subtotals.values()) == pytest.approx(result["value"], rel=REL)
+    assert all(entry["kind"] == "item" for entry in result["sources"]), "无人机是 item 源"
+
+
+def test_weapon_without_charge_reports_zero_not_missing(no_charge: ViewContext) -> None:
+    """有武器、无弹药：`dps.base` 是 **0.0**（引擎有源但贡献 0），不是「取不到」。"""
+    result = explain.explain(no_charge, "firepower.dps.base")
+    assert result is not None
+    assert result["value"] == 0.0
+    assert result["sources"] == []
+    assert result["unexplained"] == 0.0
+    assert result["subtotals"] == {"weapons": 0.0, "drones": 0.0, "fighters": 0.0}
+
+
+# =============================================================================
+# 十一、`supported_metrics()` 的每个串都必须是 `fit_get` 能解析的路径
+# =============================================================================
+
+
+def test_every_explain_metric_is_a_fit_get_path() -> None:
+    """9 个指标串逐个过 `api.fit_get`：登记了却取不到 = 坏契约（agent 会直接踩空）。"""
+    text = (FIXTURES / "f1-hecate-killmail.eft").read_text(encoding="utf-8")
+    for metric in explain.supported_metrics():
+        envelope = api.fit_get(text, metric)
+        assert envelope.get("ok") is True, (
+            f"{metric}: fit_get 拒绝了这个已登记的指标 → {envelope.get('error')}"
+        )
+        result = envelope["result"]
+        assert result["path"] == metric
+        assert result["value"] is not None
+        assert result["provenance"] in {"measured", "assumed", "unknown"}
+
+
+def test_explain_metric_contract_check_is_not_vacuous() -> None:
+    """**非永真证明**：不存在的路径必须被拒绝（证明上一条不是恒真）。"""
+    text = (FIXTURES / "f1-hecate-killmail.eft").read_text(encoding="utf-8")
+    envelope = api.fit_get(text, "survivability.thinnest.shield.ehpX")
+    assert envelope.get("ok") is False
+    assert envelope["error"]["kind"] == "invalid_path"

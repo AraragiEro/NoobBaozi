@@ -224,6 +224,64 @@ def _check_detail(envelope: dict) -> None:
     )
 
 
+def _check_explain(envelope: dict) -> None:
+    """`fit_explain(survivability.ehp_mixed)`：A 类可加，**各项之和 == value**（全精度）。"""
+    _require(envelope.get("ok") is True, "fit_explain 应 ok:true")
+    result = envelope.get("result") or {}
+    _require(
+        result.get("metric") == "survivability.ehp_mixed",
+        f"metric 应回显请求值，实际 {result.get('metric')!r}",
+    )
+    _require(result.get("combine") == "additive", "ehp_mixed 是可加类（combine=additive）")
+    sources = result.get("sources")
+    _require(isinstance(sources, list) and sources, "sources 应为非空列表")
+    contributions = [
+        entry.get("contribution")
+        for entry in sources
+        if entry.get("contribution") is not None
+    ]
+    _require(contributions, "可加类必须给出 contribution")
+    total = sum(contributions)
+    value = result.get("value")
+    _require(
+        isinstance(value, (int, float))
+        and abs(total - value) <= max(1e-9 * abs(value), 1e-9),
+        f"可加类 Σ contribution 应等于 value（Σ={total!r} / value={value!r}）",
+    )
+    _require(
+        result.get("sum_of_contributions") is not None,
+        "可加类应带 sum_of_contributions",
+    )
+
+
+def _check_sensitivity(envelope: dict) -> None:
+    """`fit_sensitivity(resources.cpu.free)`：每条 change 的 `delta` 必须 = `value - baseline`。"""
+    _require(envelope.get("ok") is True, "fit_sensitivity 应 ok:true")
+    result = envelope.get("result") or {}
+    _require(
+        result.get("metric") == "resources.cpu.free",
+        f"metric 应回显请求值，实际 {result.get('metric')!r}",
+    )
+    baseline = result.get("baseline")
+    _require(isinstance(baseline, (int, float)), "baseline 应是数值")
+    changes = result.get("changes")
+    _require(isinstance(changes, list) and changes, "changes 应为非空列表")
+    for change in changes:
+        op = change.get("op") or {}
+        _require(op.get("kind"), f"每条 change 必须带 op.kind：{change!r}")
+        value = change.get("value")
+        delta = change.get("delta")
+        _require(isinstance(value, (int, float)) and isinstance(delta, (int, float)), "value/delta 应是数值")
+        _require(
+            abs((value - baseline) - delta) <= max(1e-9 * abs(value), 1e-9),
+            f"delta 必须等于 value - baseline（delta={delta!r} / value={value!r} / baseline={baseline!r}）",
+        )
+    _require(
+        result.get("ops_executed") == len(changes),
+        "ops_executed 必须等于真的跑出来的条数",
+    )
+
+
 def _check_invalid_path(envelope: dict) -> None:
     """负例①：路径不存在 → 业务失败 `invalid_path` + 可用前缀 `hint`。"""
     _require(envelope.get("ok") is False, "不存在的路径必须 ok:false（不能用 value:null 冒充）")
@@ -253,7 +311,9 @@ def _check_unknown_module(envelope: dict) -> None:
 
 
 def build_cases() -> tuple[dict, ...]:
-    """冒烟用例表：**五个工具各一次 + 两个负例**（顺序就是推荐调用顺序）。
+    """冒烟用例表：**七个本地可算的配装工具各一次 + 两个负例**（顺序就是推荐调用顺序）。
+
+    `fit_killmail` / `zkb_*` 要联网，不在表里（各自的契约测试覆盖）。
 
     Returns:
         每项 `{"name", "tool", "arguments", "check"}`；`check(envelope)` 失败抛
@@ -290,6 +350,19 @@ def build_cases() -> tuple[dict, ...]:
             "tool": "fit_detail",
             "arguments": {"fit": eft, "view": "stability"},
             "check": _check_detail,
+        },
+        {
+            "name": "explain",
+            "tool": "fit_explain",
+            "arguments": {"fit": eft, "metric": "survivability.ehp_mixed"},
+            "check": _check_explain,
+        },
+        {
+            "name": "sensitivity",
+            "tool": "fit_sensitivity",
+            # 单值指标 + max_ops=4：冒烟要快，且 4 条足够验「delta == value - baseline」
+            "arguments": {"fit": eft, "metric": "resources.cpu.free", "max_ops": 4},
+            "check": _check_sensitivity,
         },
         {
             "name": "neg:invalid_path",

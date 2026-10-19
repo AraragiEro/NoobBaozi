@@ -11,7 +11,8 @@
 3. **业务错误不是协议错误**：`ok:false` 走 `result` + `isError:true`，
    `structuredContent` 里能读到 `kind` / `candidates` / `hint`；
 4. **`structuredContent` 按协商版本开关**：`2025-06-18` 起才有，`2024-11-05` 不该有；
-5. **真起子进程**：真客户端连上、工具都 `ok:true`（冒烟用例表覆盖全部注册工具），
+5. **真起子进程**：真客户端连上、工具都 `ok:true`（冒烟用例表覆盖**本地可算**的配装工具；
+   需要联网的 `fit_killmail` / `zkb_*` 不在那张表里，由各自的契约测试覆盖），
    且 **stdout 里没有一行不是 JSON-RPC**（stderr 与 stdout 分开读）；
 6. **自解释守卫（T-51）**：每条工具 description 三段齐全（何时用 / 返回什么 / 限制）、
    `instructions` 提到全部工具且长度受控、`SKILL.md` 是薄壳（不复制工具清单）。
@@ -595,10 +596,15 @@ def test_stdio_client_round_trip_and_stdout_purity(eft_text: str) -> None:
 
 
 def test_smoke_script_exits_zero() -> None:
-    """`python -m noobbaozi.mcp.client_smoke --stdio` 真的 PASS 并退出 `0`。"""
+    """`python -m noobbaozi.mcp.client_smoke --stdio` 真的 PASS 并退出 `0`。
+
+    「PASS N/N」的 N **从用例表派生**：写死 `7/7` 的话，往 `build_cases()` 里加一条用例
+    就会红在这里 —— 而那条新增用例本身可能是对的（本文件不该变成第二份计数清单）。
+    """
     completed = _run_script(["-m", "noobbaozi.mcp.client_smoke", "--stdio"])
     assert completed.returncode == 0, f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
-    assert "PASS  7/7" in completed.stdout
+    expected = len(client_smoke.build_cases())
+    assert f"PASS  {expected}/{expected}" in completed.stdout
     for tool in TOOL_NAMES:
         assert tool in completed.stdout
     assert "FAIL" not in completed.stdout
@@ -1193,3 +1199,193 @@ def test_zkb_stats_injected_requester_is_not_forwards() -> None:
     for name in ("requester", "clock", "sleeper"):
         assert name not in spec["properties"], f"{name} 不该出现在协议表面"
 
+
+
+# =============================================================================
+# 六、`fit_explain`（第 9 个工具）：schema 形状 + 三类口径 + 两种错误的归属
+# =============================================================================
+
+
+def test_fit_explain_schema_shape() -> None:
+    """`metric` 必填、`depth` 是 1/2 的整数（默认 2）；**`metric` 刻意不给 enum**。
+
+    不给 enum 是设计决定：schema 一旦枚举，客户端 / 网关可能先按 schema 拒掉，
+    agent 只能拿到协议层报错；不给枚举，`api.fit_explain` 才能回 `invalid_path` +
+    一份当前登记表 —— 那才是「下一步换哪个指标」的答案。
+    """
+    spec = _tool_spec("fit_explain")
+    schema = spec["inputSchema"]
+    assert schema["required"] == ["fit", "metric"]
+    assert "metric" in schema["properties"]
+    assert "enum" not in schema["properties"]["metric"], "metric 不许在 schema 里枚举"
+    depth = schema["properties"]["depth"]
+    assert depth["type"] == "integer"
+    assert depth["enum"] == [1, 2]
+    assert depth["default"] == 2
+    for name in mcp_server._COMMON_PARAMETERS:
+        assert name in schema["properties"]
+
+
+def test_fit_explain_returns_the_envelope_with_meta_triplet(eft_text: str) -> None:
+    """调一次 A 可加类：`content[0].text` 与 `structuredContent` 是同一份信封，带版本三元组。"""
+    result = _call("fit_explain", {"fit": eft_text, "metric": "survivability.ehp_mixed"})
+    assert result.get("isError") is not True, "成功调用不该带 isError"
+    envelope = _envelope(result)
+    assert envelope["ok"] is True
+    assert result["structuredContent"] == envelope
+    body = envelope["result"]
+    assert body["metric"] == "survivability.ehp_mixed"
+    assert body["combine"] == "additive"
+    assert body["sources"]
+    meta = envelope["meta"]
+    for key in ("spec_version", "engine_version", "sde_build"):
+        assert meta.get(key), f"信封 meta 缺版本三元组的 {key}"
+
+
+def test_fit_explain_all_three_classes_are_reachable_through_mcp(eft_text: str) -> None:
+    """A / B / C 三类指标都能从 MCP 表面取到（不是只有 api 能取）。"""
+    cases = (
+        ("survivability.ehp_mixed", "additive"),
+        ("mobility.speed_mps", "multiplicative"),
+        ("survivability.thinnest.armor.ehp", "multiplicative"),
+    )
+    for metric, combine in cases:
+        result = _call("fit_explain", {"fit": eft_text, "metric": metric})
+        envelope = _envelope(result)
+        assert envelope["ok"] is True, (metric, envelope.get("error"))
+        assert envelope["result"]["combine"] == combine, metric
+
+
+def test_fit_explain_depth_out_of_range_is_a_business_error(eft_text: str) -> None:
+    """`depth=3` → **成功响应** + `isError:true` + `invalid_argument`（不是 `-32602`）。"""
+    result = _call(
+        "fit_explain", {"fit": eft_text, "metric": "survivability.ehp_mixed", "depth": 3}
+    )
+    assert result["isError"] is True
+    envelope = _envelope(result)
+    assert envelope["ok"] is False
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["field"] == "depth"
+
+
+def test_fit_explain_unknown_metric_is_a_business_error_with_hint(eft_text: str) -> None:
+    """`metric="nope"` → `invalid_path` + `hint` 是当前登记表（agent 据此换参数）。"""
+    result = _call("fit_explain", {"fit": eft_text, "metric": "nope"})
+    assert result["isError"] is True
+    envelope = _envelope(result)
+    assert envelope["error"]["kind"] == "invalid_path"
+    assert envelope["error"]["hint"] == list(api.EXPLAIN_METRICS)
+
+
+def test_fit_explain_missing_or_non_string_metric_is_invalid_params() -> None:
+    """缺 `metric` / `metric` 不是字符串 → `-32602`（**参数形态**错，不是业务失败）。"""
+    response = _rpc(
+        "tools/call", {"name": "fit_explain", "arguments": {"fit": "[Hecate, x]"}}
+    )
+    assert response["error"]["code"] == mcp_server.INVALID_PARAMS
+    assert response["error"]["data"]["field"] == "metric"
+
+    response = _rpc(
+        "tools/call",
+        {"name": "fit_explain", "arguments": {"fit": "[Hecate, x]", "metric": 42}},
+    )
+    assert response["error"]["code"] == mcp_server.INVALID_PARAMS
+    assert response["error"]["data"]["field"] == "metric"
+
+
+# =============================================================================
+# 七、`fit_sensitivity`（第 10 个工具）：schema + combine 三态 + 两个参数的错误归属
+# =============================================================================
+
+
+def test_fit_sensitivity_schema_shape() -> None:
+    """`metric` 必填（不给 enum）；`ops` 是可选数组、`max_ops` 默认 32 且 `minimum=1`。"""
+    schema = _tool_spec("fit_sensitivity")["inputSchema"]
+    assert schema["required"] == ["fit", "metric"]
+    assert "enum" not in schema["properties"]["metric"], "metric 不许在 schema 里枚举"
+    ops = schema["properties"]["ops"]
+    assert ops["type"] == "array"
+    assert ops["items"]["properties"]["kind"]["enum"] == [
+        "disable_item",
+        "set_state",
+        "set_mode",
+    ]
+    assert ops["items"]["required"] == ["kind"]
+    max_ops = schema["properties"]["max_ops"]
+    assert max_ops["type"] == "integer" and max_ops["minimum"] == 1
+    assert max_ops["default"] == api.SENSITIVITY_MAX_OPS
+    for name in mcp_server._COMMON_PARAMETERS:
+        assert name in schema["properties"]
+
+
+def test_fit_sensitivity_roundtrip_returns_envelope(eft_text: str) -> None:
+    """调一次单值指标：`content[0].text` 与 `structuredContent` 同一份信封 + 版本三元组。"""
+    result = _call(
+        "fit_sensitivity", {"fit": eft_text, "metric": "resources.cpu.free", "max_ops": 3}
+    )
+    assert result.get("isError") is not True, "成功调用不该带 isError"
+    envelope = _envelope(result)
+    assert result["structuredContent"] == envelope
+    body = envelope["result"]
+    assert body["combine"] == "single"
+    assert body["changes"] and len(body["changes"]) == 3
+    for key in ("spec_version", "engine_version", "sde_build"):
+        assert envelope["meta"].get(key), f"信封 meta 缺版本三元组的 {key}"
+
+
+def test_fit_sensitivity_all_combine_values_are_reachable(eft_text: str) -> None:
+    """`combine` 的 `additive` / `multiplicative` / `single` 三种都能从 MCP 取到。"""
+    for metric, combine in (
+        ("survivability.ehp_mixed", "additive"),
+        ("mobility.speed_mps", "multiplicative"),
+        ("stability.capacitor.stable_pct", "single"),
+    ):
+        result = _call("fit_sensitivity", {"fit": eft_text, "metric": metric, "max_ops": 2})
+        envelope = _envelope(result)
+        assert envelope["ok"] is True, (metric, envelope.get("error"))
+        assert envelope["result"]["combine"] == combine, metric
+
+
+def test_fit_sensitivity_explicit_ops_are_forwarded(eft_text: str) -> None:
+    """MCP 侧给一条显式 op：只跑那一条（不是自动计划的 20 条）。"""
+    result = _call(
+        "fit_sensitivity",
+        {
+            "fit": eft_text,
+            "metric": "resources.cpu.free",
+            "ops": [{"kind": "disable_item", "item_index": 0}],
+        },
+    )
+    body = _envelope(result)["result"]
+    assert body["ops_planned"] == 1 and body["ops_executed"] == 1
+    assert body["changes"][0]["op"]["item_index"] == 0
+
+
+def test_fit_sensitivity_max_ops_out_of_range_is_a_business_error(eft_text: str) -> None:
+    """`max_ops=0` → 成功响应 + `isError:true` + `invalid_argument` + `field=max_ops`。"""
+    for value in (0, -3, "8"):
+        result = _call(
+            "fit_sensitivity", {"fit": eft_text, "metric": "resources.cpu.free", "max_ops": value}
+        )
+        assert result["isError"] is True, f"max_ops={value!r} 应是业务失败"
+        envelope = _envelope(result)
+        assert envelope["error"]["kind"] == "invalid_argument"
+        assert envelope["error"]["field"] == "max_ops"
+
+
+def test_fit_sensitivity_unknown_metric_is_a_business_error_with_hint(eft_text: str) -> None:
+    """`metric="nope"` → `invalid_path` + `hint` 是 14 个可用指标。"""
+    result = _call("fit_sensitivity", {"fit": eft_text, "metric": "nope"})
+    assert result["isError"] is True
+    envelope = _envelope(result)
+    assert envelope["error"]["kind"] == "invalid_path"
+    assert envelope["error"]["hint"] == list(api.SENSITIVITY_METRICS)
+
+
+def test_fit_sensitivity_missing_metric_is_invalid_params() -> None:
+    """缺 `metric` → `-32602`（参数形态错，不是业务失败）。"""
+    response = _rpc(
+        "tools/call", {"name": "fit_sensitivity", "arguments": {"fit": "[Hecate, x]"}}
+    )
+    assert response["error"]["code"] == mcp_server.INVALID_PARAMS
+    assert response["error"]["data"]["field"] == "metric"

@@ -271,6 +271,8 @@ python -c "from noobbaozi import mcp_server as m; print(m.INSTRUCTIONS); [print(
 | `fit_view` | 单视角全字段（L1）：overview / provenance / unknown_reasons / confidence / flags |
 | `fit_get` | 按路径精确取一个值 + 它的 provenance / reason |
 | `fit_detail` | 列表型明细（升级候选、逐模块电容、完整技能表 512 条） |
+| `fit_explain` | 归因链：这个数**为什么**是这个数（A 可加 / B 乘性 / C 投影，见 §4.10） |
+| `fit_sensitivity` | 灵敏度链：改一个输入（关模块 / 切状态 / 切模式）这个数会变多少（见 §4.11） |
 | `zkb_search` | 战报列表检索（先筛 killmail_id，再对那条调 `fit_killmail`）；**每行带受害者驾驶员 / 军团 / 联盟名字** |
 | `zkb_stats` | 实体画像（角色 / 公司 / 联盟）：战斗总量 + zkb 风格指标 + 7 天活动 + 6 类榜单；**公式未公开的指标只转述，不给威胁判词** |
 
@@ -285,6 +287,9 @@ python -c "from noobbaozi import mcp_server as m; print(m.INSTRUCTIONS); [print(
 | `skill_tier` | `all4+min_required` | `all4+min_required`、`all5` |
 | `damage_profile` | `uniform` | `uniform`（25/25/25/25） |
 | `state_policy` | `engine_default` | `engine_default` |
+
+`fit_explain` 还多一个自己的参数：`depth`（`1` / `2`，默认 `2`，见 §4.10）；
+`fit_sensitivity` 多两个：`ops`（数组，不给 = 自动计划）与 `max_ops`（默认 `32`，见 §4.11）。
 
 `fit` 是**字符串**：EFT 文本、DNA 字符串（`fitting:` 前缀可有可无）、killmail 的 JSON
 文本，或者 zkillboard / ESI 的 killmail 链接（后两种会联网）。字典 / 数组也接受
@@ -692,6 +697,108 @@ meta_level, cpu_free, power_free, calibration_free, fits, inherits?, blocked_by?
   `fits` 只看**增量**（候选自己新引入的违规），所以 `fits: true` 的行**可以**带 `inherits`
   —— 那是配装的老毛病，不是这个候选的锅（实测 f7 的无人机超限就落在这里，见 §4.6.1）。
 
+### 4.10 `fit_explain`：归因链（这个数**为什么**是这个数）
+
+`fit_explain(fit, metric, depth=2)`。`result` **就是** `project/explain.py` 的返回，
+接口层**不改形状、不裁剪、不取整**（唯一动作是深拷贝一份，见本节末）。
+
+**`metric` 是登记过的叶子指标，不是任意路径**（登记表 = `explain.supported_metrics()`，
+目前 9 个）：
+
+| 类 | `combine` | 指标 | 判据 |
+|---|---|---|---|
+| **A 可加** | `additive` | `survivability.ehp_mixed` / `firepower.dps.base` / `resources.cpu.load` / `resources.powergrid.load` | 引擎该属性的源**全是** `mod_add` / `mod_sub` |
+| **B 乘性** | `multiplicative` | `mobility.speed_mps` / `stability.capacitor.peak_recharge` | 源是 `pre_mul` / `post_mul` / `post_div` / `post_percent` |
+| **C 投影** | `multiplicative` | `survivability.thinnest.{shield,armor,hull}.ehp` | 投影层自己算，引擎**没有**这个属性 |
+
+**三类口径不许混**（混了验收立刻变永真或永假）：
+
+- **A 可加**：`Σ sources[].contribution == value`（另带 `sum_of_contributions`；`unexplained`
+  是真 0）。所以 `contribution` **必须**保持全精度 —— 舍入会立刻破坏这条加和判据。
+- **B 乘性**：给 `base` + **有序因子链**（`factor` / `operator` / `penalty`）+ `replayed` /
+  `replay_ok`。**因子不能相加** —— 这些行的 `contribution` 一律 `null`。注意 `factor` 是
+  **算子原始值**：`post_percent 586.45` 要按 `1 + 586.45/100` = ×6.8645 理解，`post_div`
+  是除数，`pre/post_mul` 还要按堆叠惩罚折算（CLI 人话出口印的是**折算后**的乘数）。
+- **C 投影**：`value = 层 HP ÷ 该层最大共振率`；`sources` 恒为**两项**（被除数 + 除数，
+  除数在 `factor` 里），并带 `formula` / `damage_type` / `tied`（四系并列时 `damage_type`
+  是 `null`、`tied: true`）。
+
+**`depth`**：`1` = 指标的直接贡献者；`2`（默认）= 每个贡献者**自己的**源再展开一层。
+超出 `1..2` → `invalid_argument` + `field="depth"`（**不是** `-32602`：换参数是业务侧的
+动作）。超过深度的节点 `children: []` + `truncated: true`，并计入 `truncated_nodes`。
+
+**`value` 是全精度**（`9102.577816172383` 这种），**不是 L1 的 3 位小数** —— 展示时自己
+舍入；判断「加起来对不对」必须用全精度。
+
+**`provenance` 与 `combine` 正交**：`ehp_mixed` / `dps.base` / `peak_recharge` 的三态都是
+`assumed`（它们映射负 ID 的 pass-4 派生值），但它们**可以是**可加的。别拿三态判断可加性。
+
+**体量**（`result` 紧凑 JSON，实测 f1）：`firepower.dps.base` **6.7 KB** / `resources.cpu.load`
+**6.3 KB**（源链最长），其余 1.7–3.1 KB。默认 `depth=2`。
+
+**错误口径**：
+
+| 情形 | `error.kind` | 带什么 |
+|---|---|---|
+| `metric` 不在登记表（含空串） | `invalid_path` | `path` + **`hint` = 当前登记表全集** |
+| `metric` 在表里、但本配装取不到值 | `invalid_path` | 同上（这一类指标对本配装不适用） |
+| `depth` ∉ 1..2（含 `true` / `"2"`） | `invalid_argument` | `field="depth"` + `hint=[1, 2]` |
+
+> **返回值已深拷贝**：`explain` 内部那个对象是**共享 LRU**（`sources=True` 2.95 ms/次，
+> 不该重复算）；若把引用直接递出去，调用方就地改一个字段就会污染下一次调用。接口层复制
+> 一份（6 KB 量级）把「只读」从口头约定变成结构保证；`api.clear_caches()` 也会**连
+> `explain` 的 LRU 一起清**（否则「改完实现测试仍绿」那个老坑会在归因入口重演）。
+
+### 4.11 `fit_sensitivity`：灵敏度链（改一个输入，这个数会变多少）
+
+`fit_sensitivity(fit, metric, ops=None, max_ops=32)`。`explain` 回答「这个数由什么构成」，
+它回答「**关掉那件 / 换个状态 / 换个模式**，这个数会变多少」—— 每个 op 都**重新进引擎
+算一遍**（实测 0.1–0.33 ms/次），不是算术推的。
+
+**`metric` 比 §4.10 宽 5 个**：`explain` 的 9 个 + 5 个**单值**指标
+（`stability.capacitor.{stable_pct,peak_load,capacity}` / `resources.cpu.free` /
+`resources.powergrid.free`）。这 5 个在返回里的 **`combine == "single"`** —— 第四种取值：
+既不是相加、也不是相乘，就是一个单值（别拿它去套 A/B/C 的判据）。
+
+**三种 op**（`ops=None` = 自动计划：每件已装模块 `disable_item` 一次 + 每个非当前模式
+`set_mode` 一次）：
+
+| `op.kind` | 语义 | 必填字段 |
+|---|---|---|
+| `disable_item` | 关掉第 N 件已装模块（`state = offline`，**不删件**） | `item_index` |
+| `set_state` | 把第 N 件设为 `offline` / `online` / `active` / `overload`（`off` 是别名） | `item_index` + `state` |
+| `set_mode` | T3C / T3D 模式切换 | `mode_id` |
+
+**返回形状**：`{metric, combine, baseline, changes[], warnings[], ops_planned,
+ops_executed, skipped, truncated, max_ops, provenance, tolerance}`；每条
+`changes[i] = {op: {kind, item_index|mode_id, label, state?/mode_name?}, value, delta,
+delta_pct, note}`。
+
+- **`delta = value - baseline`**（每位都成立，可自证）；`delta_pct = delta / baseline`
+  是**比例**（不是 0–100 的百分数），而且 **`baseline == 0` 时是 `null`** —— 不适用，
+  不是 0、也不是无限大；基线为**负**时百分比符号会反过来（看 `delta` 更直观）；
+- **`ops_planned` / `ops_executed` / `skipped` / `truncated` 是四个不同的数**：
+  计划了几个 / **真的跑出来几个**（变体算不出来、目标指标取不到的进 `warnings` 并跳过，
+  所以 `ops_executed ≤ ops_planned`）/ 空操作跳过了几个（已经是 offline、状态没变）/
+  是否被 `max_ops` 截断（截断时**另给一条** `truncated` warning，写明计划数与执行数）；
+- **坏 op 不是错误**：未知 `kind` / 越界 `item_index` / 货舱件 / 非法 `state` → 进
+  `warnings`（`invalid_op`）并跳过，其余 op 照跑（这是**数据问题**，不是参数问题）。
+
+**错误口径**：
+
+| 情形 | `error.kind` | 带什么 |
+|---|---|---|
+| `metric` 不在登记表（含空串） | `invalid_path` | `path` + **`hint` = 14 个可用指标** |
+| `metric` 在表里、但基线取不到 | `invalid_path` | 同上 |
+| `max_ops` 不是正整数（`0` / `-1` / `true` / `"8"`） | `invalid_argument` | `field="max_ops"` + `hint={min, default}` |
+
+**体量 / 耗时**（实测 f1，`max_ops=32` → 自动计划 20 个 op）：`result` 紧凑 JSON
+**3.7–4.3 KB**，单次 **46–157 ms**（首次数值含引擎预热）。所以按需给 `ops`、别在循环里
+对同一配装重复枚举——结果会进 api 的结果缓存（key 含 `metric`、规范化后的 `ops`、`max_ops`）。
+
+> **只给数值变化，不给判词**：返回里没有「该不该拆」的结论（红线：多视角、无判据）。
+> 拆不拆由用户按自己的目标决定 —— 同一个 `delta` 对「跑得动」和「打得多」意义不同。
+
 ## 5. 返回契约
 
 每个工具的结果是 `content: [{"type": "text", "text": "<JSON>"}]`，`text` 就是
@@ -756,7 +863,7 @@ meta_level, cpu_free, power_free, calibration_free, fits, inherits?, blocked_by?
     **不据此给威胁等级判词**；`solo_ratio` 是 0–100 百分数、`avg_gang_size` 是人/次均值，
     都不是比例；`gang_ratio + solo_ratio ≠ 100`。详见 §4.7。
 13. **`render_overview` 的体量预算（`BUDGET_CHARS`）是历史包袱，不是活路径**：
-    实测 MCP 的 8 个工具与 CLI **没有一处**调用它 —— L0 走 `render_index`、L1 走
+    实测 MCP 的**每一个**工具与 CLI **没有一处**调用它 —— L0 走 `render_index`、L1 走
     `render_view`、L2 走 `render_detail`。它现在只被测试与验收脚本（`acceptance/`）
     用作**回归基线**（2,860 字段全齐那条），并在 `docs/输出分层与工具集-v1.md` 里
     标为 deprecated。
