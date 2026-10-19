@@ -3714,3 +3714,310 @@ def test_fit_project_strict_state_guard_is_not_vacuous(
     assert broken["result"]["applied"]["buffs"] == [], (
         "变体没有生效？—— 恒 True 实现下 buffs 必须为空（这就是「断言会红」的证据）"
     )
+
+
+# =============================================================================
+# 二十四、交战数学（P6-B combat）：fit_engagement 的三个 mode / 三条边界 / 错误归属
+# =============================================================================
+#
+# 三条必须钉住的边界（写错了结论就是反的）：
+# 1. `hp_pool` 比战报、`ehp` 算击穿时间 —— 两个数用途不同；
+# 2. 未建模武器只给下界（coverage < 1 时击穿时间是上界）；
+# 3. `fleet` 是「同型 × 数量」的量级模型（带 fleet_assumption + order_of_magnitude_only）。
+
+ENGAGEMENT_ATTACKER_PATH = PROJECT_FIXTURES / "f1-hecate-killmail.eft"
+ENGAGEMENT_DEFENDER_PATH = PROJECT_FIXTURES / "f15-battleship-raven.json"
+ENGAGEMENT_EMPTY_EFT = "[Hecate, empty]\n"
+ENGAGEMENT_DISTANCE_M = 1000.0
+"""1 km：Hecate 的短程炮与 Raven 的导弹都能打中（20 km 上 Hecate 有效 DPS 是 0）。"""
+
+
+def _engagement_attacker() -> str:
+    return ENGAGEMENT_ATTACKER_PATH.read_text(encoding="utf-8")
+
+
+def _engagement_defender() -> str:
+    return ENGAGEMENT_DEFENDER_PATH.read_text(encoding="utf-8")
+
+
+def _engagement_side(result: dict, direction: str) -> dict:
+    return result[direction]
+
+
+def _survival_labels_ok(survival: dict) -> bool:
+    """两个血量口径「标对了吗」：用途说明各就各位，且数值不同（混用会把结论说错）。"""
+    hp_pool = survival.get("hp_pool") or {}
+    ehp = survival.get("ehp") or {}
+    return (
+        "damage_taken" in str(hp_pool.get("compare_with"))
+        and "击穿" in str(ehp.get("compare_with"))
+        and hp_pool.get("value") != ehp.get("value")
+    )
+
+
+def test_fit_engagement_three_modes_all_run() -> None:
+    """`exchange` / `timeline` / `anchor` 三种 mode 都能跑，且各自 `kind` 正确。"""
+    attacker, defender = _engagement_attacker(), _engagement_defender()
+
+    api.clear_caches()
+    exchange = api.fit_engagement(attacker, defender, distance_m=ENGAGEMENT_DISTANCE_M)
+    assert exchange["ok"] is True, exchange.get("error")
+    assert exchange["result"]["kind"] == "exchange"
+    assert exchange["meta"]["mode"] == "exchange"
+
+    api.clear_caches()
+    timeline = api.fit_engagement(
+        attacker, defender, distance_m=ENGAGEMENT_DISTANCE_M, mode="timeline", points=3
+    )
+    assert timeline["ok"] is True, timeline.get("error")
+    assert timeline["result"]["kind"] == "timeline"
+    assert len(timeline["result"]["samples"]) == 3
+
+    api.clear_caches()
+    anchor = api.fit_engagement(
+        attacker,
+        defender,
+        distance_m=ENGAGEMENT_DISTANCE_M,
+        mode="anchor",
+        observed_hp=500,
+        window_s=60,
+    )
+    assert anchor["ok"] is True, anchor.get("error")
+    assert anchor["result"]["kind"] == "anchor_check"
+    assert anchor["result"]["explainable"] is True, "Raven→Hecate 打 500 血在 60 s 内必须可解释"
+    assert anchor["result"]["reasons"] == [], "可解释时不该有 reasons"
+
+
+@pytest.mark.parametrize("distance", [None, "20km", -1, float("nan"), float("inf"), True])
+def test_fit_engagement_bad_distance_is_invalid_argument(distance: object) -> None:
+    """`distance_m` 缺失 / 非数 / 负数 / nan / inf / bool → `invalid_argument` + `field`。"""
+    api.clear_caches()
+    envelope = api.fit_engagement(
+        _engagement_attacker(), _engagement_defender(), distance_m=distance
+    )
+    assert envelope["ok"] is False, f"distance_m={distance!r} 不该成功"
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["field"] == "distance_m"
+
+
+def test_fit_engagement_unarmed_side_is_not_an_error() -> None:
+    """一方没有对敌武器 → **不是错误**：`ttk=null` + `no_weapons` 说明。"""
+    api.clear_caches()
+    envelope = api.fit_engagement(
+        ENGAGEMENT_EMPTY_EFT, _engagement_defender(), distance_m=ENGAGEMENT_DISTANCE_M
+    )
+    assert envelope["ok"] is True, envelope.get("error")
+    result = envelope["result"]
+    assert result["race"]["a_time_to_kill_s"] is None
+    assert "first_to_die" in result["race"]
+    flags = result["a_on_b"]["flags"]
+    assert any("no_weapons" in flag for flag in flags), f"缺少 no_weapons 说明：{flags}"
+    assert result["a_on_b"]["defender_survival"]["time_to_kill_s"]["value"] is None
+
+
+def test_fit_engagement_hp_pool_and_ehp_have_different_purposes() -> None:
+    """两个血量口径：值不同、用途说明各就各位（`hp_pool` 比战报、`ehp` 算击穿）。"""
+    api.clear_caches()
+    result = api.fit_engagement(
+        _engagement_attacker(), _engagement_defender(), distance_m=ENGAGEMENT_DISTANCE_M
+    )["result"]
+    for direction in ("a_on_b", "b_on_a"):
+        survival = _engagement_side(result, direction)["defender_survival"]
+        assert _survival_labels_ok(survival), f"{direction} 的两个血量口径标错了：{survival}"
+
+
+def test_fit_engagement_include_wrecking_changes_the_dps() -> None:
+    """`include_wrecking` 真的生效：True 的炮台有效 DPS **高于** False（×1.01505）。"""
+    attacker, defender = _engagement_attacker(), _engagement_defender()
+    api.clear_caches()
+    with_wrecking = api.fit_engagement(
+        attacker, defender, distance_m=ENGAGEMENT_DISTANCE_M, include_wrecking=True
+    )["result"]
+    api.clear_caches()
+    without = api.fit_engagement(
+        attacker, defender, distance_m=ENGAGEMENT_DISTANCE_M, include_wrecking=False
+    )["result"]
+    assert with_wrecking["a_on_b"]["totals"]["effective_dps"] > (
+        without["a_on_b"]["totals"]["effective_dps"]
+    )
+    assert with_wrecking["a_on_b"]["totals"]["effective_dps"] != (
+        without["a_on_b"]["totals"]["effective_dps"]
+    )
+
+
+def test_fit_engagement_fleet_carries_the_magnitude_disclaimer() -> None:
+    """编队必须带 `fleet_assumption` + `order_of_magnitude_only` + `fleet_note`。"""
+    api.clear_caches()
+    envelope = api.fit_engagement(
+        _engagement_attacker(),
+        _engagement_defender(),
+        distance_m=ENGAGEMENT_DISTANCE_M,
+        fleet=8,
+        window_s=9,
+        observed_hp=4158,
+    )
+    assert envelope["ok"] is True, envelope.get("error")
+    result = envelope["result"]
+    assert result["kind"] == "fleet_engagement"
+    assert result["fleet_assumption"] is True
+    assert result["fleet_note"], "必须给「量级模型，不是个体配装」的说明"
+    assert "order_of_magnitude_only" in result["flags"]
+    assert result["count"] == 8
+    assert "magnitude" in result["window"], "给了 observed_hp 就要带量级校验"
+
+
+def test_fit_engagement_fleet_rejected_for_other_modes() -> None:
+    """`fleet` 只在 exchange 下允许（timeline/anchor 下明确拒绝，不静默忽略）。"""
+    for mode in ("timeline", "anchor"):
+        api.clear_caches()
+        envelope = api.fit_engagement(
+            _engagement_attacker(),
+            _engagement_defender(),
+            distance_m=ENGAGEMENT_DISTANCE_M,
+            mode=mode,
+            fleet=4,
+            observed_hp=500,
+            window_s=60,
+        )
+        assert envelope["ok"] is False
+        assert envelope["error"]["kind"] == "invalid_argument"
+        assert envelope["error"]["field"] == "fleet"
+
+
+def test_fit_engagement_target_velocity_only_for_anchor_or_fleet() -> None:
+    """`target_velocity` 在 exchange/timeline 下给非 0 值 → `invalid_argument`（明确拒绝）。"""
+    api.clear_caches()
+    envelope = api.fit_engagement(
+        _engagement_attacker(),
+        _engagement_defender(),
+        distance_m=ENGAGEMENT_DISTANCE_M,
+        target_velocity=500.0,
+    )
+    assert envelope["ok"] is False
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["field"] == "target_velocity"
+
+
+def test_fit_engagement_bad_side_reports_which_one() -> None:
+    """攻/守任一侧解析失败 → `invalid_argument` + 对应 `field`（不混成同一个错）。"""
+    api.clear_caches()
+    bad_attacker = api.fit_engagement("这不是配装", _engagement_defender(), distance_m=1000)
+    assert bad_attacker["ok"] is False
+    assert bad_attacker["error"]["field"] == "attacker"
+    assert bad_attacker["error"]["cause"]["kind"] == "parse_failed"
+
+    api.clear_caches()
+    bad_defender = api.fit_engagement(_engagement_attacker(), "这不是配装", distance_m=1000)
+    assert bad_defender["ok"] is False
+    assert bad_defender["error"]["field"] == "defender"
+
+
+def test_fit_engagement_anchor_requires_observed_and_window() -> None:
+    """`mode=anchor` 缺 `observed_hp` / `window_s` → `invalid_argument` + `field`。"""
+    api.clear_caches()
+    envelope = api.fit_engagement(
+        _engagement_attacker(), _engagement_defender(), distance_m=1000, mode="anchor"
+    )
+    assert envelope["ok"] is False
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["field"] in ("observed_hp", "window_s")
+
+
+def test_fit_engagement_bad_mode_is_invalid_argument_with_hint() -> None:
+    """`mode` 不认识 → `invalid_argument` + `hint` = 三个可用值。"""
+    api.clear_caches()
+    envelope = api.fit_engagement(
+        _engagement_attacker(), _engagement_defender(), distance_m=1000, mode="nope"
+    )
+    assert envelope["ok"] is False
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["field"] == "mode"
+    assert envelope["error"]["hint"] == list(api.ENGAGEMENT_MODES)
+
+
+def test_fit_engagement_meta_carries_the_version_triplet_and_modes() -> None:
+    """信封 `meta`：版本三元组 + 攻方输入形态 + `mode` + 守方输入形态。"""
+    api.clear_caches()
+    envelope = api.fit_engagement(
+        _engagement_attacker(), _engagement_defender(), distance_m=1000
+    )
+    assert envelope["ok"] is True
+    meta = envelope["meta"]
+    for key in ("spec_version", "engine_version", "sde_build"):
+        assert meta.get(key), f"信封 meta 缺 {key}"
+    assert meta["mode"] == "exchange"
+    assert meta["source_format"] == "eft"
+    assert meta["defender_source_format"] == "killmail"
+
+
+def test_fit_engagement_cache_key_separates_mode() -> None:
+    """**不清缓存**连调两次（exchange / timeline）：缓存 key 必须含 mode，不能串味。"""
+    attacker, defender = _engagement_attacker(), _engagement_defender()
+    api.clear_caches()
+    exchange = api.fit_engagement(attacker, defender, distance_m=1000)["result"]
+    timeline = api.fit_engagement(attacker, defender, distance_m=1000, mode="timeline")["result"]
+    assert exchange["kind"] == "exchange"
+    assert timeline["kind"] == "timeline"
+
+
+def test_include_wrecking_guard_is_not_vacuous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**配对证明**：让 `turret_damage_multiplier` 忽略 `include_wrecking`，
+    上面那条「True 的 DPS 必须更高」的断言就会红。"""
+    real = api._combat.turret_damage_multiplier
+
+    def ignores(chance_to_hit, *, include_wrecking=True):  # type: ignore[no-untyped-def]
+        return real(chance_to_hit, include_wrecking=True)
+
+    attacker, defender = _engagement_attacker(), _engagement_defender()
+    api.clear_caches()
+    with_wrecking = api.fit_engagement(
+        attacker, defender, distance_m=ENGAGEMENT_DISTANCE_M, include_wrecking=True
+    )["result"]
+    api.clear_caches()
+    without = api.fit_engagement(
+        attacker, defender, distance_m=ENGAGEMENT_DISTANCE_M, include_wrecking=False
+    )["result"]
+    assert with_wrecking["a_on_b"]["totals"]["effective_dps"] > (
+        without["a_on_b"]["totals"]["effective_dps"]
+    ), "前提：正常实现下两者不同"
+
+    monkeypatch.setattr(api._combat, "turret_damage_multiplier", ignores)
+    api.clear_caches()
+    broken = api.fit_engagement(
+        attacker, defender, distance_m=ENGAGEMENT_DISTANCE_M, include_wrecking=False
+    )["result"]
+    assert broken["a_on_b"]["totals"]["effective_dps"] == (
+        with_wrecking["a_on_b"]["totals"]["effective_dps"]
+    ), "变体没生效？恒 include 实现下两者必须相等（这就是断言会红的证据）"
+
+
+def test_hp_pool_ehp_label_guard_is_not_vacuous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**配对证明**：把两个血量口径的用途说明互换，`_survival_labels_ok` 必须变 False。"""
+    real = api._combat._survival
+
+    def swapped(defender_ctx, effective_dps, coverage, flags):  # type: ignore[no-untyped-def]
+        out = real(defender_ctx, effective_dps, coverage, flags)
+        out["hp_pool"]["compare_with"], out["ehp"]["compare_with"] = (
+            out["ehp"]["compare_with"],
+            out["hp_pool"]["compare_with"],
+        )
+        return out
+
+    api.clear_caches()
+    good = api.fit_engagement(
+        _engagement_attacker(), _engagement_defender(), distance_m=ENGAGEMENT_DISTANCE_M
+    )["result"]
+    assert _survival_labels_ok(good["a_on_b"]["defender_survival"])
+
+    monkeypatch.setattr(api._combat, "_survival", swapped)
+    api.clear_caches()
+    broken = api.fit_engagement(
+        _engagement_attacker(), _engagement_defender(), distance_m=ENGAGEMENT_DISTANCE_M
+    )["result"]
+    assert not _survival_labels_ok(broken["a_on_b"]["defender_survival"]), (
+        "互换用途说明后守卫仍然通过 —— 那条断言是永真的"
+    )

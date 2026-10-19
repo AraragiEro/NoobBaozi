@@ -274,6 +274,7 @@ python -c "from noobbaozi import mcp_server as m; print(m.INSTRUCTIONS); [print(
 | `fit_explain` | 归因链：这个数**为什么**是这个数（A 可加 / B 乘性 / C 投影，见 §4.10） |
 | `fit_sensitivity` | 灵敏度链：改一个输入（关模块 / 切状态 / 切模式）这个数会变多少（见 §4.11） |
 | `fit_project` | 投射：一艘船**给**另一艘船什么（加成 / 遥修 / 负面）；**一给一**，不链式传递（见 §4.12） |
+| `fit_engagement` | 交战数学：A 打得动 B 吗（命中 / 有效 DPS / 击穿时间 / **编队量级**，见 §4.13） |
 | `zkb_search` | 战报列表检索（先筛 killmail_id，再对那条调 `fit_killmail`）；**每行带受害者驾驶员 / 军团 / 联盟名字** |
 | `zkb_stats` | 实体画像（角色 / 公司 / 联盟）：战斗总量 + zkb 风格指标 + 7 天活动 + 6 类榜单；**公式未公开的指标只转述，不给威胁判词** |
 
@@ -292,7 +293,9 @@ python -c "from noobbaozi import mcp_server as m; print(m.INSTRUCTIONS); [print(
 `fit_explain` 还多一个自己的参数：`depth`（`1` / `2`，默认 `2`，见 §4.10）；
 `fit_sensitivity` 多两个：`ops`（数组，不给 = 自动计划）与 `max_ops`（默认 `32`，见 §4.11）；
 `fit_project` 用 **`target`** 而不是 `fit`，并多四个：`sources` / `effects` / `buffs` /
-`strict_state`（见 §4.12）。
+`strict_state`（见 §4.12）；
+`fit_engagement` 用 **`attacker` + `defender`**（两个配装输入）、必填 `distance_m`，另有
+`mode` / `fleet` / `observed_hp` / `window_s` / `duration_s` / `points`（见 §4.13）。
 
 `fit` 是**字符串**：EFT 文本、DNA 字符串（`fitting:` 前缀可有可无）、killmail 的 JSON
 文本，或者 zkillboard / ESI 的 killmail 链接（后两种会联网）。字典 / 数组也接受
@@ -902,6 +905,65 @@ warnings[]}`。
 
 > **不做**：命中率 / 有效 DPS（交战数学另模块）、距离 / 视线 / 持续时间 / 叠加上限（引擎
 > 本来就没有这些维度）、「该不该这么配」的判词。
+
+### 4.13 `fit_engagement`：交战数学（A 打得动 B 吗）
+
+`fit_engagement(attacker, defender, *, distance_m, angular_velocity=0, target_velocity=0,
+include_wrecking=True, mode="exchange", fleet=None, observed_hp=None, window_s=None,
+duration_s=None, points=6)`。**`distance_m` 必填** —— 距离与角速度是**输入**，本层不做
+几何假设（不做「中心到中心」那种假设）。
+
+**三个 `mode`**：
+
+| `mode` | 调什么 | 回答什么 |
+|---|---|---|
+| `exchange`（默认） | `combat.exchange` | A ↔ B 双向换血：各自有效 DPS + 击穿时间 + **谁先死** |
+| `timeline` | `combat.timeline` | 双方同时开火、按有效 DPS **线性扣血**的采样（`points` 至少 2） |
+| `anchor` | `combat.explain_anchor` | **战报锚点**：能否在 `window_s` 内打出 `observed_hp`（需同时给这两个） |
+
+**三条必须记住的边界**：
+
+1. **`hp_pool` 用来和战报比，`ehp` 用来算击穿时间 —— 两个数用途不同**。每个单方向结果里
+   两者都有，并各带 `compare_with` 说明：`hp_pool`（盾+甲+结构 HP，与战报 `damage_taken`
+   同量纲）vs `ehp`（引擎 `-43` 的原始伤害口径，`ttk = ehp ÷ 有效 DPS`）。
+   拿 `ehp` 去比 `damage_taken` 会得出「战报只打掉 16%」这种错结论。
+2. **未建模的武器只给下界**。已建模：炮台（hybrid/laser/projectile，命中率 + 伤害倍率）、
+   导弹（应用系数）。未建模：无人机 / 舰载机 / 智能炸弹 / 分解器等 → 该件 `status:
+   "unsupported"` + `lower_bound_dps`（名义 DPS 的完美应用值，**不猜**）；
+   `totals.coverage < 1` 时 `time_to_kill_s` 是**上界**（少算武器 → 击穿时间偏长）。
+3. **`fleet=N` 是「同型 × 数量」的量级模型，不是个体配装**。响应带
+   `fleet_assumption: true` + `fleet_note` + flag `order_of_magnitude_only`；
+   真实编队不可能全同型，所以它**不可用于精确对拍**，只做量级校验（`magnitude_check`，
+   判据是预测/观察落在 [1/10, 10]）。数量来源：`fleet=N` 或 `{"count": N}` /
+   `{"killmail_attackers": fit_killmail(...)["attackers"]}` —— **不手填、不猜**。
+
+**战报锚点（`mode="anchor"`）怎么读**：
+
+- `explainable`：是否存在**某个几何格**能在窗口内打出这么多血（`region` 是格子列表）；
+  `false` 时看 `reasons`（含「窗口内最多只能打掉 X 点、最短需要 Y 秒」）；
+- `best`：需要时间最短的那一格（`range_m` / `angular_vel` / `window_needed_s`）；
+- **参数是扫描变量，不是拟合变量** —— 没有任何数被调过让锚点对上；
+- `caveats` 永远存在：血量口径是**扣掉的血**（不是 EHP）、护盾被动回充与遥修未建模、
+  技能按 `all4+min_required` 假设、攻方有 unsupported 武器时覆盖率 < 1；
+- **窗口 ≠ 交战时长**：战报里的「9 秒」可能是两次死亡的**间隔**，实际开打时刻不可知。
+
+**错误归属**：
+
+| 情形 | `error.kind` | 带什么 |
+|---|---|---|
+| `distance_m` 缺失 / 非数 / 负数 / nan / inf | `invalid_argument` | `field="distance_m"` |
+| `attacker` / `defender` 解析失败 | `invalid_argument` | `field="attacker"` / `"defender"` + `cause` |
+| `mode` 不认识 / `fleet` 形态不对 / `anchor` 缺 `observed_hp` 或 `window_s` | `invalid_argument` | `field` + `hint` |
+| `target_velocity` 在 `exchange`/`timeline` 下给非 0 值 | `invalid_argument` | `field="target_velocity"`（那两条按双方 maxVelocity 自动填，**明确拒绝 > 静默忽略**） |
+| **一方没有对敌武器** | **不是错误** | `ttk=null` + `flags: ["no_weapons: …"]`，人话出口印「无对敌武器，无法对算」 |
+
+**成本 / 体量**（实测 Hecate ↔ Raven @1 km）：`exchange` 端到端 **15–57 ms**（含两次
+归一化；首次含引擎预热），缓存命中 **≈0.2 ms**；`result` 紧凑 JSON **≈11.4 KB**
+（`exchange` 最大，因为两侧各有一份完整单方向结果）；`timeline` ≈1 KB、`anchor` ≈0.7 KB、
+`fleet` ≈1.5 KB。
+
+> **不做**：电容 / 距离控制 / 后勤 / 跑位几何 / 有效 DPS 之外的命中率场景；不判「该不该
+> 打」（那是人的决定，本层只给数）。
 
 ## 5. 返回契约
 

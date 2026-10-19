@@ -951,3 +951,60 @@ def test_fit_project_business_errors_survive_http(http_server: str) -> None:
     assert call_result["isError"] is True
     assert envelope["error"]["kind"] == "invalid_argument"
     assert envelope["error"]["field"] == "strict_state"
+
+
+# =============================================================================
+# 九、`fit_engagement` 走完整 HTTP 线：成功信封 + 业务失败（不是 4xx/5xx）
+# =============================================================================
+
+
+def test_fit_engagement_roundtrip_over_http(http_server: str) -> None:
+    """交战经 `/mcp` 回来：两个血量口径都在、`mode` 回显、`structuredContent` 同一份。"""
+    fixtures = NOOBBAOZI_ROOT / "acceptance" / "fixtures"
+    attacker = (fixtures / "f1-hecate-killmail.eft").read_text(encoding="utf-8")
+    defender = (fixtures / "f15-battleship-raven.json").read_text(encoding="utf-8")
+    session = _initialize(http_server)[2]
+    call_result, envelope = _call(
+        http_server,
+        "fit_engagement",
+        {"attacker": attacker, "defender": defender, "distance_m": 1000},
+        session=session,
+        request_id=131,
+    )
+    assert call_result.get("isError") is not True, "成功调用不该带 isError"
+    assert envelope["ok"] is True, envelope.get("error")
+    body = envelope["result"]
+    assert body["kind"] == "exchange"
+    assert envelope["meta"]["mode"] == "exchange"
+    survival = body["a_on_b"]["defender_survival"]
+    assert survival["hp_pool"]["value"] != survival["ehp"]["value"]
+    assert call_result["structuredContent"] == envelope
+
+
+def test_fit_engagement_business_errors_survive_http(http_server: str) -> None:
+    """坏 `distance_m` / 坏守方走 HTTP 仍是 `isError:true` 的业务失败。"""
+    fixtures = NOOBBAOZI_ROOT / "acceptance" / "fixtures"
+    attacker = (fixtures / "f1-hecate-killmail.eft").read_text(encoding="utf-8")
+    session = _initialize(http_server)[2]
+
+    call_result, envelope = _call(
+        http_server,
+        "fit_engagement",
+        {"attacker": attacker, "defender": attacker},
+        session=session,
+        request_id=132,
+    )
+    assert call_result["isError"] is True
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["field"] == "distance_m"
+
+    call_result, envelope = _call(
+        http_server,
+        "fit_engagement",
+        {"attacker": attacker, "defender": "这不是配装", "distance_m": 1000},
+        session=session,
+        request_id=133,
+    )
+    assert call_result["isError"] is True
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["field"] == "defender"

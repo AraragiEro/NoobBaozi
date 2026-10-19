@@ -134,6 +134,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "fit_explain",
     "fit_sensitivity",
     "fit_project",
+    "fit_engagement",
     "zkb_search",
     "zkb_stats",
 )
@@ -148,8 +149,9 @@ TOOL_NAMES: tuple[str, ...] = (
 4. `fit_explain` —— 某个数「为什么是这个数」（归因链，A 可加 / B 乘性 / C 投影）；
 5. `fit_sensitivity` —— 改一个输入（关模块 / 切状态 / 切模式），这个数会变多少；
 6. `fit_project` —— 一艘船**给**另一艘船什么（加成 / 遥修 / 负面），一给一；
-7. `zkb_search` —— 先按条件筛出 `killmail_id`，再回头对具体那条用 `fit_killmail`；
-8. `zkb_stats` —— 看一个实体（角色 / 公司 / 联盟）的画像：值不值得往下翻战报。
+7. `fit_engagement` —— A 打 B 打得动吗（命中 / 有效 DPS / 击穿时间 / 编队量级）；
+8. `zkb_search` —— 先按条件筛出 `killmail_id`，再回头对具体那条用 `fit_killmail`；
+9. `zkb_stats` —— 看一个实体（角色 / 公司 / 联盟）的画像：值不值得往下翻战报。
 
 加工具的正确姿势：往这个元组里加一个名字、在 `_HANDLERS` 里加实现、在
 `_TOOL_DESCRIPTIONS` 里加文案、(必要时) 在 `_schema_for()` 里加 schema ——
@@ -604,6 +606,48 @@ def _project_options(arguments: dict) -> dict:
     return params
 
 
+def _tool_fit_engagement(arguments: dict) -> dict:
+    """`fit_engagement` → `api.fit_engagement()`（`attacker` / `defender` / `distance_m` 必填）。
+
+    本层只挡类型（两个配装参数走 `_fit_argument`），其余全部交给 `api`：
+    `distance_m` 缺失/非数 → `invalid_argument`；`mode` 不认识 → `invalid_argument`；
+    **一方无武器不是错误**（`ttk=null` + `no_weapons`）。
+    """
+    return _api().fit_engagement(
+        _fit_argument(arguments, "attacker"),
+        _fit_argument(arguments, "defender"),
+        **_engagement_options(arguments),
+        **_common_arguments(arguments),
+    )
+
+
+_ENGAGEMENT_OPTION_KEYS: tuple[str, ...] = (
+    "distance_m",
+    "angular_velocity",
+    "target_velocity",
+    "include_wrecking",
+    "mode",
+    "fleet",
+    "observed_hp",
+    "window_s",
+    "duration_s",
+    "points",
+)
+"""`fit_engagement` 的可选参数（**只搬值**，合法性与归属全在 api 层）。
+
+保留 `False` / `0`：`include_wrecking=False` 与 `distance_m=0` 都是有效输入，
+不能按真假过滤（只滤 `None`）。
+"""
+
+
+def _engagement_options(arguments: dict) -> dict:
+    return {
+        key: arguments[key]
+        for key in _ENGAGEMENT_OPTION_KEYS
+        if key in arguments and arguments[key] is not None
+    }
+
+
 _ZKB_INJECTION_KEYS: tuple[str, ...] = ("requester", "clock", "sleeper")
 """`api.zkb_search` 的三个**测试注入点**：MCP 层不转发（客户端不该能塞一个请求替身）。"""
 
@@ -648,6 +692,7 @@ _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "fit_explain": _tool_fit_explain,
     "fit_sensitivity": _tool_fit_sensitivity,
     "fit_project": _tool_fit_project,
+    "fit_engagement": _tool_fit_engagement,
     "zkb_search": _tool_zkb_search,
     "zkb_stats": _tool_zkb_stats,
 }
@@ -769,6 +814,18 @@ _TOOL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
         "false = 引擎原样；两种都会给 warning 说明差异。"
         "限制：不判「该不该这么配」；未知 effect_id 给 warning 不报错；目标非法也照给数值；"
         "sources[i] 解析失败是 invalid_argument（带 index）。",
+    ),
+    "fit_engagement": (
+        "交战数学：A 打得动 B 吗（命中 / 有效 DPS / 击穿时间）",
+        "想知道「这套打得动他吗、几秒能打穿」时用它：返回命中率 / 伤害应用系数 / 有效 DPS、"
+        "守方两个血量口径、击穿时间与双向换血比。"
+        "**hp_pool 用来和战报 damage_taken 比，ehp 用来算击穿时间** —— 两个数用途不同，别混。"
+        "mode：exchange（双向换血，默认）/ timeline（线性时间线）/ anchor（战报锚点：能否在"
+        "窗口内打出观察血量）。fleet=N 走「同型 × 数量」的**量级模型**（带 fleet_assumption + "
+        "order_of_magnitude_only），不是个体配装。"
+        "限制：只建模炮台与导弹，其它武器给**下界**（unsupported + lower_bound；coverage<1 时"
+        "击穿时间是上界）；distance_m 必填、角速度由调用方给；一方无对敌武器不是错误"
+        "（ttk=null + no_weapons，无法对算）。",
     ),
     "zkb_search": (
         "战报列表检索（谁在打谁 / 最近损失了什么）",
@@ -1169,6 +1226,107 @@ def _project_input_schema() -> dict:
     }
 
 
+def _engagement_input_schema() -> dict:
+    """`fit_engagement` 的 `inputSchema`：两个配装输入 + 必填 `distance_m` + 交战参数。
+
+    `attacker` / `defender` 与其它工具的 `fit` 是**同一套四形态**（只是键名不同）。
+    `fleet` 用 `anyOf`（正整数 = 数量；对象 = `{count}` / `{killmail_attackers}`）。
+    """
+    properties = _common_properties()
+    properties.pop("fit", None)  # 这个工具有两个配装输入：attacker / defender
+    fit_description = (
+        "（四形态：EFT 文本 / DNA / killmail JSON / zkillboard·ESI 链接）"
+    )
+    properties["attacker"] = {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": MAX_FIT_CHARS,
+        "description": "攻方配装" + fit_description,
+    }
+    properties["defender"] = {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": MAX_FIT_CHARS,
+        "description": "守方配装" + fit_description,
+    }
+    properties["distance_m"] = {
+        "type": "number",
+        "minimum": 0,
+        "description": (
+            "**必填**：面到面距离（m）。距离与角速度是**输入** —— 本层不复刻几何假设；"
+            "近距离（≤ 炮台最佳射程）才谈得上命中"
+        ),
+    }
+    properties["angular_velocity"] = {
+        "type": "number",
+        "minimum": 0,
+        "default": 0,
+        "description": "角速度（rad/s）。0 是乐观上界（迎头/静止）",
+    }
+    properties["target_velocity"] = {
+        "type": "number",
+        "minimum": 0,
+        "default": 0,
+        "description": (
+            "守方绝对速度（m/s）。**只对 anchor / fleet 生效**：exchange/timeline 按双方 "
+            "maxVelocity 自动填（在那两个 mode 给非 0 值会 invalid_argument）"
+        ),
+    }
+    properties["include_wrecking"] = {
+        "type": "boolean",
+        "default": True,
+        "description": (
+            "炮台伤害是否含 wrecking（默认 true，与 pyfa 一致）；false 归一到纸面口径"
+            "（完美应用 = 1.0）"
+        ),
+    }
+    properties["mode"] = {
+        "type": "string",
+        "enum": list(_api().ENGAGEMENT_MODES),
+        "default": _api().ENGAGEMENT_MODE_EXCHANGE,
+        "description": (
+            "exchange = 双向换血比（默认）；timeline = 线性时间线；anchor = 战报锚点"
+            "（能否在 window_s 内打出 observed_hp，需同时给这两个）"
+        ),
+    }
+    properties["fleet"] = {
+        "anyOf": [
+            {"type": "integer", "minimum": 1},
+            {"type": "object"},
+        ],
+        "description": (
+            "编队量级：正整数，或 {count:N} / {killmail_attackers: fit_killmail().attackers}。"
+            "**只在 mode=exchange 下允许**；结果是「同型 × 数量」的量级模型，不是个体配装"
+        ),
+    }
+    properties["observed_hp"] = {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "description": "战报里**扣掉的血**（damage_taken）。mode=anchor 必填；fleet 下可选（做量级校验）",
+    }
+    properties["window_s"] = {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "description": "时间窗（秒）。mode=anchor 必填；fleet 下可选",
+    }
+    properties["duration_s"] = {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "description": "timeline 的时间窗（秒）；不给 = 最长击穿时间",
+    }
+    properties["points"] = {
+        "type": "integer",
+        "minimum": 2,
+        "default": 6,
+        "description": "timeline 的采样点数（至少 2）",
+    }
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": ["attacker", "defender", "distance_m"],
+    }
+
+
 def _schema_for(name: str) -> dict:
     """工具 → `inputSchema`（`zkb_search` / `zkb_stats` 不是配装工具，各走自己那一套）。"""
     if name == "zkb_search":
@@ -1181,6 +1339,8 @@ def _schema_for(name: str) -> dict:
         return _sensitivity_input_schema()
     if name == "fit_project":
         return _project_input_schema()
+    if name == "fit_engagement":
+        return _engagement_input_schema()
     return _input_schema(
         view={"fit_view": "required", "fit_detail": "optional"}.get(name, "none"),
         path={"fit_get": "required", "fit_detail": "optional"}.get(name, "none"),
@@ -1225,15 +1385,16 @@ def _build_tool_specs() -> tuple[dict, ...]:
 INSTRUCTIONS: str = (
     "noobbaozi 配装分析（EVE Online）。按这个顺序用：\n"
     "① fit_parse 先确认读懂了；\n"
-    "② fit_killmail 战报上下文（价值 / 参战方 / 伤害）；\n"
+    "② fit_killmail 战报上下文；\n"
     "③ fit_index 默认入口：六维度摘要 + flags；\n"
     "④ fit_view 展开可疑维度；⑤ fit_get 只取一个数（带 provenance）；\n"
     "⑥ fit_detail 深挖，返回很大，按需；\n"
-    "⑦ fit_explain 归因：某个数为什么这么大（可加类：各项之和 == value；乘性因子不能相加）；\n"
-    "⑧ fit_sensitivity 灵敏度：改一个输入看指标变多少（关件 / 切状态 / 切模式）；\n"
+    "⑦ fit_explain 归因：某个数为什么这么大；\n"
+    "⑧ fit_sensitivity 灵敏度：改一个输入看指标变多少；\n"
     "⑨ fit_project 投射：一艘船给另一艘船什么（一给一，不链式传递）；\n"
-    "⑩ zkb_search 先找战报：筛 killmail_id 再回 ②。\n"
-    "⑪ zkb_stats 先看实体画像：再决定用⑩翻哪些战报。\n"
+    "⑩ fit_engagement 交战：命中 / 有效 DPS / 击穿时间 / 编队量级；\n"
+    "⑪ zkb_search 先找战报：筛 killmail_id 再回 ②。\n"
+    "⑫ zkb_stats 先看实体画像：再决定用⑪翻哪些战报。\n"
     "三条判读纪律：\n"
     "1) unknown 不是 0：provenance=unknown 别用常识补数，看 unknown_reasons"
     "（not_applicable=本配装不适用、不是「不知道」；input_incomplete=输入不足；"

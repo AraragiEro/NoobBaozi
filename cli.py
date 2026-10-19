@@ -840,6 +840,225 @@ def _human_project(result: dict, _meta: dict) -> str:
     return "\n".join(lines)
 
 
+_ENGAGEMENT_ROWS: int = 8
+"""`engagement` 人话摘要里最多铺几行（时间线采样 / 锚点格子）。"""
+
+
+def _ship_of(block: object) -> str:
+    """`{label, ship:{type_id,name}}` → 人能读的船名（缺名字给 type_id，不编）。"""
+    if not isinstance(block, dict):
+        return "?"
+    ship = block.get("ship") if isinstance(block.get("ship"), dict) else {}
+    name = ship.get("name")
+    if name:
+        return str(name)
+    type_id = ship.get("type_id")
+    return f"type_id={type_id}" if type_id is not None else "?"
+
+
+def _engagement_direction(side: object) -> str:
+    """单方向结果 → `命中 … · 应用 … · 有效 … dps` 一行。"""
+    if not isinstance(side, dict):
+        return "?"
+    totals = side.get("totals") if isinstance(side.get("totals"), dict) else {}
+    chance = totals.get("weighted_chance_to_hit")
+    dps = totals.get("effective_dps")
+    nominal = totals.get("nominal_dps")
+    coverage = totals.get("coverage")
+    if chance is None:
+        hit = "命中 -"
+    else:
+        hit = f"命中 {_num(chance, 4)}"
+    applied = ""
+    if (
+        isinstance(nominal, (int, float))
+        and isinstance(dps, (int, float))
+        and not isinstance(nominal, bool)
+        and nominal > 0.0
+    ):
+        applied = f" · 应用 {_num(dps / nominal, 4)}（= 有效 ÷ 名义）"
+    return (
+        f"{hit}{applied} · 有效 {_num(dps)} / 名义 {_num(nominal)} dps"
+        f"（coverage {_num(coverage)}，"
+        f"{totals.get('supported_weapon_count')}/{totals.get('weapon_count')} 件已建模）"
+    )
+
+
+def _human_engagement(result: dict, _meta: dict) -> str:
+    """`engagement` 人话：按 `kind` 分派（exchange / timeline / anchor_check / fleet）。"""
+    kind = result.get("kind")
+    if kind == "fleet_engagement":
+        return _human_engagement_fleet(result)
+    if kind == "timeline":
+        return _human_engagement_timeline(result)
+    if kind == "anchor_check":
+        return _human_engagement_anchor(result)
+    return _human_engagement_exchange(result)
+
+
+def _human_engagement_exchange(result: dict) -> str:
+    """双向换血：**三块分开印**（应用 / 两个血量口径 / 击穿与谁先死）。
+
+    第三块必须把「无对敌武器」单独说出来：那时 `time_to_kill_s` 是 `null`，直接把
+    `null` 读成 0 或「秒杀」都是错的。
+    """
+    inputs = result.get("inputs") if isinstance(result.get("inputs"), dict) else {}
+    a_on_b = result.get("a_on_b") if isinstance(result.get("a_on_b"), dict) else {}
+    b_on_a = result.get("b_on_a") if isinstance(result.get("b_on_a"), dict) else {}
+    a_name = _ship_of(a_on_b.get("attacker"))
+    b_name = _ship_of(a_on_b.get("defender"))
+    lines = [
+        f"{a_name} ↔ {b_name} @ {_num(inputs.get('range_m'))} m"
+        f" · angular={_num(inputs.get('angular_vel'), 6)} rad/s"
+        f" · wrecking={inputs.get('include_wrecking')}"
+    ]
+
+    lines.append("【命中率 / 应用系数 / 有效 DPS】")
+    lines.append(f"{_INDENT}{a_name}→{b_name}：{_engagement_direction(a_on_b)}")
+    lines.append(f"{_INDENT}{b_name}→{a_name}：{_engagement_direction(b_on_a)}")
+
+    lines.append("【HP 池 vs EHP（用途不同，别混）】")
+    for name, side in ((b_name, a_on_b), (a_name, b_on_a)):
+        survival = side.get("defender_survival") if isinstance(side.get("defender_survival"), dict) else {}
+        hp_pool = survival.get("hp_pool") if isinstance(survival.get("hp_pool"), dict) else {}
+        ehp = survival.get("ehp") if isinstance(survival.get("ehp"), dict) else {}
+        lines.append(
+            f"{_INDENT}{name}：hp_pool {_num(hp_pool.get('value'))} hp"
+            f"（{hp_pool.get('compare_with') or '战报 damage_taken 口径'}）"
+            f" · ehp {_num(ehp.get('value'))} hp"
+            f"（{ehp.get('compare_with') or '击穿时间口径'}）"
+        )
+
+    lines.append("【击穿时间 / 谁先死】")
+    race = result.get("race") if isinstance(result.get("race"), dict) else {}
+    a_ttk = race.get("a_time_to_kill_s")
+    b_ttk = race.get("b_time_to_kill_s")
+    if isinstance(a_ttk, (int, float)) and isinstance(b_ttk, (int, float)):
+        lines.append(
+            f"{_INDENT}{a_name}→{b_name} 需 {_num(a_ttk)} s；"
+            f"{b_name}→{a_name} 需 {_num(b_ttk)} s"
+        )
+        first = race.get("first_to_die")
+        if first == "a":
+            lines.append(f"{_INDENT}→ {a_name} 先死（比例 {_num(race.get('ratio_a_over_b'))}）")
+        elif first == "b":
+            lines.append(f"{_INDENT}→ {b_name} 先死（比例 {_num(race.get('ratio_a_over_b'))}）")
+        elif first == "even":
+            lines.append(f"{_INDENT}→ 同时死（比例 1.0）")
+        else:
+            lines.append(f"{_INDENT}→ 无法判定谁先死（比例 {_num(race.get('ratio_a_over_b'))}）")
+    else:
+        dead = a_name if a_ttk is None else b_name
+        alive = b_name if a_ttk is None else a_name
+        lines.append(
+            f"{_INDENT}{dead} 无对敌武器，无法对算"
+            f"（该方向 ttk=null）；{alive} 单方面打穿需 "
+            f"{_num(b_ttk if a_ttk is None else a_ttk)} s"
+        )
+    flags = result.get("a_on_b", {}).get("flags") or []
+    for flag in flags:
+        lines.append(f"{_INDENT}flag: {flag}")
+    return "\n".join(lines)
+
+
+def _human_engagement_timeline(result: dict) -> str:
+    """时间线：速率 + 端点 + 采样（线性扣血模型）。"""
+    inputs = result.get("inputs") if isinstance(result.get("inputs"), dict) else {}
+    rates = result.get("rates") if isinstance(result.get("rates"), dict) else {}
+    endpoints = result.get("endpoints") if isinstance(result.get("endpoints"), dict) else {}
+    lines = [
+        f"时间线：horizon {_num(inputs.get('horizon_s'))} s"
+        f" · A→B {_num(rates.get('a_dps_on_b'))} dps / B→A {_num(rates.get('b_dps_on_a'))} dps"
+    ]
+    lines.append(
+        f"{_INDENT}A 死于 {_num(endpoints.get('a_dies_at_s'))} s"
+        f" · B 死于 {_num(endpoints.get('b_dies_at_s'))} s"
+        f" · first_to_die={endpoints.get('first_to_die')}"
+    )
+    samples = result.get("samples") if isinstance(result.get("samples"), list) else []
+    for sample in samples[:_ENGAGEMENT_ROWS]:
+        if not isinstance(sample, dict):
+            continue
+        lines.append(
+            f"{_INDENT}t={_num(sample.get('t_s'))}s · A 剩 {_num(sample.get('a_hp_fraction'), 3)}"
+            f" / B 剩 {_num(sample.get('b_hp_fraction'), 3)}（按 EHP 比例）"
+        )
+    if len(samples) > _ENGAGEMENT_ROWS:
+        lines.append(f"{_INDENT}…还有 {len(samples) - _ENGAGEMENT_ROWS} 个采样点（--json 取全量）")
+    assumptions = result.get("assumptions")
+    if isinstance(assumptions, dict):
+        lines.append(f"{_INDENT}模型：{assumptions.get('model')}")
+    return "\n".join(lines)
+
+
+def _human_engagement_anchor(result: dict) -> str:
+    """战报锚点：能不能解释 + 最优格 + 原因 + 限制（不拟合，只回答存在性）。"""
+    lines = [
+        f"战报锚点：observed {_num(result.get('observed_hp'))} hp / 窗口 "
+        f"{_num(result.get('window_s'))} s（需要 {_num(result.get('required_hp_dps'))} hp/s）"
+    ]
+    lines.append(
+        f"{_INDENT}可解释：{result.get('explainable')} · 满足窗口的格子 "
+        f"{result.get('region_count')} 个 · 窗口内最多打掉 "
+        f"{_num(result.get('max_hp_removed_in_window'))} hp"
+    )
+    best = result.get("best")
+    if isinstance(best, dict):
+        lines.append(
+            f"{_INDENT}最优格：range={_num(best.get('range_m'))} m · "
+            f"angular={_num(best.get('angular_vel'), 6)} rad/s · 需要 "
+            f"{_num(best.get('window_needed_s'))} s"
+        )
+    reasons = result.get("reasons") or []
+    if reasons:
+        lines.append(f"{_INDENT}原因：")
+        for reason in reasons[:_ENGAGEMENT_ROWS]:
+            lines.append(f"{_INDENT * 2}- {reason}")
+    caveats = result.get("caveats") or []
+    if caveats:
+        lines.append(f"{_INDENT}限制（永远存在，别当 bug）：")
+        for caveat in caveats[:_ENGAGEMENT_ROWS]:
+            lines.append(f"{_INDENT * 2}- {caveat}")
+    return "\n".join(lines)
+
+
+def _human_engagement_fleet(result: dict) -> str:
+    """编队量级：**先声明这是量级模型**，再给单船 → 编队 → 击穿/窗口。"""
+    lines = [
+        f"编队量级：同型 × {result.get('count')} · 量级估计，不是个体配装"
+    ]
+    note = result.get("fleet_note")
+    if note:
+        lines.append(f"{_INDENT}{note}")
+    single = result.get("single") if isinstance(result.get("single"), dict) else {}
+    totals = result.get("totals") if isinstance(result.get("totals"), dict) else {}
+    lines.append(
+        f"{_INDENT}单船有效 {_num(single.get('effective_dps'))} dps → 编队 "
+        f"{_num(totals.get('fleet_effective_dps'))} dps"
+        f"（名义 {_num(totals.get('fleet_nominal_dps'))}，coverage {_num(totals.get('coverage'))}）"
+    )
+    survival = result.get("defender_survival") if isinstance(result.get("defender_survival"), dict) else {}
+    hp_pool = survival.get("hp_pool") if isinstance(survival.get("hp_pool"), dict) else {}
+    ehp = survival.get("ehp") if isinstance(survival.get("ehp"), dict) else {}
+    lines.append(
+        f"{_INDENT}守方：hp_pool {_num(hp_pool.get('value'))} hp（战报口径）· "
+        f"ehp {_num(ehp.get('value'))} hp（击穿口径）"
+    )
+    ttk = survival.get("time_to_kill_s") if isinstance(survival.get("time_to_kill_s"), dict) else {}
+    lines.append(f"{_INDENT}击穿：{_num(ttk.get('value'))} s（= ehp ÷ 编队有效 DPS）")
+    window = result.get("window") if isinstance(result.get("window"), dict) else None
+    if window:
+        magnitude = window.get("magnitude") if isinstance(window.get("magnitude"), dict) else {}
+        lines.append(
+            f"{_INDENT}窗口 {_num(window.get('window_s'))} s：打掉 {_num(window.get('hp_removed'))} hp"
+            + (f" · 量级校验 {magnitude.get('verdict')}" if magnitude else "")
+        )
+    flags = result.get("flags") or []
+    if flags:
+        lines.append(f"{_INDENT}flags: {', '.join(str(flag) for flag in flags)}")
+    return "\n".join(lines)
+
+
 _HUMAN: dict[str, Callable[[dict, dict], str]] = {
     "parse": lambda result, _meta: _human_parse(result),
     "killmail": lambda result, _meta: _human_killmail(result, _meta),
@@ -850,6 +1069,7 @@ _HUMAN: dict[str, Callable[[dict, dict], str]] = {
     "explain": _human_explain,
     "sensitivity": _human_sensitivity,
     "project": _human_project,
+    "engagement": _human_engagement,
     "search": _human_search,
     "stats": _human_stats,
 }
@@ -1108,6 +1328,71 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    engagement_cmd = subparsers.add_parser(
+        "engagement", help="交战数学：这套打得动他吗（命中 / 有效 DPS / 击穿时间）"
+    )
+    _add_common(engagement_cmd)
+    engagement_cmd.add_argument(
+        "--defender",
+        metavar="PATH",
+        help="守方配装文件（UTF-8；`-` 表示 stdin）。攻方 = 上面的 --fit-file / --eft / …",
+    )
+    engagement_cmd.add_argument(
+        "--defender-eft", metavar="TEXT", help="直接给守方 EFT 文本（与 --defender 互斥）"
+    )
+    engagement_cmd.add_argument(
+        "--distance-m",
+        type=float,
+        required=True,
+        metavar="M",
+        help="**必填**：面到面距离（m）。距离与角速度是输入，本层不做几何假设",
+    )
+    engagement_cmd.add_argument(
+        "--angular-velocity",
+        type=float,
+        default=0.0,
+        metavar="RAD_S",
+        help="角速度（rad/s，默认 0 = 乐观上界）",
+    )
+    engagement_cmd.add_argument(
+        "--target-velocity",
+        type=float,
+        default=0.0,
+        metavar="M_S",
+        help="守方绝对速度（只对 --mode anchor / --fleet 生效；exchange/timeline 自动用 maxVelocity）",
+    )
+    engagement_cmd.add_argument(
+        "--no-wrecking",
+        dest="include_wrecking",
+        action="store_false",
+        help="不含 wrecking（默认含，与 pyfa 一致；不含时归一到纸面口径）",
+    )
+    engagement_cmd.add_argument(
+        "--mode",
+        choices=api.ENGAGEMENT_MODES,
+        default=api.ENGAGEMENT_MODE_EXCHANGE,
+        help=f"exchange 双向换血（默认）/ timeline 时间线 / anchor 战报锚点",
+    )
+    engagement_cmd.add_argument(
+        "--fleet",
+        type=int,
+        metavar="N",
+        help="编队量级：N 条同型船（**量级模型**，不是个体配装；只在 exchange 下允许）",
+    )
+    engagement_cmd.add_argument(
+        "--observed-hp", type=float, metavar="HP",
+        help="战报里扣掉的血（damage_taken）：anchor 必填；fleet 下可选（量级校验）",
+    )
+    engagement_cmd.add_argument(
+        "--window-s", type=float, metavar="S", help="时间窗（秒）：anchor 必填；fleet 下可选"
+    )
+    engagement_cmd.add_argument(
+        "--duration-s", type=float, metavar="S", help="timeline 的时间窗（秒）"
+    )
+    engagement_cmd.add_argument(
+        "--points", type=int, default=6, metavar="N", help="timeline 采样点数（默认 6，至少 2）"
+    )
+
     search_cmd = subparsers.add_parser(
         "search", help="战报列表检索（谁在打谁 / 这个公司最近损失了什么）"
     )
@@ -1206,7 +1491,49 @@ def _dispatch(args: argparse.Namespace, fit: object) -> dict:
             strict_state=getattr(args, "strict_state", True),
             **params,
         )
+    if args.command == "engagement":
+        return api.fit_engagement(
+            fit,
+            getattr(args, "defender_input", None),
+            distance_m=args.distance_m,
+            angular_velocity=args.angular_velocity,
+            target_velocity=args.target_velocity,
+            include_wrecking=args.include_wrecking,
+            mode=args.mode,
+            fleet=args.fleet,
+            observed_hp=args.observed_hp,
+            window_s=args.window_s,
+            duration_s=args.duration_s,
+            points=args.points,
+            **params,
+        )
     return api.fit_detail(fit, getattr(args, "view", None), getattr(args, "path", None), **params)
+
+
+def _pick_defender(args: argparse.Namespace) -> tuple[object | None, str | None]:
+    """`engagement` 的守方：`--defender PATH` / `--defender-eft TEXT` **恰好一个**。
+
+    Returns:
+        `(守方配装输入, 错误信息)`。读文件失败 / 两个都给 / 都没给 → 参数错误（退出码 2）。
+    """
+    given: list[tuple[str, str]] = []
+    if getattr(args, "defender", None):
+        given.append(("file", args.defender))
+    if getattr(args, "defender_eft", None):
+        given.append(("eft", args.defender_eft))
+    if not given:
+        return None, (
+            "engagement 需要守方：--defender PATH（或 - 读 stdin）/ --defender-eft TEXT"
+        )
+    if len(given) > 1:
+        return None, "守方来源互斥，一次只能给一个（--defender / --defender-eft）"
+    kind, value = given[0]
+    if kind == "eft":
+        return value, None
+    text, problem = _from_stdin_or_file(value)
+    if problem is not None:
+        return None, problem
+    return text, None
 
 
 def _pick_sources(args: argparse.Namespace) -> tuple[list[object] | None, str | None]:
@@ -1375,6 +1702,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"参数错误：{problem}", file=sys.stderr)
             return EXIT_USAGE
         args.effects = effects
+
+    if args.command == "engagement":
+        # 守方文件读不到 / 两个来源都给 → 参数问题（2）；守方**内容**坏由 api 报
+        # invalid_argument + field="defender"（1）。
+        defender, problem = _pick_defender(args)
+        if problem is not None:
+            print(f"参数错误：{problem}", file=sys.stderr)
+            return EXIT_USAGE
+        args.defender_input = defender
 
     return _report(args, _dispatch(args, fit))
 

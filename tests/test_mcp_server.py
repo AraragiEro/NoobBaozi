@@ -56,11 +56,16 @@ title / description / schema」，而不是「一共有几个」。
 FIT_TOOLS = tuple(name for name in TOOL_NAMES if name.startswith("fit_"))
 """配装类工具（有一个「配装输入」入参的那几个）；`zkb_search` 不在其中（它查的是列表）。"""
 
-FIT_INPUT_KEYS: dict[str, str] = {"fit_project": "target"}
-"""配装输入参数名：**只有 `fit_project` 叫 `target`**（目标是那套配装，不是 `fit`）。
+FIT_INPUT_KEYS: dict[str, tuple[str, ...]] = {
+    "fit_project": ("target",),
+    "fit_engagement": ("attacker", "defender"),
+}
+"""配装输入参数名（**默认 `fit`**；这几个例外）：
 
-它是「一给一」语义的自然结果：`fit_project(target, sources=[...])` 里 `target` 是被投的
-那艘船。其余工具统一叫 `fit`。这张映射只服务 schema 断言，不参与运行期逻辑。
+- `fit_project` → `target`（「一给一」里被投的那艘船）；
+- `fit_engagement` → `attacker` + `defender`（两份配装对打，没有单独的 `fit`）。
+
+这张映射只服务 schema 断言，不参与运行期逻辑。
 """
 
 
@@ -185,19 +190,20 @@ def test_tools_list_is_the_single_source_of_truth() -> None:
 def test_every_fit_tool_requires_a_string_fit() -> None:
     """配装输入是**配装类工具**的共同必填项，声明成 string + 长度上下限。
 
-    参数名按 `FIT_INPUT_KEYS` 取：除了 `fit_project` 叫 `target`，其余都叫 `fit`。
+    参数名按 `FIT_INPUT_KEYS` 取（默认 `fit`；`fit_project` 是 `target`，
+    `fit_engagement` 是 `attacker` + `defender`）。
     `zkb_search` 不在这条里：它没有配装输入（查的是列表）—— 见 `test_zkb_search_schema`。
     """
     for name in FIT_TOOLS:
-        key = FIT_INPUT_KEYS.get(name, "fit")
         schema = _tool_spec(name)["inputSchema"]
-        assert key in schema["required"], f"{name} 没把 {key} 标成必填"
-        fit = schema["properties"][key]
-        assert fit["type"] == "string"
-        assert fit["minLength"] == 1
-        assert fit["maxLength"] == mcp_server.MAX_FIT_CHARS
-        assert "EFT" in fit["description"] and "DNA" in fit["description"]
-        assert "killmail" in fit["description"]
+        for key in FIT_INPUT_KEYS.get(name, ("fit",)):
+            assert key in schema["required"], f"{name} 没把 {key} 标成必填"
+            fit = schema["properties"][key]
+            assert fit["type"] == "string"
+            assert fit["minLength"] == 1
+            assert fit["maxLength"] == mcp_server.MAX_FIT_CHARS
+            assert "EFT" in fit["description"] and "DNA" in fit["description"]
+            assert "killmail" in fit["description"]
 
 
 def test_common_parameters_declare_defaults_from_api() -> None:
@@ -1562,3 +1568,150 @@ def test_fit_project_missing_target_is_invalid_params() -> None:
         response = _rpc("tools/call", {"name": "fit_project", "arguments": arguments})
         assert response["error"]["code"] == mcp_server.INVALID_PARAMS
         assert response["error"]["data"]["field"] == "target"
+
+
+# =============================================================================
+# 十、`fit_engagement`（第 12 个工具）：三个 mode + 三条边界 + 错误归属
+# =============================================================================
+
+ENGAGEMENT_ATTACKER_PATH = PROJECT_FIXTURES / "f1-hecate-killmail.eft"
+ENGAGEMENT_DEFENDER_PATH = PROJECT_FIXTURES / "f15-battleship-raven.json"
+
+
+def _engagement_attacker() -> str:
+    return ENGAGEMENT_ATTACKER_PATH.read_text(encoding="utf-8")
+
+
+def _engagement_defender() -> str:
+    return ENGAGEMENT_DEFENDER_PATH.read_text(encoding="utf-8")
+
+
+def test_fit_engagement_schema_shape() -> None:
+    """必填 `attacker` + `defender` + `distance_m`；**没有 `fit`**；`mode` 枚举与 api 同源。"""
+    schema = _tool_spec("fit_engagement")["inputSchema"]
+    assert schema["required"] == ["attacker", "defender", "distance_m"]
+    assert "fit" not in schema["properties"], "这个工具有两个配装输入，不叫 fit"
+    for name in ("attacker", "defender"):
+        assert schema["properties"][name]["type"] == "string"
+        assert schema["properties"][name]["maxLength"] == mcp_server.MAX_FIT_CHARS
+    assert schema["properties"]["distance_m"]["minimum"] == 0
+    assert schema["properties"]["mode"]["enum"] == list(api.ENGAGEMENT_MODES)
+    assert schema["properties"]["mode"]["default"] == api.ENGAGEMENT_MODE_EXCHANGE
+    assert "anyOf" in schema["properties"]["fleet"]
+    assert schema["properties"]["points"]["minimum"] == 2
+    for name in mcp_server._COMMON_PARAMETERS:
+        assert name in schema["properties"]
+
+
+def test_fit_engagement_roundtrip_over_mcp() -> None:
+    """A ↔ B：`kind=exchange`、两侧都有有效 DPS、两个血量口径各带用途说明。"""
+    result = _call(
+        "fit_engagement",
+        {"attacker": _engagement_attacker(), "defender": _engagement_defender(), "distance_m": 1000},
+    )
+    assert result.get("isError") is not True, "成功调用不该带 isError"
+    envelope = _envelope(result)
+    assert result["structuredContent"] == envelope
+    body = envelope["result"]
+    assert body["kind"] == "exchange"
+    for direction in ("a_on_b", "b_on_a"):
+        totals = body[direction]["totals"]
+        assert totals["effective_dps"] > 0
+        survival = body[direction]["defender_survival"]
+        assert survival["hp_pool"]["value"] != survival["ehp"]["value"]
+        assert survival["hp_pool"]["compare_with"] and survival["ehp"]["compare_with"]
+
+    # timeline / anchor 也走一遍 MCP 表面
+    timeline = _envelope(
+        _call(
+            "fit_engagement",
+            {
+                "attacker": _engagement_attacker(),
+                "defender": _engagement_defender(),
+                "distance_m": 1000,
+                "mode": "timeline",
+                "points": 3,
+            },
+        )
+    )
+    assert timeline["result"]["kind"] == "timeline"
+
+    anchor = _envelope(
+        _call(
+            "fit_engagement",
+            {
+                "attacker": _engagement_attacker(),
+                "defender": _engagement_defender(),
+                "distance_m": 1000,
+                "mode": "anchor",
+                "observed_hp": 500,
+                "window_s": 60,
+            },
+        )
+    )
+    assert anchor["result"]["kind"] == "anchor_check"
+
+
+def test_fit_engagement_unarmed_side_over_mcp() -> None:
+    """一方无武器仍是成功响应：`ttk=null` + `no_weapons`（不是错误）。"""
+    result = _call(
+        "fit_engagement",
+        {"attacker": "[Hecate, empty]\n", "defender": _engagement_defender(), "distance_m": 1000},
+    )
+    assert result.get("isError") is not True
+    envelope = _envelope(result)
+    assert envelope["ok"] is True
+    assert envelope["result"]["race"]["a_time_to_kill_s"] is None
+    assert any(
+        "no_weapons" in flag for flag in envelope["result"]["a_on_b"]["flags"]
+    )
+
+
+def test_fit_engagement_fleet_over_mcp() -> None:
+    """`fleet=8` → `fleet_assumption` + `order_of_magnitude_only`（量级模型）。"""
+    result = _call(
+        "fit_engagement",
+        {
+            "attacker": _engagement_attacker(),
+            "defender": _engagement_defender(),
+            "distance_m": 1000,
+            "fleet": 8,
+        },
+    )
+    body = _envelope(result)["result"]
+    assert body["fleet_assumption"] is True
+    assert "order_of_magnitude_only" in body["flags"]
+
+
+def test_fit_engagement_bad_distance_is_a_business_error() -> None:
+    """缺 `distance_m` / 值非法 → 成功响应 + `isError:true` + `invalid_argument` + `field`。"""
+    for arguments in (
+        {"attacker": "[Hecate, x]", "defender": "[Hecate, x]"},
+        {"attacker": "[Hecate, x]", "defender": "[Hecate, x]", "distance_m": "20km"},
+        {"attacker": "[Hecate, x]", "defender": "[Hecate, x]", "distance_m": -5},
+    ):
+        result = _call("fit_engagement", arguments)
+        assert result["isError"] is True, arguments
+        envelope = _envelope(result)
+        assert envelope["error"]["kind"] == "invalid_argument"
+        assert envelope["error"]["field"] == "distance_m"
+
+
+def test_fit_engagement_bad_side_is_a_business_error_with_field() -> None:
+    """守方坏 → `invalid_argument` + `field="defender"`（能指出是哪一侧）。"""
+    result = _call(
+        "fit_engagement",
+        {"attacker": _engagement_attacker(), "defender": "这不是配装", "distance_m": 1000},
+    )
+    assert result["isError"] is True
+    envelope = _envelope(result)
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["field"] == "defender"
+
+
+def test_fit_engagement_missing_sides_is_invalid_params() -> None:
+    """缺 `attacker` / `defender` → `-32602`（参数形态错）。"""
+    for arguments in ({"defender": "[Hecate, x]", "distance_m": 1000}, {"attacker": "[Hecate, x]", "distance_m": 1000}):
+        response = _rpc("tools/call", {"name": "fit_engagement", "arguments": arguments})
+        assert response["error"]["code"] == mcp_server.INVALID_PARAMS
+        assert response["error"]["data"]["field"] in ("attacker", "defender")

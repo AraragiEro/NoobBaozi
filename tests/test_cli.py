@@ -1107,3 +1107,151 @@ def test_module_entry_point_knows_project() -> None:
     assert completed.returncode == 0, completed.stderr
     for token in ("--source", "--source-eft", "--effects-json", "--no-strict-state", "--json"):
         assert token in completed.stdout, f"--help 里应提到 {token}：\n{completed.stdout}"
+
+
+# =============================================================================
+# 九、`engagement`：三块分开印（应用 / 两个血量口径 / 击穿与谁先死）
+# =============================================================================
+
+ENGAGEMENT_ATTACKER_PATH = PROJECT_FIXTURES / "f1-hecate-killmail.eft"
+ENGAGEMENT_DEFENDER_PATH = PROJECT_FIXTURES / "f15-battleship-raven.json"
+
+
+def _engagement_args(*extra: str) -> list[str]:
+    return [
+        "engagement",
+        "--fit-file", str(ENGAGEMENT_ATTACKER_PATH),
+        "--defender", str(ENGAGEMENT_DEFENDER_PATH),
+        "--distance-m", "1000",
+        *extra,
+    ]
+
+
+def test_engagement_human_has_three_separate_blocks(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """人话必须分三块：命中/应用/有效 DPS、HP 池 vs EHP、击穿时间与谁先死。"""
+    code, out, err = _run_cli(_engagement_args(), capsys)
+    assert code == cli.EXIT_OK, err
+    assert err == ""
+    assert "【命中率 / 应用系数 / 有效 DPS】" in out
+    assert "【HP 池 vs EHP（用途不同，别混）】" in out
+    assert "【击穿时间 / 谁先死】" in out
+    assert "hp_pool" in out and "ehp" in out
+    assert "damage_taken" in out, "hp_pool 必须标「适合和战报比」"
+    assert "击穿" in out
+    assert "|" not in out and "**" not in out, "人话输出不该带 markdown 记号"
+
+
+def test_engagement_human_unarmed_says_it_cannot_compare(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """一方无武器 → 明确印「无对敌武器，无法对算」，不是把 null 印成 0。"""
+    code, out, err = _run_cli(
+        [
+            "engagement", "--eft", "[Hecate, empty]",
+            "--defender", str(ENGAGEMENT_DEFENDER_PATH),
+            "--distance-m", "1000",
+        ],
+        capsys,
+    )
+    assert code == cli.EXIT_OK, err
+    assert "无对敌武器，无法对算" in out
+    assert "no_weapons" in out
+
+
+def test_engagement_json_matches_api(capsys: pytest.CaptureFixture[str]) -> None:
+    """`--json` 就是 api 信封原样。"""
+    code, out, err = _run_cli([*_engagement_args(), "--json"], capsys)
+    assert code == cli.EXIT_OK, err
+    envelope = json.loads(out)
+    api.clear_caches()
+    expected = api.fit_engagement(
+        ENGAGEMENT_ATTACKER_PATH.read_text(encoding="utf-8"),
+        ENGAGEMENT_DEFENDER_PATH.read_text(encoding="utf-8"),
+        distance_m=1000.0,
+    )
+    assert envelope == expected
+
+
+def test_engagement_missing_distance_is_usage_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--distance-m` 是必填（argparse 用法错误，退出码 2）。"""
+    code, out, err = _run_cli(
+        [
+            "engagement", "--fit-file", str(ENGAGEMENT_ATTACKER_PATH),
+            "--defender", str(ENGAGEMENT_DEFENDER_PATH),
+        ],
+        capsys,
+    )
+    assert code == cli.EXIT_USAGE
+    assert out == ""
+    assert "--distance-m" in err
+
+
+def test_engagement_defender_required_and_exclusive(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """守方必须给且只能给一个（缺 → 2；两个都给 → 2）。"""
+    code, out, err = _run_cli(
+        ["engagement", "--fit-file", str(ENGAGEMENT_ATTACKER_PATH), "--distance-m", "1000"],
+        capsys,
+    )
+    assert code == cli.EXIT_USAGE
+    assert "--defender" in err
+
+    code, out, err = _run_cli(
+        [
+            "engagement", "--fit-file", str(ENGAGEMENT_ATTACKER_PATH),
+            "--defender", str(ENGAGEMENT_DEFENDER_PATH),
+            "--defender-eft", "[Raven, x]",
+            "--distance-m", "1000",
+        ],
+        capsys,
+    )
+    assert code == cli.EXIT_USAGE
+    assert "互斥" in err
+
+
+def test_engagement_timeline_mode_human(capsys: pytest.CaptureFixture[str]) -> None:
+    """`--mode timeline`：输出时间线（速率 + 端点 + 采样）。"""
+    code, out, err = _run_cli(_engagement_args("--mode", "timeline", "--points", "3"), capsys)
+    assert code == cli.EXIT_OK, err
+    assert "时间线" in out
+    assert "first_to_die=" in out
+    assert out.count("t=") == 3, f"应有 3 个采样点：\n{out}"
+
+
+def test_engagement_fleet_human_declares_magnitude(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--fleet 8`：人话必须声明「量级估计，不是个体配装」并列出 flags。"""
+    code, out, err = _run_cli(
+        _engagement_args("--fleet", "8", "--window-s", "9", "--observed-hp", "4158"), capsys
+    )
+    assert code == cli.EXIT_OK, err
+    assert "编队量级" in out and "量级估计，不是个体配装" in out
+    assert "order_of_magnitude_only" in out
+    assert "量级校验" in out, "给了 observed_hp 就要有量级校验"
+
+
+def test_engagement_bad_anchor_params_is_api_failure(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--mode anchor` 缺 `--observed-hp`/`--window-s` → 退出码 1 + `invalid_argument`。"""
+    code, out, err = _run_cli(_engagement_args("--mode", "anchor"), capsys)
+    assert code == cli.EXIT_API_FAILURE, err
+    assert out == ""
+    assert "invalid_argument" in err
+
+
+def test_module_entry_point_knows_engagement() -> None:
+    """真起子进程：`python -m noobbaozi.cli engagement --help` 里有这一组选项。"""
+    completed = _subprocess_cli(["engagement", "--help"])
+    assert completed.returncode == 0, completed.stderr
+    for token in (
+        "--defender", "--defender-eft", "--distance-m", "--angular-velocity",
+        "--mode", "--fleet", "--observed-hp", "--window-s", "--json",
+    ):
+        assert token in completed.stdout, f"--help 里应提到 {token}：\n{completed.stdout}"

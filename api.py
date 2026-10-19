@@ -118,6 +118,7 @@ import copy
 import difflib
 import hashlib
 import json
+import math
 import re
 import threading
 import time
@@ -130,6 +131,7 @@ from typing import Callable
 from noobbaozi.config import paths as _paths
 from noobbaozi.engine import adapter, normalize
 from noobbaozi.engine.assumptions import default_assumptions
+from noobbaozi.project import combat as _combat
 from noobbaozi.project import explain as _explain
 from noobbaozi.project import projection as _projection
 from noobbaozi.project import render
@@ -1947,6 +1949,391 @@ def fit_project(
         )
     except _ApiFailure as exc:
         return _failure(exc.payload())
+    except Exception as exc:  # noqa: BLE001 - 边界层：任何异常都不得裸抛给 agent
+        return _failure(
+            {
+                "kind": "internal_error",
+                "message": "接口层内部异常，本次没有可用结果",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+        )
+
+    if cache_key is not None:
+        _cache_put(cache_key, envelope)
+    return envelope
+
+
+# =============================================================================
+# 十一之五、交战数学（P6-B combat）：`fit_engagement`
+# =============================================================================
+#
+# 三个 mode 的语义（本层只分派，数学全在 `project/combat.py`）
+# ----------------------------------------------------------
+# - `exchange`（默认）：A ↔ B 双向换血（一次 `exchange` 里各有一次单方向 `engagement`）；
+# - `timeline`：双方同时开火、按有效 DPS 线性扣血的简化时间线；
+# - `anchor`：战报锚点 —— 模型能否在 `window_s` 内打出 `observed_hp`（`explain_anchor`）。
+#
+# `fleet` 与三个 mode 正交，但**只在 `exchange` 下允许**：它是「同型 × 数量」的量级模型
+# （`fleet_engagement`），不是个体配装，也不是链式编队。
+#
+# `target_velocity` 的归属（别猜）
+# ------------------------------
+# `exchange` / `timeline` **不接受**它（那两条按双方 maxVelocity 自动填，是模块的既定假设）；
+# 给了非 0 值就 `invalid_argument` + `field="target_velocity"`（明确拒绝 > 静默忽略）——
+# 要指定速度请用 `anchor` 或 `fleet`。
+
+ENGAGEMENT_MODES: tuple[str, ...] = ("exchange", "timeline", "anchor")
+"""`fit_engagement` 的 `mode` 取值（顺序 = 推荐顺序）。"""
+
+ENGAGEMENT_MODE_EXCHANGE: str = "exchange"
+"""默认 mode：双向换血比（`combat.exchange`）。"""
+
+ENGAGEMENT_MODE_TIMELINE: str = "timeline"
+ENGAGEMENT_MODE_ANCHOR: str = "anchor"
+
+
+def _engagement_number(
+    value: object,
+    field: str,
+    *,
+    positive: bool = False,
+    required: bool = True,
+    label: str = "非负数",
+) -> float | None:
+    """`distance_m` / `angular_vel` / `observed_hp` … 的数值校验（失败 → `invalid_argument`）。"""
+    if value is None:
+        if not required:
+            return None
+        raise _ApiFailure(
+            "invalid_argument",
+            f"{field} 必填（{label}）；距离 / 角速度是**输入**，本层不做几何假设",
+            field=field,
+        )
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _ApiFailure(
+            "invalid_argument",
+            f"{field} 必须是数值（{label}），收到 {value!r}",
+            field=field,
+        )
+    number = float(value)
+    if not math.isfinite(number):
+        raise _ApiFailure(
+            "invalid_argument",
+            f"{field} 必须是有限数值（收到 {value!r}：nan / inf 不能参与几何计算）",
+            field=field,
+        )
+    if number < 0.0 or (positive and number <= 0.0):
+        raise _ApiFailure(
+            "invalid_argument",
+            f"{field} 必须是{'正数' if positive else '非负数'}，收到 {value!r}",
+            field=field,
+        )
+    return number
+
+
+def _engagement_fleet(fleet: object) -> dict | None:
+    """`fleet` → `{"count": N}` / `{"killmail_attackers": {...}}`；`None` 表示不聚合。
+
+    数量**不得编造**：要么调用方给 `count`，要么直接给 `fit_killmail()["attackers"]`
+    （模块内部按模板 ship group 取计数）。
+    """
+    if fleet is None:
+        return None
+    if isinstance(fleet, bool):
+        raise _ApiFailure(
+            "invalid_argument",
+            "fleet 必须是正整数或对象（count / killmail_attackers），收到 bool",
+            field="fleet",
+        )
+    if isinstance(fleet, int):
+        if fleet <= 0:
+            raise _ApiFailure(
+                "invalid_argument", f"fleet 数量必须是正整数，收到 {fleet}", field="fleet"
+            )
+        return {"count": fleet}
+    if isinstance(fleet, dict):
+        if "killmail_attackers" in fleet:
+            return {"killmail_attackers": fleet["killmail_attackers"]}
+        count = fleet.get("count")
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            return {"count": count}
+        raise _ApiFailure(
+            "invalid_argument",
+            f"fleet.count 必须是正整数，收到 {count!r}",
+            field="fleet",
+        )
+    raise _ApiFailure(
+        "invalid_argument",
+        f"fleet 必须是正整数或对象（count / killmail_attackers），收到 {type(fleet).__name__}",
+        field="fleet",
+    )
+
+
+def _engagement_input(
+    fit_input: object, field: str
+) -> tuple[str, str | None, dict]:
+    """一侧配装 → `(形态, 缓存 key, 载荷)`；形态不对 → `invalid_argument` + `field`。
+
+    **只做判别，不解析**：缓存命中时连归一化都不该发生（两次配装各 10–20 ms）。
+    """
+    try:
+        return _input_descriptor(fit_input)
+    except _ApiFailure as exc:
+        raise _ApiFailure(
+            "invalid_argument",
+            f"{field} 无法识别：{exc.message}",
+            field=field,
+            cause=exc.payload(),
+        ) from exc
+
+
+def _engagement_side(
+    kind: str, payload: dict, field: str, skill_tier: str
+) -> tuple[dict, ViewContext]:
+    """一侧配装 → `(归一化结果, ViewContext)`；联网 / 解析失败 → `invalid_argument` + `field`。"""
+    if kind == INPUT_NETWORK:
+        killmail = fetch_killmail(payload["killmail_id"], payload["hash"])
+        payload = {"text": json.dumps(killmail, ensure_ascii=False)}
+    try:
+        parsed = _parsed_fit(payload)
+    except _ApiFailure as exc:
+        raise _ApiFailure(
+            "invalid_argument",
+            f"{field} 解析失败：{exc.message}",
+            field=field,
+            cause=exc.payload(),
+        ) from exc
+    return parsed, _context(parsed["fit"], skill_tier)
+
+
+def fit_engagement(
+    attacker: object,
+    defender: object,
+    *,
+    distance_m: object = None,
+    angular_velocity: object = 0.0,
+    target_velocity: object = 0.0,
+    include_wrecking: bool = True,
+    mode: str = ENGAGEMENT_MODE_EXCHANGE,
+    fleet: object = None,
+    observed_hp: object = None,
+    window_s: object = None,
+    duration_s: object = None,
+    points: object = 6,
+    skill_tier: str = SKILL_TIER_ALL4,
+    damage_profile: str = DAMAGE_PROFILE_UNIFORM,
+    state_policy: str = STATE_POLICY_ENGINE_DEFAULT,
+) -> dict:
+    """交战数学：A 打 B 的命中率 / 有效 DPS / 击穿时间（`project/combat.py` 的组装层）。
+
+    Args:
+        attacker / defender: 两份四形态配装输入。
+        distance_m: **必填**，面到面距离（m，非负）。距离与角速度是**输入**，本层不做
+            几何假设。
+        angular_velocity: 角速度（rad/s）。`0` 是乐观上界（迎头/静止）。
+        target_velocity: 守方绝对速度（m/s）。**只对 `anchor` / `fleet` 生效**；
+            `exchange` / `timeline` 按双方 maxVelocity 自动填 —— 在它们上面给非 0 值会
+            `invalid_argument`（明确拒绝，不静默忽略）。
+        include_wrecking: 炮台伤害是否含 wrecking（默认 True，与 pyfa 一致）；False 时
+            归一到纸面口径（完美应用 = 1.0）。
+        mode: `exchange`（默认，双向换血比）/ `timeline`（线性时间线）/ `anchor`
+            （战报锚点：能否在 `window_s` 内打出 `observed_hp`）。
+        fleet: 编队量级：正整数，或 `{"count": N}` / `{"killmail_attackers": {...}}`。
+            **只在 `exchange` 下允许**。返回带 `fleet_assumption: true` 与
+            `order_of_magnitude_only` flag —— 它是「同型 × 数量」的量级模型，不是个体配装。
+        observed_hp / window_s: `anchor` 必填（正数）；`fleet` 下可选（给量级校验）。
+        duration_s / points: `timeline` 的时间窗与采样点数（默认 6，至少 2）。
+        skill_tier / damage_profile / state_policy: 三个共同参数。
+
+    Returns:
+        成功时 `result` **就是** 对应子函数的返回（本层不改形状）：
+
+        - `exchange` → `{kind:"exchange", inputs, a_on_b, b_on_a, race}`；
+        - `timeline` → `{kind:"timeline", inputs, rates, endpoints, samples, assumptions}`；
+        - `anchor` → `{kind:"anchor_check", observed_hp, window_s, required_hp_dps,
+          explainable, region, best, reasons, caveats, …}`；
+        - `fleet` → `{kind:"fleet_engagement", fleet_assumption:true, fleet_note, count,
+          totals, defender_survival, window, flags:[…,"order_of_magnitude_only"]}`。
+
+        **两个血量口径别混**（每个单方向结果里都有，各带 `compare_with` 说明用途）：
+        `hp_pool`（盾+甲+结构，和战报 `damage_taken` 同量纲）与 `ehp`（原始伤害口径，
+        用来算击穿时间）。
+
+        业务失败：
+
+        - `distance_m` 缺失 / 非数 / 负数 → `invalid_argument` + `field="distance_m"`；
+        - `attacker` / `defender` 解析失败 → `invalid_argument` + `field`；
+        - `mode` 不认识 / `fleet` 形态不对 / `anchor` 缺 `observed_hp` 或 `window_s` →
+          `invalid_argument` + `field`；
+        - **一方没有对敌武器不是错误**：`ttk` 为 `None`，`flags` 里给
+          `no_weapons: …`，`unsupported` 里给未建模武器的下界 DPS。
+    """
+    try:
+        _check_params(skill_tier, damage_profile, state_policy)
+
+        mode_text = str(mode or "").strip()
+        if mode_text not in ENGAGEMENT_MODES:
+            raise _ApiFailure(
+                "invalid_argument",
+                f"mode {mode!r} 不支持",
+                field="mode",
+                hint=list(ENGAGEMENT_MODES),
+            )
+        distance = _engagement_number(distance_m, "distance_m")
+        angular = _engagement_number(angular_velocity, "angular_velocity")
+        target_speed = _engagement_number(target_velocity, "target_velocity")
+        if not isinstance(include_wrecking, bool):
+            raise _ApiFailure(
+                "invalid_argument",
+                f"include_wrecking 必须是布尔，收到 {include_wrecking!r}",
+                field="include_wrecking",
+                hint=[True, False],
+            )
+
+        fleet_spec = _engagement_fleet(fleet)
+        if fleet_spec is not None and mode_text != ENGAGEMENT_MODE_EXCHANGE:
+            raise _ApiFailure(
+                "invalid_argument",
+                f"fleet 只在 mode={ENGAGEMENT_MODE_EXCHANGE} 下允许（收到 mode={mode_text!r}）",
+                field="fleet",
+                hint={"modes": [ENGAGEMENT_MODE_EXCHANGE]},
+            )
+
+        observed = _engagement_number(
+            observed_hp, "observed_hp", positive=True, required=False, label="正数"
+        )
+        window = _engagement_number(
+            window_s, "window_s", positive=True, required=False, label="正数"
+        )
+        duration = _engagement_number(
+            duration_s, "duration_s", positive=True, required=False, label="正数"
+        )
+
+        if mode_text == ENGAGEMENT_MODE_ANCHOR:
+            if observed is None or window is None:
+                raise _ApiFailure(
+                    "invalid_argument",
+                    "mode=anchor 必须给 observed_hp 与 window_s（都是正数）",
+                    field="observed_hp" if observed is None else "window_s",
+                )
+        if mode_text == ENGAGEMENT_MODE_TIMELINE:
+            if isinstance(points, bool) or not isinstance(points, int) or points < 2:
+                raise _ApiFailure(
+                    "invalid_argument",
+                    f"points 必须是 >=2 的整数，收到 {points!r}",
+                    field="points",
+                )
+        if (
+            target_speed != 0.0
+            and mode_text != ENGAGEMENT_MODE_ANCHOR
+            and fleet_spec is None
+        ):
+            raise _ApiFailure(
+                "invalid_argument",
+                "target_velocity 只对 mode=anchor / fleet 生效：exchange/timeline 按双方 "
+                "maxVelocity 自动填（要指定速度请用 anchor 或 fleet）",
+                field="target_velocity",
+            )
+
+        attacker_kind, attacker_key, attacker_payload = _engagement_input(attacker, "attacker")
+        defender_kind, defender_key, defender_payload = _engagement_input(defender, "defender")
+
+        args = (
+            mode_text,
+            distance,
+            angular,
+            target_speed,
+            include_wrecking,
+            observed,
+            window,
+            duration,
+            points,
+            _json_key(fleet_spec),
+        )
+        cache_key: tuple | None = None
+        if attacker_key is not None and defender_key is not None:
+            cache_key = (
+                "engagement",
+                args,
+                attacker_key,
+                defender_key,
+                skill_tier,
+                damage_profile,
+                state_policy,
+            )
+        if cache_key is not None:
+            hit = _cache_get(cache_key)
+            if hit is not None:
+                return hit
+
+        # 缓存未命中才归一化两份配装（各 10–20 ms；命中路径一个字节都不解析）
+        attacker_parsed, attacker_ctx = _engagement_side(
+            attacker_kind, attacker_payload, "attacker", str(skill_tier)
+        )
+        defender_parsed, defender_ctx = _engagement_side(
+            defender_kind, defender_payload, "defender", str(skill_tier)
+        )
+
+        if fleet_spec is not None:
+            fleet_kwargs: dict[str, object] = {
+                "range_m": distance,
+                "angular_vel": angular,
+                "target_velocity": target_speed,
+                "include_wrecking": include_wrecking,
+            }
+            if "count" in fleet_spec:
+                fleet_kwargs["count"] = fleet_spec["count"]
+            else:
+                fleet_kwargs["killmail_attackers"] = fleet_spec["killmail_attackers"]
+            if window is not None:
+                fleet_kwargs["window_s"] = window
+            if observed is not None:
+                fleet_kwargs["observed_hp"] = observed
+            result = _combat.fleet_engagement(attacker_ctx, defender_ctx, **fleet_kwargs)
+        elif mode_text == ENGAGEMENT_MODE_TIMELINE:
+            result = _combat.timeline(
+                attacker_ctx,
+                defender_ctx,
+                range_m=distance,
+                angular_vel=angular,
+                duration_s=duration,
+                points=int(points),
+                include_wrecking=include_wrecking,
+            )
+        elif mode_text == ENGAGEMENT_MODE_ANCHOR:
+            result = _combat.explain_anchor(
+                attacker_ctx,
+                defender_ctx,
+                observed_hp=observed,
+                window_s=window,
+                target_velocity=target_speed,
+                include_wrecking=include_wrecking,
+            )
+        else:
+            result = _combat.exchange(
+                attacker_ctx,
+                defender_ctx,
+                range_m=distance,
+                angular_vel=angular,
+                include_wrecking=include_wrecking,
+            )
+
+        meta = _meta(
+            attacker_ctx,
+            source_format=str(attacker_parsed.get("source_format")),
+            damage_profile=str(damage_profile),
+            state_policy=str(state_policy),
+        )
+        meta["mode"] = mode_text
+        meta["defender_source_format"] = str(defender_parsed.get("source_format"))
+        envelope = _success(result, meta)
+    except _ApiFailure as exc:
+        return _failure(exc.payload())
+    except ValueError as exc:
+        # 模块自己的参数校验（points/ammo/count 之类）—— 那是调用方参数问题，不是内部 bug
+        return _failure(
+            {"kind": "invalid_argument", "message": str(exc), "field": "engagement"}
+        )
     except Exception as exc:  # noqa: BLE001 - 边界层：任何异常都不得裸抛给 agent
         return _failure(
             {
@@ -4673,6 +5060,10 @@ __all__ = [
     "ESI_UNIVERSE_IDS_API",
     "ESI_UNIVERSE_NAMES_API",
     "ESI_UNIVERSE_SYSTEM_API",
+    "ENGAGEMENT_MODES",
+    "ENGAGEMENT_MODE_ANCHOR",
+    "ENGAGEMENT_MODE_EXCHANGE",
+    "ENGAGEMENT_MODE_TIMELINE",
     "EXPLAIN_MAX_DEPTH",
     "EXPLAIN_METRICS",
     "HIGHSEC_THRESHOLD",
@@ -4744,6 +5135,7 @@ __all__ = [
     "fetch_killmail",
     "fetch_killmail_report",
     "fit_detail",
+    "fit_engagement",
     "fit_explain",
     "fit_get",
     "fit_index",

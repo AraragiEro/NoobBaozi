@@ -320,6 +320,42 @@ def _check_project(envelope: dict) -> None:
     )
 
 
+def _check_engagement(envelope: dict) -> None:
+    """`fit_engagement(hecate vs hecate @1km)`：两个血量口径、命中/有效 DPS、击穿时间都在。"""
+    _require(envelope.get("ok") is True, "fit_engagement 应 ok:true")
+    result = envelope.get("result") or {}
+    _require(
+        result.get("kind") == "exchange",
+        f"默认 mode 应得 exchange，实际 {result.get('kind')!r}",
+    )
+    for side in ("a_on_b", "b_on_a"):
+        block = result.get(side) or {}
+        totals = block.get("totals") or {}
+        _require(
+            isinstance(totals.get("effective_dps"), (int, float)) and totals["effective_dps"] > 0,
+            f"{side}.totals.effective_dps 应 > 0（1 km 上的近战武器）",
+        )
+        survival = block.get("defender_survival") or {}
+        hp_pool = survival.get("hp_pool") or {}
+        ehp = survival.get("ehp") or {}
+        _require(isinstance(hp_pool.get("value"), (int, float)), "hp_pool.value 应是数值")
+        _require(isinstance(ehp.get("value"), (int, float)), "ehp.value 应是数值")
+        _require(
+            hp_pool["value"] != ehp["value"],
+            "hp_pool 与 ehp 是两个口径，不该相等（混用会把结论说错）",
+        )
+        _require(
+            bool(hp_pool.get("compare_with")) and bool(ehp.get("compare_with")),
+            "两个血量口径都必须带「适合和什么比」的说明",
+        )
+    race = result.get("race") or {}
+    _require(
+        isinstance(race.get("a_time_to_kill_s"), (int, float))
+        or isinstance(race.get("b_time_to_kill_s"), (int, float)),
+        "双向换血至少要有一侧给出击穿时间",
+    )
+
+
 def _check_invalid_path(envelope: dict) -> None:
     """负例①：路径不存在 → 业务失败 `invalid_path` + 可用前缀 `hint`。"""
     _require(envelope.get("ok") is False, "不存在的路径必须 ok:false（不能用 value:null 冒充）")
@@ -408,6 +444,13 @@ def build_cases() -> tuple[dict, ...]:
             # 目标 = Hecate，来源 = 带弹头的装甲指挥爆发（没有弹头会得 no_outgoing）
             "arguments": {"target": eft, "sources": [COMMAND_BURST_EFT]},
             "check": _check_project,
+        },
+        {
+            "name": "engagement",
+            "tool": "fit_engagement",
+            # 两条本地 EFT 对打（1 km 上近战武器都能打中）；不联网
+            "arguments": {"attacker": eft, "defender": eft, "distance_m": 1000},
+            "check": _check_engagement,
         },
         {
             "name": "neg:invalid_path",
