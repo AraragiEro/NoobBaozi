@@ -824,14 +824,21 @@ T32_CONSTANTS: dict[str, int] = {"ATTR_MAX_TARGETS": -70}
 T32_ADDED_CONSTANT_COUNT = 1
 """T-32 补进 `-70` 一个常量（147 = 146 + 1）。"""
 
+P6_ADDED_CONSTANTS: dict[str, int] = {"ATTR_AOE_DAMAGE_REDUCTION_FACTOR": 1353}
+"""P6 交战层补登的 1 个常量：`1353 aoeDamageReductionFactor`（导弹 DRF，伤害应用指数）。"""
+
+P6_ADDED_CONSTANT_COUNT = 1
+"""P6 补进 `1353` 一个常量（148 = 147 + 1）。"""
+
 CONSTANT_COUNT_LEDGER = (
     BASELINE_CONSTANT_COUNT  # 129  P0-3 台账
     + T07_ADDED_CONSTANT_COUNT  # +12 战斗机族（T-07）
     + T13_ADDED_CONSTANT_COUNT  # +3  droneBandwidthUsed / chargeRate / duration（T-13）
     + T23_ADDED_CONSTANT_COUNT  # +2  maxSubSystems / explosionDelay（T-23）
     + T32_ADDED_CONSTANT_COUNT  # +1  maxTargets（T-32）
+    + P6_ADDED_CONSTANT_COUNT  # +1  aoeDamageReductionFactor（P6 交战层）
 )
-"""各轮补登的**显式增量台账**（129 → 141 → 144 → 146 → 147）。
+"""各轮补登的**显式增量台账**（129 → 141 → 144 → 146 → 147 → 148）。
 
 这条链是「常量总数」的**唯一**书面依据：数字不再散落在三处断言里，而是集中在台账 + 表。
 """
@@ -862,7 +869,7 @@ def test_constant_count_is_derived_from_the_table() -> None:
     assert_constant_count_is_derived_from_the_table()
     # 台账本身也要有非空转前置（否则等式两边都可能是同一个写死的数字）
     assert BASELINE_CONSTANT_COUNT >= 100
-    assert CONSTANT_COUNT_LEDGER == 147, f"台账落点应为 147，实为 {CONSTANT_COUNT_LEDGER}"
+    assert CONSTANT_COUNT_LEDGER == 148, f"台账落点应为 148，实为 {CONSTANT_COUNT_LEDGER}"
 
 
 def test_constant_count_guard_is_not_vacuous(monkeypatch: pytest.MonkeyPatch) -> None:
