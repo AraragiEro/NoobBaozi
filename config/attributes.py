@@ -345,6 +345,7 @@ ATTRIBUTES: dict[int, tuple[str, str | None, int | None]] = {
     ATTR_AOE_VELOCITY: ("aoeVelocity", "m/s", 10),
     ATTR_AOE_CLOUD_SIZE: ("aoeCloudSize", "m", 1),
     ATTR_AOE_FALLOFF: ("aoeFalloff", "m", None),
+    ATTR_AOE_DAMAGE_REDUCTION_FACTOR: ("aoeDamageReductionFactor", "x", None),
     ATTR_EXPLOSION_DELAY: ("explosionDelay", "s", 101),
     ATTR_EM_DAMAGE: ("emDamage", "hp", 113),
     ATTR_EXPLOSIVE_DAMAGE: ("explosiveDamage", "hp", 113),
