@@ -416,18 +416,28 @@ Caldari Navy Scourge Light Missile x1232
 `zkb_stats(entity, entity_type, include=None)`。**`entity_type` 必填**（`character` /
 `corporation` / `alliance`）—— 同一串数字在三个命名空间里都可能存在，**不靠 id 猜**。
 
-#### ① 三个「不是成功」的响应，HTTP 状态码全都是 `200`
+#### ① 错误分类：五种情况，五个互不相同的 `kind`（`zkb_search` 与 `zkb_stats` 同源）
 
-zkb 的 `/api/stats/` **不用状态码表达失败**，所以判成败只能看正文：
+zkb 的 `/api/stats/` **不用状态码表达失败**，所以判成败只能看正文。但**正文怎么归类
+两个工具必须一致** —— 曾经 `{"error": "Invalid type or id"}` 在 `zkb_search` 里判
+`network_failed`、在 `zkb_stats` 里判 `unknown_entity`，agent 无从判断该「换参数」还是
+「等一会儿重试」。现在共用 `api._zkb_error_kind()`：
 
-| 上游实际返回 | 我们的 `error.kind` |
-|---|---|
-| `{"error": "Invalid type or id"}`（id 不存在，或 id 与 `entity_type` 不匹配） | `unknown_entity` |
-| **空响应体（0 字节）** —— URL 少了结尾 `/` 时就是这样 | `internal_error` + `warnings: ["empty_body: …"]` |
-| **空壳文档**：只有 `activepvp` / `info`（**无 `name`**）/ `topIskKillIDs` / `topLists`，战斗字段全缺 | `unknown_entity` + `warnings: ["empty_entity: …"]` |
+| 上游 / 自身情况 | `error.kind` | agent 该怎么反应 |
+|---|---|---|
+| `{"error": "Invalid type or id"}`（HTTP **200**） | `unknown_entity` | 换 id / 换 `entity_type` |
+| 正文含限流词（`too many` / `rate limit` …） | `rate_limited` | 等 `hint.min_interval_s` 再试 |
+| **HTTP 429 / 403** | `rate_limited` + `hint.min_interval_s` | 同上 |
+| **空响应体（0 字节）** | `internal_error` + `warnings: ["empty_body: …"]` | 报障（见下） |
+| **空壳文档**：只有 `activepvp` / `info`（**无 `name`**）/ `topIskKillIDs` / `topLists`，战斗字段全缺 | `unknown_entity` + `warnings: ["empty_entity: …"]` | 这个实体没有画像，**别当成 0 战绩** |
+| 非 JSON / 被截断 / 5xx | `network_failed` | 重试或换时间 |
+| **我们自己的异常** | `internal_error`（**唯一**该用它的地方） | 报障 |
 
-> 第二条最阴：本层的 URL 构造**恒以 `/` 结尾**，所以线上看到 `empty_body` 意味着上游异常，
-> 不是参数问题。第三条的实体「存在但没有任何可报告的画像」，**别当成 0 战绩**。
+> **`internal_error` 不是「网络不好」的意思**，它的语义是「**我们自己出 bug 了**」。
+> 把限流报成 `internal_error`，agent 会去报告故障而不是等一会儿重试 —— 方向完全反了。
+>
+> 空体那条最阴：本层的 URL 构造**恒以 `/` 结尾**，所以线上看到 `empty_body` 意味着上游
+> 异常（实测「少写结尾斜杠」就是这个现象），不是参数问题。
 
 #### ② 四个 ratio 的公式未公开 —— 只转述，判词一律不给
 
@@ -449,15 +459,27 @@ zkb 的 `/api/stats/` **不用状态码表达失败**，所以判成败只能看
 - `avg_gang_size` 是 **「人/次」的实数均值**（实测 2–38.7），**不是比例**；
 - `gang_ratio + solo_ratio ≠ 100`（实测 100.0–103.7）—— 两者**不互补**，别互相反推。
 
+**这几个数全部原样透传，一位都不加工。** zkb 没有承诺它们是整数：`dangerRatio: 12.5`
+会被如实给成 `12.5`（早期实现用 `int()` 收口，把它截成 `12` —— 静默丢精度，已修）。
+同类一起透传的还有：`gang_ratio` / `solo_ratio` / `avg_gang_size` / `solo_kills` /
+`solo_losses` / `combat` 六项 / `activity_7d` 六项 / `top.*.{count,isk}` /
+`entity.security_status`（zkb 给 `int 4` 就还是 `int 4`，不会被 `float()` 改写成 `4.0`）/
+`blocks.months.*`。
+
 #### ③ `efficiency` 是我们派生的，不等于 `danger_ratio`
 
 ```json
 "combat": {"efficiency": {"value": 0.829, "kind": "derived",
                           "formula": "isk_destroyed / (isk_destroyed + isk_lost)",
+                          "decimals": 4,
                           "note": "我们派生，与 style.danger_ratio 不是同一个东西"}}
 ```
 
 同一角色实测：isk 效率 **82.9%**，而 zkb 的 `dangerRatio` 是 **69**。**把 82.9 说成「威胁度」就是错的。**
+
+它是返回里**唯一**允许有「加工」的数（因为我们自己算的），所以加工必须写在明面上：
+`kind: derived` + `formula` + `decimals`。zkb 的数不享受这个待遇 —— 它们没有 `formula` 可写，
+所以**一个字节都不许改**。
 
 #### ④ `top.locations` 不是星系
 
@@ -553,6 +575,20 @@ Thera VII / 1DH-SX VI              （行星）
 11. **`unknown` 不是 0**：三态 provenance 里 `unknown` 表示「算不出来」或「不适用」，
     不是零值；原因在 `unknown_reasons` 里（`not_applicable` / `input_incomplete` /
     `ambiguous` / `engine_omits`）。工具不换算、不评分、不补数。
+12. **`zkb_stats` 的四个 ratio 公式未公开**：`formula` 恒为 `null`，我们只转述数值，
+    **不据此给威胁等级判词**；`solo_ratio` 是 0–100 百分数、`avg_gang_size` 是人/次均值，
+    都不是比例；`gang_ratio + solo_ratio ≠ 100`。详见 §4.7。
+13. **`render_overview` 的体量预算（`BUDGET_CHARS`）是历史包袱，不是活路径**：
+    实测 MCP 的 8 个工具与 CLI **没有一处**调用它 —— L0 走 `render_index`、L1 走
+    `render_view`、L2 走 `render_detail`。它现在只被测试与验收脚本（`acceptance/`）
+    用作**回归基线**（2,860 字段全齐那条），并在 `docs/输出分层与工具集-v1.md` 里
+    标为 deprecated。
+    **但它仍是验收门**：`acceptance-*.json` 的期望写着「overview 装进预算（`degraded=False`），
+    覆盖完整列表」，所以它一降级，验收就红 —— 这不是「没人用就可以不管」。
+    实测三样本余量：`f12` **38** / `f47` 1,374 / `f67` 1,502（上限 19,000）。
+    **38 字符不是「留了预算」，是「没预算」**：下一个字段就会触发降级，而降级会整块丢掉
+    `flags.evidence`。**已提请把 `BUDGET_CHARS` 显式提到 20,500**（那是 dev-engine 的文件，
+    待其确认后落地）。
 
 ## 7. 自检 / 排查
 

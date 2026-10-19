@@ -175,7 +175,7 @@ from noobbaozi.project.views import ViewContext, available_views, build_view
 from noobbaozi.project.views.base import BASE, ship_attributes
 from noobbaozi.project.views.loader import VIEW_MODULES, load_views
 
-BUDGET_CHARS: int = 19000
+BUDGET_CHARS: int = 20500
 """overview 的字符预算（`len(json.dumps(views)) + len(json.dumps(modes))`）。
 
 **实测值，不是拍的**（T-15 / T-18 / 样本 `spike/kill.json`，六视角 + 全 4 技能档 512 技能）：
@@ -222,6 +222,37 @@ BUDGET_CHARS: int = 19000
   - **撤销条件（P3 待办）**：等 overview 的 `provenance` / `unknown_reasons` 下沉到 detail 层
     （它们目前是 overview 的大头），预算**必须压回 17,000 以下**；届时按实测重新计算，
     不许把 19,000 当既成事实沿用。
+- **T-55 / 2-5 裁决：19,000 → 20,500（`degraded=False` 是活的验收门，不是死代码）。**
+  2-5 期间 `D.exhaustive_closure` 给高槽加了 `non_hardpoint` / `non_hardpoint_modules`
+  两个出口（把「确定不占硬点」与「分不清」拆开），L1 体量再涨。实测（紧凑序列化 =
+  `budget.chars` 口径）：
+
+  | 样本 | `budget.chars` | 19,000 下的余量 |
+  |---|---:|---:|
+  | `f12-logistics-oneiros` | **18,962** | **38** |
+  | `f47-random-raptor` | 17,626 | 1,374 |
+  | `f67-spotcheck-139255942` | 17,498 | 1,502 |
+
+  **38 字符不是「留了预算」，是「没有预算」** —— 下一个叶子就会触发降级，而第一步降级
+  就是**整块丢掉 `flags.evidence`**（诊断证据消失，不是「少几行」）。长期贴着红线等价于
+  「随机看运气是否降级」，这比显式抬高更难查。
+  - **为什么不能靠省体积**：逐项实测过可省项，全部很低效 —— 删
+    `non_hardpoint_modules` 只省 **59 B**、`non_hardpoint` 18 B、`unclassified` 17 B；
+    再往下就要动 `constraints.tier_violations`（968 B）/ `stability.cap_sensitivity`（723 B）/
+    `mobility.propulsion_states`（550 B）—— **拿真信息换几十个字符是错的交易**。
+  - **取值依据**：`18,962 × 1.08 ≈ 20,479`，按千位取整落到 **20,500**，三样本余量
+    **1,538（7.5%）/ 2,874（14.0%）/ 3,002（14.6%）**。这里刻意**不用**旧公式
+    `ceil(实测 × 1.2 ÷ 1000) × 1000`（那会落到 23,000）：7.5% 是「留出下一个出口」的最小
+    合理量，不是又一轮宽松。
+  - **为什么它没有产品调用方却仍然要管**：MCP 的 8 个工具与 CLI **一处都不调**
+    `render_overview`（L0 走 `summary.render_index`、L1 走 `render_view`、L2 走
+    `render_detail`），它在 `docs/输出分层与工具集-v1.md` 里已标 deprecated；**但**
+    `acceptance/` 的期望写着「overview 装进预算（`degraded=False`），覆盖完整列表」，
+    它是**回归门的基线**。所以「没人用」不等于「可以不管」。
+  - **护栏**：`tests/test_budget_guard.py` 对这三个样本断言 `degraded is False`，并把实际
+    `chars` 打印出来（谁加字段都会立刻看到余量，不用等验收才发现降级）。
+  - **撤销条件**：继承上一条 —— 等 `provenance` / `unknown_reasons` 下沉到 detail 层后，
+    预算必须压回 17,000 以下；**不许把 20,500 当既成事实沿用**。
 
 测试用 `monkeypatch` 把它调小来验证降级路径（所以函数里必须**在调用时**读这个模块常量）。
 """
