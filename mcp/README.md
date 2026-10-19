@@ -410,8 +410,11 @@ Caldari Navy Scourge Light Missile x1232
   agent 只看摘要时也能分清「5 个高槽」与「3 个发射器挂点」；
 - `total` 缺失 → `free` 也是 `null`（不补 0），`used` 仍是数出来的真值；
 - 超装：`hardpoints.launcher = {total: 3, used: 5, free: -2}` → `hardpoint_violation`
-  flag（`evidence = {kind: "launcher", total: 3, used: 5, over: 2}`，L0 的 `hint` 是
-  `发射器超2`）。**`free` 为负绝不会静默通过**。
+  flag。`evidence` 的形状是
+  `{kind: "launcher", total: 3, used: 5, over: 2, over_kinds: "发射器超2"}`：L1 的 `message`
+  与 L0 的 `hint`（`发射器超2`）**都从 `evidence.over_kinds` 生成**。两类同时超装时
+  `kind` 取最严重的一类、另一类进 `others`（机器可读），`over_kinds` 是
+  `"炮位超1+发射器超1"`（实测：Osprey 装 3 炮 + 4 发射器）。**`free` 为负绝不会静默通过**。
 - 模块名一律按 **SDE 实名**匹配（`Small Tractor Beam II` 不是 `Tractor Beam II`，
   `Festival Launcher` 不是 `Festival Launcher I`）—— 写用例前先核 SDE。
 
@@ -422,6 +425,10 @@ Caldari Navy Scourge Light Missile x1232
 
 fit 文本与引擎 `Layout` 都**没有「已放飞」这个维度**（只有 `drone_bay`）——所以「已放飞」
 在本产品里**根本不存在**。这不是缺陷，是输入形态决定的上限。
+
+> **层在哪**：`fit_index`（L0）的 `resources` 摘要**不带 `drone`**（键集恒为 `cpu` /
+> `powergrid` / `feasible` / `slots` / `hardpoints`）。读无人机要用 `fit_view("resources")`，
+> 或 `fit_get("resources.drone.bandwidth.used")`（它会兜底到 L1）。
 
 > 正确读法（f7 / Legion 实测）：「**25 架全放需要 175 Mbit/s，而总带宽只有 50**」，
 > **不是**「现在已经放了 175」。
@@ -440,9 +447,19 @@ fit 文本与引擎 `Layout` 都**没有「已放飞」这个维度**（只有 `
 calibration.free >= 0` 的三项合判（任一为负 → `false`，任一缺失 → `null`）。无人机带宽 /
 架数**不在那三个数里**（主人裁决：不改 `feasible` 的定义）。
 
-> 因此会遇到「**`feasible: true` 但无人机放不下**」。这时看
-> `resources.upgrade_space[].blocked_by` —— 它可能是 `["drone_bandwidth"]` 或
-> `["launched_drones"]` 这种**不在三项里的资源维度**（实测 f7 有 4 例「资源够却装不下」）。
+> 因此会遇到「**`feasible: true` 但无人机放不下**」。这时看两处，**都不要去 `blocked_by`
+> 里找**：
+>
+> - **`result.flags`** 里那两条（L1 的 `evidence` 直接给超多少：带宽是
+>   `{bandwidth_total, bandwidth_required, over, source}`，架数是
+>   `{drone_count, max_launched, over}`）；
+> - **`resources.upgrade_space[].inherits`** —— 配装**本来就有的**资源违规会作为继承项贴在
+>   **每一个**候选上（实测 f7 的 16 个候选全是 `["drone_bandwidth", "launched_drones"]`）。
+>
+> 为什么不在 `blocked_by` 里：它只装**候选自己新引入**的维度（实测是 `powergrid` /
+> `calibration` 之类），继承来的走 `inherits`（见 §4.9 ④）。f7 那 4 个候选在旧口径下曾报成
+> `fits=false` + `blocked_by=["drone_bandwidth", …]`，T-54 的「`fits` 只看增量」裁决后改成
+> `fits=true` + `inherits=[…]` —— 所以**这两条无人机上限不会出现在 `blocked_by` 里**。
 
 ### 4.7 `zkb_stats` 的调用注意（2026-10-19 实测）
 
@@ -598,6 +615,12 @@ zkb 原文与 ESI 原文**逐字段一致**（`attackers` 条数与每个字段�
 | `killmail_source` | `network` / `local` | **输入形态**：链接 / id / id+hash 要联网，还是调用方直接贴的 JSON |
 | `killmail_origin` | `zkillboard` / `esi` / `local` | **原文从哪来**（只有它区分 zkb 与 ESI） |
 
+> **反直觉但正确**：**ESI 链接**（`https://esi.evetech.net/latest/killmails/<id>/<hash>/`）与
+> `{killmail_id, hash}` 对象都**先问 zkb**，所以它们的 `killmail_origin` 通常仍是
+> `"zkillboard"` —— **不是** `"esi"`。`"esi"` 只在 zkb 原文**缺 `victim.items` 键**、真的
+> 回落时才出现。实测 139239127：zkb 链接 / ESI 链接 / id+hash 对象三种输入全是
+> `killmail_source=network` + `killmail_origin=zkillboard`，本地 JSON 是 `local` + `local`。
+
 实测收益（本地网络，带 items 的战报）：端到端冷调用 **2.48 s → 1.59 s**；
 回落路径（**`victim.items` 键不存在**时才走）只省掉并行那一段（约 4.26 s → 3.94 s）。
 热命中仍是 **0.1 ms** 量级（结果缓存）。
@@ -651,9 +674,10 @@ stable_delta_pct}`。`becomes_stable` 说的是「**只摘掉这一个模块**�
 #### ④ `resources.upgrade_space[]` 的 `blocked_by`
 
 每条 = `{slot, module, module_type_id, candidate, candidate_type_id, meta_level_now,
-meta_level, cpu_free, power_free, calibration_free, fits, inherits, blocked_by?}`。
+meta_level, cpu_free, power_free, calibration_free, fits, inherits?, blocked_by?}`。
 
 - `fits: true` → 候选装得上，**没有 `blocked_by` 键**；
+- `inherits` **仅当非空时出现**（候选没继承任何违规 → 这个键整个不存在）；
 - `fits: false` → 多一个 **`blocked_by`**，列出**卡在哪一项**：`cpu` / `powergrid` /
   `calibration` / `charge_capacity` 等。例：
 
@@ -664,7 +688,9 @@ meta_level, cpu_free, power_free, calibration_free, fits, inherits, blocked_by?}
 ```
 
   `blocked_by` 是「**缺什么**」的答案，`inherits` 是「这个候选**继承**了哪几项资源约束」——
-  两者不是一个意思，别互相替代。`fits: true` 时**不要**去读 `blocked_by`（它不存在）。
+  两者不是一个意思，别互相替代。`fits: true` 时**不要**去读 `blocked_by`（它不存在）；
+  `fits` 只看**增量**（候选自己新引入的违规），所以 `fits: true` 的行**可以**带 `inherits`
+  —— 那是配装的老毛病，不是这个候选的锅（实测 f7 的无人机超限就落在这里，见 §4.6.1）。
 
 ## 5. 返回契约
 
