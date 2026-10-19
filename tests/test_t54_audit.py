@@ -19,6 +19,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from noobbaozi import api
@@ -238,12 +241,19 @@ def test_every_rendered_line_resolves_back_to_a_fitted_type_id() -> None:
 
     整段往返一致只能证明**总量**对；逐行反查才能挡住「名字真、但张冠李戴」
     （把 `Rapid Light Missile Launcher II` 写成同族的另一件模块）。
+    `武器名, 弹药名` 两段都要反查：模块段必须在**已装集合**里，弹药段必须在**原始 charge 集合**里
+    （弹药是模块的装填，不是已装模块 —— 拿它去比已装集合会张冠李戴）。
     数量后缀 `xN` 先剥掉；无人机/货舱段也在内（它们同样是真名字）。
     """
     text = _eft(
         ("Damage Control II", "Nanofiber Internal Structure II"),
         ("Multispectrum Shield Hardener II",),
-        (LAUNCHER, LAUNCHER, LAUNCHER, "Improved Cloaking Device II"),
+        (
+            LAUNCHER,
+            f"{LAUNCHER}, Scourge Fury Light Missile",  # 带装填：逐行反查要覆盖弹药段
+            LAUNCHER,
+            "Improved Cloaking Device II",
+        ),
         ("Medium Ancillary Current Router I",),
         name="LineByLine",
     )
@@ -261,14 +271,21 @@ def test_every_rendered_line_resolves_back_to_a_fitted_type_id() -> None:
     }
     assert original_ids, "原始配装不能是空集，否则下面的断言永真"
 
+    def _resolve(segment: str) -> int:
+        name = segment.rsplit(" x", 1)[0] if " x" in segment else segment
+        hits = [row["type_id"] for row in index.search_types(name, 5) if row["name"] == name]
+        assert hits, f"渲染出的这一段在 SDE 里查不到同名类型：{name!r}（整行 {emitted!r}）"
+        return int(hits[0])
+
     checked = 0
     for line in emitted.split("\n")[1:]:
         if not line.strip():
             continue
-        name = line.rsplit(" x", 1)[0] if " x" in line else line
-        hits = [row["type_id"] for row in index.search_types(name, 5) if row["name"] == name]
-        assert hits, f"渲染出的这一行在 SDE 里查不到同名类型：{line!r}"
-        assert hits[0] in original_ids, f"{line!r} 反查回 {hits[0]}，不在原始配装的已装集合里"
+        module_part, *charge_parts = [part.strip() for part in line.split(",")]
+        assert _resolve(module_part) in original_ids, f"{line!r} 的模块名不在已装集合里"
+        for charge_part in charge_parts:
+            resolved = _resolve(charge_part)
+            assert resolved in _charge_ids(original), f"{line!r} 的弹药名不在原始 charge 集合里"
         checked += 1
     assert checked >= 7, f"至少要逐行检查 7 行（本样本已装 7 件），实际 {checked}"
 
@@ -856,6 +873,16 @@ def _charges(fit: dict) -> list[tuple[int, int | None]]:
         for item in fit["items"]
         if (item.get("slot") or {}).get("type") != "cargo"
     )
+
+
+def _charge_ids(fit: dict) -> set[int]:
+    """原始 fit 里全部**装填弹药**的 type_id（逐行反查弹药段时用）。"""
+    return {
+        int(charge["type_id"])
+        for item in fit["items"]
+        if isinstance(item.get("charge"), dict) and isinstance(item["charge"].get("type_id"), int)
+        for charge in [item["charge"]]
+    }
 
 
 def test_eft_roundtrip_preserves_every_loaded_charge() -> None:

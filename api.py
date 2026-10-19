@@ -2819,7 +2819,12 @@ def _zkb_ship_block(type_id: int | None) -> dict:
 
 
 def _zkb_resolve_entity(
-    kind: str, value: object, requester: ZkbRequester | None
+    kind: str,
+    value: object,
+    requester: ZkbRequester | None,
+    *,
+    clock: Callable[[], float] | None = None,
+    sleeper: Callable[[float], None] | None = None,
 ) -> dict:
     """名字 / id → `{"id": int, "name": str|None}`（名字走 ESI，结果进进程内缓存）。
 
@@ -2829,6 +2834,10 @@ def _zkb_resolve_entity(
     - 名字 → `POST /universe/ids/`，**只在该分类内**选：恰好一个精确同名 → 用它；
       没有精确同名但该分类只有一个结果 → 用它（ESI 已经给了唯一匹配）；其余
       （多个候选 / 一个都没有）→ `unknown_entity` + `candidates`（带 `kind`）。
+
+    `clock` / `sleeper` 会**透传**给 `_zkb_request`（限流闸门用）。不透传的后果很实在：
+    名字解析那次 POST 会用**真实**时钟写 `_ZKB_LAST_START`，随后任何用虚拟时钟的调用都
+    会算出一个巨大的等待量 —— 「虚拟时钟 + 名字解析」的测试全线失真。这是实测踩过的坑。
 
     Raises:
         _ApiFailure: `invalid_argument`（形态不对）/ `unknown_entity`（给不出唯一答案）。
@@ -2853,7 +2862,13 @@ def _zkb_resolve_entity(
     if cached is not None:
         return cached
 
-    payload = _zkb_request(ESI_UNIVERSE_IDS_API, body=[text], requester=requester)
+    payload = _zkb_request(
+        ESI_UNIVERSE_IDS_API,
+        body=[text],
+        requester=requester,
+        clock=clock,
+        sleeper=sleeper,
+    )
     rows = _esi_id_candidates(payload)
     expected = [row for row in rows if row["kind"] == kind]
     exact = [row for row in expected if row["name"].casefold() == key]
@@ -2881,33 +2896,84 @@ def _zkb_resolve_entity(
 
 
 def _zkb_filters(
-    values: dict[str, object], requester: ZkbRequester | None
+    values: dict[str, object],
+    requester: ZkbRequester | None,
+    *,
+    clock: Callable[[], float] | None = None,
+    sleeper: Callable[[float], None] | None = None,
 ) -> tuple[dict[str, dict], dict[str, int]]:
-    """六个实体过滤参数 → `(resolved, filter_ids)`（`resolved` 回显给调用方）。"""
+    """六个实体过滤参数 → `(resolved, filter_ids)`（`resolved` 回显给调用方）。
+
+    `clock` / `sleeper` 透传给名字解析那次 `POST /universe/ids/`（见 `_zkb_resolve_entity`）。
+    """
     resolved: dict[str, dict] = {}
     filter_ids: dict[str, int] = {}
     for field, _segment in ZKB_FILTER_SEGMENTS:
         raw = values.get(field)
         if raw is None:
             continue
-        entry = _zkb_resolve_entity(field, raw, requester)
+        entry = _zkb_resolve_entity(
+            field, raw, requester, clock=clock, sleeper=sleeper
+        )
         resolved[field] = entry
         filter_ids[field] = int(entry["id"])
     return resolved, filter_ids
+
+
+ZKB_ERROR_UNKNOWN_ENTITY: str = "Invalid type or id"
+"""zkb 表达「id 不存在 / id 与类型不匹配」的正文（实测，**HTTP 状态仍是 200**）。
+
+`/api/stats/` 与列表接口都用这一句：`characterID/999999999999/`、`allianceID/<公司 id>/`
+实测都返回 `{"error": "Invalid type or id"}`。
+"""
+
+ZKB_RATE_LIMIT_TOKENS: tuple[str, ...] = ("too many", "rate limit", "rate-limit", "throttl")
+"""正文里出现这些词 → 按「上游在限我们」归类。
+
+**防御性归类，未实测**：我们确实没能抓到 zkb 用正文表达限流（6 次快速连发实测全部
+`200` + 完整体）。真正可证的限流通道是 HTTP 429 / 403，由 `_zkb_request` 直接映射成
+`rate_limited`。这里留一手只是为了「万一上游换了表达方式」时不要把 `rate_limited`
+误报成 `network_failed`。
+"""
+
+
+def _zkb_error_kind(text: object) -> tuple[str, str]:
+    """zkb 的 `{"error": ...}` 正文 → `(kind, 人话解释)`。**两个工具共用这一份判定。**
+
+    为什么必须共用：同一份上游正文，`zkb_search` 曾经判 `network_failed`、`zkb_stats`
+    曾经判 `unknown_entity` —— 同一类错误在两个工具里两个 kind，agent 无从判断该「换个
+    参数重试」还是「等一会儿重试」。
+
+    判据（**只看正文，不看状态码**：zkb 的错误体都是 `200`）：
+
+    - 含 `Invalid type or id` → `unknown_entity`（换 id / 换类型可解）；
+    - 含限流词 → `rate_limited`（等一会儿重试）；
+    - 其余 → `network_failed`（上游拒绝了这次查询，但我们不知道是为什么，**不猜成实体问题**）。
+    """
+    raw = str(text if text is not None else "")
+    folded = raw.casefold()
+    if ZKB_ERROR_UNKNOWN_ENTITY.casefold() in folded:
+        return ("unknown_entity", "id 不存在，或 id 与 entity_type 不匹配")
+    if any(token in folded for token in ZKB_RATE_LIMIT_TOKENS):
+        return ("rate_limited", "上游说我们请求太快（正文里的说法，不是 HTTP 状态码）")
+    return ("network_failed", "上游拒绝了这次查询，但没说为什么")
 
 
 def _zkb_payload_rows(payload: object, url: str) -> list[dict]:
     """一次 zkb 响应 → 列表项字典（形状不对时给结构化错误，**不猜**）。
 
     Raises:
-        _ApiFailure: `network_failed`（zkb 返回 `{"error": ...}` / 不是列表）。
+        _ApiFailure: `unknown_entity` / `rate_limited` / `network_failed`
+            （`{"error": ...}` 的归类走共用的 `_zkb_error_kind()`；不是列表也是
+            `network_failed`）。
     """
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
     if isinstance(payload, dict) and payload.get("error"):
+        kind, why = _zkb_error_kind(payload.get("error"))
         raise _ApiFailure(
-            "network_failed",
-            f"zkb 拒绝了这次查询：{payload.get('error')}",
+            kind,
+            f"zkb 拒绝了这次查询（{why}）：{payload.get('error')}",
             url=url,
             raw=str(payload.get("error")),
         )
@@ -3111,6 +3177,8 @@ def zkb_search(
                 "region": region,
             },
             requester,
+            clock=clock,
+            sleeper=sleeper,
         )
         if not filter_ids:
             # 裸的 /api/kills/ 是全服流式数据（重查询 + 无意义），不是一次检索。
@@ -3255,8 +3323,9 @@ ZKB_STATS_SEGMENTS: dict[str, str] = {
 }
 """实体类型 → zkb 的 URL 段名（**单一真源**，别在函数里裸写字符串）。"""
 
-ZKB_STATS_ERROR_BODY: str = "Invalid type or id"
-"""id 不存在 / 类型错配时 zkb 的 error 正文（**HTTP 状态仍是 200**）。"""
+ZKB_STATS_ERROR_BODY: str = ZKB_ERROR_UNKNOWN_ENTITY
+"""`zkb` 表达「实体不存在 / 类型不匹配」的正文 —— **就是** `ZKB_ERROR_UNKNOWN_ENTITY`
+（两个工具共用同一个常量，不再各写一份字面量）。"""
 
 ZKB_STATS_TOP_LIMIT: int = 5
 """`top.*` 每类取前几条（实测 6 类各 5 条约 1.5 KB，撑得住 4 KB 预算）。"""
@@ -3662,7 +3731,9 @@ def _stats_payload(url: str, payload: object, warnings: list[str]) -> dict:
     """校验响应正文 → 画像文档（**判成败只看正文，不看状态码**）。
 
     Raise:
-        _ApiFailure: `unknown_entity`（`{"error": ...}` / 空壳）/ `network_failed`（形状不对）。
+        _ApiFailure: `unknown_entity`（`{"error": "Invalid type or id"}` / 空壳）/
+            `rate_limited` / `network_failed`（`{"error": ...}` 的归类走**共用**的
+            `_zkb_error_kind()`，与 `zkb_search` 同一份判定）/ `network_failed`（形状不对）。
     """
     if not isinstance(payload, dict):
         raise _ApiFailure(
@@ -3672,9 +3743,10 @@ def _stats_payload(url: str, payload: object, warnings: list[str]) -> dict:
         )
     error = payload.get("error")
     if error:
+        kind, why = _zkb_error_kind(error)
         raise _ApiFailure(
-            "unknown_entity",
-            f"zkb 不认这个实体：{error}（id 不存在或与 entity_type 不匹配）",
+            kind,
+            f"zkb 不认这次画像查询（{why}）：{error}",
             url=url,
             raw=str(error),
         )
@@ -3777,7 +3849,9 @@ def zkb_stats(
             )
         kind = _stats_entity_type(entity_type)
         blocks = _stats_include(include)
-        resolved = _zkb_resolve_entity(kind, entity, requester)
+        resolved = _zkb_resolve_entity(
+            kind, entity, requester, clock=clock, sleeper=sleeper
+        )
         url = zkb_stats_url(kind, int(resolved["id"]))
         warnings: list[str] = []
         try:
@@ -3894,6 +3968,7 @@ __all__ = [
     "WEAPON_FAMILIES",
     "WEAPON_FAMILY_OTHER",
     "ZKB_API_ROOT",
+    "ZKB_ERROR_UNKNOWN_ENTITY",
     "ZKB_FILTER_SEGMENTS",
     "ZKB_ID_CACHE_MAX",
     "ZKB_IGNORED_PARAMETERS",
@@ -3901,6 +3976,7 @@ __all__ = [
     "ZKB_MIN_INTERVAL_S",
     "ZKB_PAGE_SIZE",
     "ZKB_RATE_LIMIT_STATUSES",
+    "ZKB_RATE_LIMIT_TOKENS",
     "ZKB_REJECTED_PARAMETERS",
     "ZKB_SEARCH_NOTE",
     "ZKB_SIDES",

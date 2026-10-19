@@ -3,14 +3,19 @@
 # noobbaozi MCP · NAS 一键重部署
 #
 # 用法（必须 root）：
-#   sudo sh /volume1/docker/noobbaozi-mcp/docker/redeploy.sh
+#   sudo sh <仓库目录>/docker/redeploy.sh
 #
-# 做四件事：① git pull ② 重建镜像 ③ 重启容器 ④ 自检 /health
-# 失败即退出（set -e），并把关键输出留在 last-deploy.log 里。
+# 仓库目录**自动从脚本自身位置推导**（= 本文件所在目录的上一级），
+# 所以目录叫 noobbaozi / evefit-mcp / 任何名字都能用，不要硬编码路径。
+#
+# 做五件事：① 停旧容器释放端口 ② git pull ③ 重建镜像 ④ 重启容器 ⑤ 自检 /health
+# 失败即退出（set -e），关键输出留在 last-deploy.log。
 # =============================================================================
 set -eu
 
-REPO_DIR="${1:-/volume1/docker/noobbaozi-mcp}"
+# 仓库目录 = 脚本所在目录的上一级（不依赖目录名）
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_DIR="${1:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 LOG="$REPO_DIR/last-deploy.log"
 COMPOSE="docker compose -f docker/docker-compose.yml"
 PORT="${NOOBBAOZI_PORT:-8080}"

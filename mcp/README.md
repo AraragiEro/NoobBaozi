@@ -369,7 +369,7 @@ Caldari Navy Scourge Light Missile x1232
 - 渲染失败（名字查不到 / 槽位类型没有 EFT 表示）→ `eft: null` + 一条 `warnings`，
   **不编造任何一行**。看到 `null` 就如实说渲染不出来，别手写一份补上。
 
-### 4.6 `resources.hardpoints`：高槽 ≠ 炮位（T-54）
+### 4.6 `resources.hardpoints`：高槽 ≠ 炮位，且「不占硬点」与「分不清」是两件事
 
 `turret` 与 `launcher` 是**两种硬点**，都长在**高槽**模块上，但「高槽 5 个」**不是**
 「5 个发射器挂点」—— 这是实测过的口径错（旧字段 `hardpoints_free` 直接输出船体的**基准
@@ -378,17 +378,29 @@ Caldari Navy Scourge Light Missile x1232
 ```json
 "hardpoints": {
   "turret":   {"total": 2, "used": 0, "free": 2},
-  "launcher": {"total": 3, "used": 3, "free": 0},
-  "unclassified": 1
+  "launcher": {"total": 3, "used": 0, "free": 3},
+  "non_hardpoint": 1,
+  "non_hardpoint_modules": ["Improved Cloaking Device II"],
+  "unclassified": 0
 }
 ```
 
-| 字段 | 来源 | 三态 |
+**高槽里的每一件只会落到四个去处**（`turret` / `launcher` / `non_hardpoint` / `unclassified`）：
+
+| 字段 | 含义 | 三态 |
 |---|---|---|
 | `total` | 船体属性 102 `turretSlotsLeft` / 101 `launcherSlotsLeft`（**基准值**，引擎已叠加 hardpoint 修正） | `measured` |
 | `used` | **数**高槽里已装的炮 / 发射器（按名字 / 组名关键词分类，规则见 `project/views/resources.py` 的 `HARDPOINT_*`） | `assumed` |
 | `free` | `total - used`，**可以为负** —— 负数 = 非法装配，同时出 `hardpoint_violation` flag | `assumed` |
-| `unclassified` | 高槽里**分不清**是炮还是发射器的件数（含探针发射器 / 牵引光束这类不占硬点的） | `assumed` |
+| `non_hardpoint` | 高槽里**确定不占硬点**的件数（隐身 / 智能炸弹 / 吸电 / 遥修…）。**一件都不进 `used`** | `assumed` |
+| `non_hardpoint_modules` | 上面那件事的**样例名字**（最多 3 个，人读时不用猜是哪件） | `assumed` |
+| `unclassified` | **分不清**的件数（`Festival Launcher` 一族：看不出是武器还是别的） | `assumed` |
+
+> **为什么把 `non_hardpoint` 和 `unclassified` 拆成两个数**：拆之前它们挤在一个
+> `unclassified` 里，于是「有一件我们认不出的武器」和「有一件确定不占硬点的隐身」长得
+> 一模一样。实测踩过：一艘船报 `unclassified: 1`，agent 会以为可能藏了一件武器，实际是
+> 那件**隐身**（确定不占硬点）。现在确定的进 `non_hardpoint`（还带样例名字），`unclassified`
+> 只剩真正分不清的 —— 后者是「我们能力不足」，前者是「事实如此」，不能混。
 
 - 它**和 `slots` 并列出现在 L0**（`resources.slots` 与 `resources.hardpoints`）：
   agent 只看摘要时也能分清「5 个高槽」与「3 个发射器挂点」；
@@ -396,6 +408,8 @@ Caldari Navy Scourge Light Missile x1232
 - 超装：`hardpoints.launcher = {total: 3, used: 5, free: -2}` → `hardpoint_violation`
   flag（`evidence = {kind: "launcher", total: 3, used: 5, over: 2}`，L0 的 `hint` 是
   `发射器超2`）。**`free` 为负绝不会静默通过**。
+- 模块名一律按 **SDE 实名**匹配（`Small Tractor Beam II` 不是 `Tractor Beam II`，
+  `Festival Launcher` 不是 `Festival Launcher I`）—— 写用例前先核 SDE。
 
 ### 4.7 `zkb_stats` 的调用注意（2026-10-19 实测）
 

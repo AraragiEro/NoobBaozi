@@ -1692,10 +1692,9 @@ _FAKE_NOW: dict[str, float] = {"now": 0.0}
 _SLEPT: list[float] = []
 """虚拟睡眠记录（只记录、**不抛异常**）。
 
-不抛异常是有意的：`_zkb_resolve_entity()` 内部那次 `POST /universe/ids/` **不转发**
-clock/sleeper（既有设计，本任务不改 api 的解析函数），所以它会用真实时钟写一次
-`_ZKB_LAST_START`；随后用虚拟时钟的请求算出的等待必然是个大数。这里记录下来即可，
-断言「没有真的睡」交给 `test_zkb_search_respects_the_1_2s_gap` 那条已有测试。
+`_zkb_resolve_entity()` 现在会把 clock/sleeper 透传给限流闸门（T-55 修），所以名字解析
+那次 `POST /universe/ids/` 也用虚拟时钟。这里保留记录是为了让个别测试能断言
+「到底睡了多少」——真实时钟下那个数会是几千秒。
 """
 
 
@@ -2354,3 +2353,179 @@ def test_zkb_stats_resolves_a_name_through_esi(zkb_state: None) -> None:
     ]
     assert seen[0][1] == ["SixtyEverSnake"], "名字解析的请求体就是名字数组"
     assert envelope["result"]["entity"]["name"] == "SixtyEverSnake"
+
+
+def test_zkb_name_resolution_respects_the_injected_clock(zkb_state: None) -> None:
+    """名字解析那次 `POST /universe/ids/` **也**要走注入的虚拟时钟（T-55 修）。
+
+    修之前：`_zkb_resolve_entity()` 不透传 clock/sleeper，那次 POST 用**真实**时钟写
+    `_ZKB_LAST_START`，随后虚拟时钟算出的等待量是几千秒 —— 任何「虚拟时钟 + 名字解析」的
+    测试都会拿到荒谬的睡眠值（或真的睡下去）。
+
+    这里让时钟每次只前进 1.0 s（< 1.2 s 的最小间隔），于是第二次请求只该补 0.2 s。
+    如果仍用真实时钟，记录到的会是个大数（或几十秒），断言立刻红。
+    """
+    slept: list[float] = []
+    cursor = {"now": 0.0}
+
+    def clock() -> float:
+        cursor["now"] += 1.0
+        return cursor["now"]
+
+    def sleeper(seconds: float) -> None:
+        slept.append(seconds)
+
+    def requester(url: str, body: object | None = None) -> object:
+        if body is not None:
+            return {"characters": [{"id": 2117515414, "name": "SixtyEverSnake"}]}
+        return _fixture(STATS_CHARACTER)
+
+    envelope = api.zkb_stats(
+        "SixtyEverSnake", entity_type="character",
+        requester=requester, clock=clock, sleeper=sleeper,
+    )
+    assert envelope["ok"] is True, envelope
+    assert slept == [pytest.approx(0.2)], (
+        f"名字解析没走注入的时钟：记录了 {slept}（期望只补 0.2 s）"
+    )
+    assert all(value < api.ZKB_MIN_INTERVAL_S for value in slept), (
+        "任何一次睡眠都不该超过最小间隔 —— 超过了说明用了另一个时钟"
+    )
+
+
+# -----------------------------------------------------------------------------
+# `zkb_search` 与 `zkb_stats` 的错误映射必须**同源**（不得各写一份判定）
+# -----------------------------------------------------------------------------
+
+
+def test_zkb_error_kind_is_shared_by_both_tools(zkb_state: None) -> None:
+    """同一份上游正文 → 两个工具给**同一个** `kind`。
+
+    这是真实存在过的不一致：`{"error": "Invalid type or id"}` 在 `zkb_search` 里被
+    判 `network_failed`、在 `zkb_stats` 里被判 `unknown_entity`。同一类错误两个 kind，
+    agent 无从判断该「换参数」还是「等一会儿重试」。现在共用 `_zkb_error_kind()`。
+    """
+    body = {"error": "Invalid type or id"}
+
+    search = api.zkb_search(
+        ship=22444, side="losses", requester=_Recorder(get_payload=body)
+    )
+    stats = api.zkb_stats(
+        999999999999, entity_type="character", requester=_StatsRecorder(body)
+    )
+    assert search["error"]["kind"] == "unknown_entity", search
+    assert stats["error"]["kind"] == "unknown_entity", stats
+    assert search["error"]["kind"] == stats["error"]["kind"]
+
+    # 说不出原因的拒绝 → 两边都 network_failed（**不猜成实体问题**）
+    vague = {"error": "something odd happened"}
+    search_vague = api.zkb_search(
+        ship=22444, side="losses", requester=_Recorder(get_payload=vague)
+    )
+    stats_vague = api.zkb_stats(
+        2117515414, entity_type="character", requester=_StatsRecorder(vague)
+    )
+    assert search_vague["error"]["kind"] == "network_failed", search_vague
+    assert stats_vague["error"]["kind"] == "network_failed", stats_vague
+
+
+def test_zkb_error_kind_table(zkb_state: None) -> None:
+    """`_zkb_error_kind()` 的判定表（**只看正文，不看状态码**）。"""
+    cases = {
+        "Invalid type or id": "unknown_entity",
+        "invalid type or id": "unknown_entity",  # 大小写不敏感
+        "Too many requests": "rate_limited",
+        "you are being rate limited": "rate_limited",
+        "internal server oil": "network_failed",
+        "": "network_failed",
+    }
+    for text, want in cases.items():
+        kind, why = api._zkb_error_kind(text)
+        assert kind == want, f"{text!r} 应判 {want}，实际 {kind}（{why}）"
+
+
+def test_zkb_stats_transport_error_classes_are_distinct(
+    zkb_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """四种上游/自身情况 → 四个**两两不同**的 kind，且 `internal_error` 只由我们的异常触发。
+
+    | 上游/自身 | kind |
+    |---|---|
+    | 429 / 403 | `rate_limited`（+ `hint.min_interval_s`） |
+    | 非 JSON / 被截断 | `network_failed` |
+    | 0 字节空体 | `internal_error` + `empty_body` warning（我们自己 URL 构造的锅） |
+    | 我们自己的异常 | `internal_error` |
+    """
+    url = "https://zkillboard.com/api/stats/characterID/2117515414/"
+
+    # ① 429 / 403 → rate_limited，且带退避提示
+    rate_kind = ""
+    for status in (429, 403):
+
+        def boom(*_args: object, **_kwargs: object) -> None:
+            raise urllib.error.HTTPError(url, status, "too fast", None, None)
+
+        monkeypatch.setattr(api.urllib.request, "urlopen", boom)
+        api._reset_zkb_state()
+        envelope = api.zkb_stats(2117515414, entity_type="character")
+        assert envelope["ok"] is False
+        assert envelope["error"]["kind"] == "rate_limited", envelope
+        assert envelope["error"]["status"] == status
+        assert envelope["error"]["hint"]["min_interval_s"] == api.ZKB_MIN_INTERVAL_S, (
+            "限流必须告诉调用方「等多久再来」，否则 agent 只会当成我们坏了"
+        )
+        rate_kind = envelope["error"]["kind"]
+
+    # ② 非 JSON（有字节）→ network_failed
+    class _Broken:
+        status = 200
+
+        def read(self) -> bytes:
+            return b"<html>502 Bad Gateway</html>"
+
+        def __enter__(self) -> "_Broken":
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(api.urllib.request, "urlopen", lambda *_a, **_k: _Broken())
+    api._reset_zkb_state()
+    broken = api.zkb_stats(2117515414, entity_type="character")
+    assert broken["error"]["kind"] == "network_failed", broken
+
+    # ③ 0 字节空体 → internal_error + empty_body warning
+    def empty(url_: str, body: object | None = None) -> object:
+        raise api._ApiFailure(
+            "network_failed", "不是 JSON", url=url_, payload_bytes=0
+        )
+
+    api._reset_zkb_state()
+    hollow = api.zkb_stats(2117515414, entity_type="character", requester=empty)
+    assert hollow["error"]["kind"] == "internal_error", hollow
+    assert any("empty_body" in w for w in hollow["error"]["warnings"])
+
+    # ④ 我们自己的异常 → internal_error（**唯一**该用它的地方），并且带 detail
+    def broken_internals(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("我们自己写崩了")
+
+    monkeypatch.setattr(api, "_stats_payload", broken_internals)
+    api._reset_zkb_state()
+    own_bug = api.zkb_stats(
+        2117515414, entity_type="character",
+        requester=_StatsRecorder(_fixture(STATS_CHARACTER)),
+    )
+    assert own_bug["error"]["kind"] == "internal_error", own_bug
+    assert "我们自己写崩了" in str(own_bug["error"].get("detail")), (
+        "自己的异常要把 detail 带出来，否则排查时只知道「内部错误」"
+    )
+
+    # 三种**上游**情况两两不同：限流 / 非 JSON / 空体
+    assert {
+        rate_kind,
+        broken["error"]["kind"],
+        hollow["error"]["kind"],
+    } == {"rate_limited", "network_failed", "internal_error"}, (
+        "三种上游情况的 kind 必须两两不同（否则 agent 分不清该等、该重试、还是该报障）"
+    )
+
