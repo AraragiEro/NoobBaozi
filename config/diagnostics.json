@@ -24,7 +24,13 @@
       "id": "empty_hardpoint",
       "view": "resources",
       "enabled": true,
-      "message": "高槽空 {high_empty} 个，但炮台挂点余 {turret_free}、发射器挂点余 {launcher_free}"
+      "message": "高槽空 {high_empty} 个；{free_kinds} 没装满（这一类硬点已经在用）"
+    },
+    {
+      "id": "hardpoint_violation",
+      "view": "resources",
+      "enabled": true,
+      "message": "硬点超装：{over_kinds} —— 这套配装在游戏里装不上"
     },
     {
       "id": "drone_bandwidth_idle",

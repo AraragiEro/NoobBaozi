@@ -44,7 +44,7 @@ L0 的字段清单（文档 §3，每视角 3–5 个）
 | `firepower` | `weapons{count, families}` / `dps_base` / `dph` / `range_m{optimal[, max]}` / `damage_split` |
 | `survivability` | `ehp_mixed` / `layers{shield, armor, hull}` / `thinnest{layer, damage_type}` / `repair_total_hp_s` |
 | `mobility` | `speed_mps` / `align_time_s` / `signature_radius_m` / `propulsion_state` |
-| `resources` | `cpu{output, load, free}` / `powergrid{...}` / `feasible` / `slots{high: "3/6", …}` |
+| `resources` | `cpu{output, load, free}` / `powergrid{...}` / `feasible` / `slots{high: "3/6", …}` / `hardpoints{turret{total,used,free}, launcher{…}, unclassified}` |
 | `constraints` | `hard_violations{count, kinds}` / `tier_violations{count, kinds}` / `needs_implant` |
 | `stability` | `cap_stable_pct` / `cap_depletes_in_s` / `cap_load_gj_s` / `cap_recharge_gj_s` / `has_external_dependency` |
 | 顶层 | `ship{name, group, type_id}` / `meta`（**技能档只给 `{name, count, hash}`**）/ `flags[{id, hint}]` / `provenance_counts{measured, assumed, unknown}` / `budget{chars, degraded}` |
@@ -466,6 +466,23 @@ INDEX_SPEC: dict[str, tuple[IndexField, ...]] = {
         IndexField("powergrid", source="powergrid"),
         IndexField("feasible", source="feasible"),
         IndexField("slots", read=_slots_block, synthetic=True),
+        # 炮位（T-54）：**必须出现在 L0**——只看到 `slots.high` 时 agent 会把「高槽 5 个」
+        # 当成「5 个发射器挂点」，进而得出「白扔两个发射器」（战报 139274776 的实际缺陷）。
+        # 形状原样透传（与 L1 同一份 dict）：`turret` / `launcher` 各 `{total, used, free}`，
+        # `free` 可以为负（负数 = 非法装配，`hardpoint_violation` flag 报）。
+        IndexField(
+            "hardpoints",
+            source="hardpoints",
+            aliases=(
+                ("turret.total", "hardpoints.turret.total"),
+                ("turret.used", "hardpoints.turret.used"),
+                ("turret.free", "hardpoints.turret.free"),
+                ("launcher.total", "hardpoints.launcher.total"),
+                ("launcher.used", "hardpoints.launcher.used"),
+                ("launcher.free", "hardpoints.launcher.free"),
+                ("unclassified", "hardpoints.unclassified"),
+            ),
+        ),
     ),
     "constraints": (
         IndexField("hard_violations", read=_hard_violations_block, synthetic=True),
@@ -492,8 +509,11 @@ INDEX_SPEC: dict[str, tuple[IndexField, ...]] = {
 1. **整字段改名**：`source` 就是底层路径 —— `dps_base` ← `dps.base`、
    `dph` ← `dph`、`range_m.optimal` ← `range.optimal_m`、`cap_load_gj_s` ←
    `capacitor.peak_load` …（`source` 为 `None` 的不属于这一类）；
-2. **块内子键改名**：`aliases` 给出「L0 子键 → L1 叶子」—— 只有 `survivability.layers`
-   需要（`shield` ← `layers.shield_hp`）；
+2. **块内子键改名**：`aliases` 给出「L0 子键 → L1 叶子」—— `survivability.layers`
+   （`shield` ← `layers.shield_hp`）与 `resources.hardpoints`（`turret.total` ←
+   `hardpoints.turret.total`，T-54：块形状原样透传，但**逐子键**登记别名才能在
+   `get_path("resources.hardpoints.launcher.free")` 上取到真正的三态——`total` 是
+   `measured`、`used` / `free` 是 `assumed`，一整块只记一条会把 `measured` 也拖成 `assumed`）；
 3. **同名块下钻**：`source` 本身当下钻前缀 —— `damage_split.em` ← `damage_split.em`、
    `resources.cpu.output` ← `cpu.output`、`powergrid.load` ← `powergrid.load`。
    这三块**不需要** `aliases`（键名一模一样），但**必须**能下钻，否则
@@ -653,6 +673,9 @@ _DAMAGE_LABELS: dict[str, str] = {
 _RESOURCE_LABELS: dict[str, str] = {"cpu": "CPU", "power": "PG", "powergrid": "PG", "calibration": "标定"}
 """资源三项的短名（`*_deficit` 的键去掉后缀之后 → 显示名）。"""
 
+_HARDPOINT_LABELS: dict[str, str] = {"turret": "炮位", "launcher": "发射器"}
+"""两种硬点的短名（`hardpoint_violation.evidence.kind` → 中文；只翻译，不产生新事实）。"""
+
 
 def _hint_label(table: Mapping[str, str], value: object) -> str:
     """领域词 → 短名；**表外一律原样返回**（不猜、不编一个中文名）。"""
@@ -729,10 +752,24 @@ _HINT_SHAPES: tuple[tuple[tuple[str, ...], Callable[[Mapping[str, object]], str]
     (("cpu_deficit",), _hint_deficit),
     # MWD 把信号半径撑大 → "信号×5.5"
     (("sig_ratio",), lambda e: f"信号×{_hint_number(e['sig_ratio'])}"),
-    # 高槽有挂点但空着 → "高槽空3/4"
+    # 高槽空 + **已在用的那一类**硬点没装满 → "高槽空3;发射器1"
+    # （T-54 审查：旧的 ("high_empty","high_total") 形状只给 "高槽空1/5"，把
+    #  「哪一类硬点还有余」整个丢掉了 —— 而那正是这条 flag 的全部信息量）
+    (
+        ("free_kinds", "high_empty"),
+        lambda e: f"高槽空{_hint_number(e['high_empty'])};{_hint_compact(e['free_kinds'])}",
+    ),
+    # 高槽有挂点但空着 → "高槽空3/4"（没有 free_kinds 时的兜底）
     (
         ("high_empty", "high_total"),
         lambda e: f"高槽空{_hint_number(e['high_empty'])}/{_hint_number(e['high_total'])}",
+    ),
+    # 炮/发射器超装（free 为负）→ "发射器超2" / 两类都超 → "炮位超1+发射器超1"
+    # （`over_kinds` 是预渲染的全部类别；没有它的旧数据退回只报最严重的那一类）
+    (("over_kinds",), lambda e: _hint_compact(e["over_kinds"])),
+    (
+        ("kind", "over"),
+        lambda e: f"{_hint_label(_HARDPOINT_LABELS, e['kind'])}超{_hint_number(e['over'])}",
     ),
     # 关掉这一件电容就稳 → "关5MN就稳"
     (("module", "stable_pct_after"), lambda e: f"关{_hint_token(e['module'])}就稳"),

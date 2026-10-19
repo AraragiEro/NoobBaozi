@@ -555,3 +555,148 @@ def test_module_entry_point_knows_search() -> None:
         "--json",
     ):
         assert token in completed.stdout, f"--help 里应提到 {token}：\n{completed.stdout}"
+
+
+# =============================================================================
+# 三、实体画像（T-55）：`stats`
+# =============================================================================
+
+STATS_CHARACTER = ZKB_FIXTURES / "stats-character-2117515414.json"
+STATS_ALLIANCE = ZKB_FIXTURES / "stats-alliance-1354830081.json"
+
+
+@pytest.fixture()
+def stats_offline(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """把 zkb 的 GET 请求器换成 stats fixture（不联网），并清掉限流时间戳。
+
+    用**整数 id** 调用时不会有 ESI 名字解析，所以只需拦 GET 这一跳；`POST` 一旦发生就
+    直接判失败 —— 那说明 CLI 走错了解析路径。
+    """
+    document = json.loads(STATS_CHARACTER.read_text(encoding="utf-8-sig"))
+    seen: list[str] = []
+
+    def fake(url: str, body: object | None = None) -> object:
+        seen.append(url)
+        if body is not None:
+            raise AssertionError(f"stats 用整数 id 不该发 POST：{url}")
+        return document
+
+    api._reset_zkb_state()
+    api.clear_caches()
+    monkeypatch.setattr(api, "_zkb_default_requester", fake)
+    yield seen
+    api._reset_zkb_state()
+
+
+def test_stats_json_is_the_api_envelope(
+    stats_offline: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`stats --character <id> --json` → stdout 就是 `api.zkb_stats` 的信封原样，退出码 0。"""
+    code, out, err = _run_cli(
+        ["stats", "--character", "2117515414", "--json"], capsys
+    )
+    assert code == cli.EXIT_OK, err
+    assert err == ""
+    envelope = json.loads(out)
+    assert envelope["ok"] is True
+    result = envelope["result"]
+    assert result["entity"]["name"] == "SixtyEverSnake"
+    assert result["style"]["danger_ratio"] == 69
+    assert result["style"]["solo_ratio"] == 1.8
+    assert stats_offline == [
+        "https://zkillboard.com/api/stats/characterID/2117515414/"
+    ], f"URL 拼错：{stats_offline}"
+
+
+def test_stats_human_output_carries_the_units(
+    stats_offline: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """人话输出**必须带量纲**，否则 `1.8` 一定被读成比例。
+
+    钉住三个锚点：`solo` 的百分号、`avg_gang_size` 的「人/次」、`efficiency` 与
+    `danger_ratio` 不是同一个东西的说明。
+    """
+    code, out, err = _run_cli(["stats", "--character", "2117515414"], capsys)
+    assert code == cli.EXIT_OK, err
+    assert "SixtyEverSnake" in out
+    assert "solo=1.8%（百分数）" in out, f"百分数量纲丢了：\n{out}"
+    assert "人/次" in out, f"avg_gang_size 的量纲丢了：\n{out}"
+    assert "≠ zkb 的 danger_ratio" in out, "必须点明 efficiency 不是 danger_ratio"
+    assert "formula=None" in out, "公式未公开要说出来"
+    assert "top.locations" in out, "6 类榜单都要列出来"
+    assert "Asteroid Belt" in out or "(Star)" in out, "locations 是天体级"
+
+
+def test_stats_requires_exactly_one_entity(capsys: pytest.CaptureFixture[str]) -> None:
+    """`stats` 的实体是**恰好一个**：0 个或 2 个都是用法错误（退出码 2，不进 api）。"""
+    code, out, err = _run_cli(["stats"], capsys)
+    assert code == cli.EXIT_USAGE
+    assert out == ""
+    assert "恰好一个实体" in err
+
+    code, out, err = _run_cli(
+        ["stats", "--character", "A", "--alliance", "B"], capsys
+    )
+    assert code == cli.EXIT_USAGE
+    assert out == ""
+    assert "只能查一个实体" in err
+    assert "character, alliance" in err, "要说清到底多给了哪几个"
+
+
+def test_stats_include_is_passed_through(
+    stats_offline: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--include` 可重复，原样递到 api 的 `include`；人话里带上补洞说明。"""
+    code, out, err = _run_cli(
+        ["stats", "--character", "2117515414", "--include", "months", "--json"], capsys
+    )
+    assert code == cli.EXIT_OK, err
+    result = json.loads(out)["result"]
+    assert list(result["blocks"]) == ["months"]
+    block = result["blocks"]["months"]
+    assert block["filled_internal_gaps"] == 37
+    assert block["range"] == {"first": "2021-05", "last": "2026-10"}
+
+    code, out, err = _run_cli(
+        ["stats", "--character", "2117515414", "--include", "months"], capsys
+    )
+    assert code == cli.EXIT_OK, err
+    assert "补内部空洞=37" in out, f"months 的补洞语义没说清：\n{out}"
+
+
+def test_stats_rejects_unknown_include_before_calling_api(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """非法 `--include` 由 argparse 挡住（退出码 2），**不会**进 api。"""
+    code, out, err = _run_cli(
+        ["stats", "--character", "2117515414", "--include", "nope"], capsys
+    )
+    assert code == cli.EXIT_USAGE
+    assert out == ""
+    assert "invalid choice" in err
+
+
+def test_stats_human_failure_goes_to_stderr(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """人话模式下业务失败写 stderr、stdout 保持干净，退出码 1。"""
+    api._reset_zkb_state()
+    monkeypatch.setattr(
+        api, "_zkb_default_requester",
+        lambda url, body=None: {"error": "Invalid type or id"},
+    )
+    try:
+        code, out, err = _run_cli(["stats", "--alliance", "1354830081"], capsys)
+        assert code == cli.EXIT_API_FAILURE
+        assert out == ""
+        assert "unknown_entity" in err
+    finally:
+        api._reset_zkb_state()
+
+
+def test_module_entry_point_knows_stats() -> None:
+    """真起子进程：`python -m noobbaozi.cli stats --help` 里能看到这一组选项。"""
+    completed = _subprocess_cli(["stats", "--help"])
+    assert completed.returncode == 0, completed.stderr
+    for token in ("--character", "--corporation", "--alliance", "--include", "--json"):
+        assert token in completed.stdout, f"--help 里应提到 {token}：\n{completed.stdout}"

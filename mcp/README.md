@@ -272,6 +272,7 @@ python -c "from noobbaozi import mcp_server as m; print(m.INSTRUCTIONS); [print(
 | `fit_get` | 按路径精确取一个值 + 它的 provenance / reason |
 | `fit_detail` | 列表型明细（升级候选、逐模块电容、完整技能表 512 条） |
 | `zkb_search` | 战报列表检索（先筛 killmail_id，再对那条调 `fit_killmail`）；**每行带受害者驾驶员 / 军团 / 联盟名字** |
+| `zkb_stats` | 实体画像（角色 / 公司 / 联盟）：战斗总量 + zkb 风格指标 + 7 天活动 + 6 类榜单；**公式未公开的指标只转述，不给威胁判词** |
 
 每个工具的「何时用 / 返回什么 / 限制」、每个参数的含义与默认值，都写在它的
 `description` / `inputSchema` 里 —— **别在这份 README 里补第二份**（复制就会漂移；
@@ -334,6 +335,149 @@ python -c "from noobbaozi import mcp_server as m; print(m.INSTRUCTIONS); [print(
   组内 **4** 个条目 / 伤害 1162921，而严格 `type_id == 670` 是 **3** 人（多出来那个是 33328、
   0 伤害）。两个数字都对 —— 一个数**条目**、一个数**严格同型**；`ship_attribution` 按**组**判定，
   所以 33328 那条也被标成 `capsule`（它同样是蛋，同样装不了武器）。
+
+### 4.5 `fit_parse` 的 `eft` 字段（T-54：规范文本由服务给，不要自己拼）
+
+`result.eft` 是**从真实装配渲染出来的规范 EFT 文本**（字符串，可直接复制到 EFT / pyfa /
+游戏剪贴板）。此前项目只有解析、没有渲染，agent 只能自己拼，实测拼出过「5 门 RLML +
+50MN Micromassdrive」这种**不存在的配装**（真实是 3 门 RLML + 1 件隐身）。
+
+格式（`project/eft.py` 是唯一实现）：
+
+```
+[Osprey Navy Issue, Killmail 139274776]      ← 首行 [船名, 配装名]；名字为空时写 [船名]
+
+Damage Control II                            ← 低槽
+Nanofiber Internal Structure II
+...
+                                             ← 组间空一行：低 → 中 → 高 → 改装 →（子系统）
+Rapid Light Missile Launcher II              ← 同型模块**每件单独一行**（不写 ×N）
+Rapid Light Missile Launcher II
+Rapid Light Missile Launcher II
+Improved Cloaking Device II
+
+                                             ← 无人机 / 舰载机段（没有就不出现）
+Warrior II x5
+                                             ← 货舱 / 弹药段（loaded charge 也在这里，不进模块行）
+Caldari Navy Scourge Light Missile x1232
+```
+
+- 换行一律 `\n`，末尾**没有**多余空行；
+- `loaded charge`（弹药）**不写进模块行**，统一落在货舱 / 弹药段；
+- **可往返**：`parse(emit(fit))` 的已装模块集合（`type_id` + 数量）与原始一致
+  （`tests/test_eft.py` 钉住）；
+- 渲染失败（名字查不到 / 槽位类型没有 EFT 表示）→ `eft: null` + 一条 `warnings`，
+  **不编造任何一行**。看到 `null` 就如实说渲染不出来，别手写一份补上。
+
+### 4.6 `resources.hardpoints`：高槽 ≠ 炮位（T-54）
+
+`turret` 与 `launcher` 是**两种硬点**，都长在**高槽**模块上，但「高槽 5 个」**不是**
+「5 个发射器挂点」—— 这是实测过的口径错（旧字段 `hardpoints_free` 直接输出船体的**基准
+炮位数**，装 0 / 3 / 5 门发射器都是同一个数，已删除）。
+
+```json
+"hardpoints": {
+  "turret":   {"total": 2, "used": 0, "free": 2},
+  "launcher": {"total": 3, "used": 3, "free": 0},
+  "unclassified": 1
+}
+```
+
+| 字段 | 来源 | 三态 |
+|---|---|---|
+| `total` | 船体属性 102 `turretSlotsLeft` / 101 `launcherSlotsLeft`（**基准值**，引擎已叠加 hardpoint 修正） | `measured` |
+| `used` | **数**高槽里已装的炮 / 发射器（按名字 / 组名关键词分类，规则见 `project/views/resources.py` 的 `HARDPOINT_*`） | `assumed` |
+| `free` | `total - used`，**可以为负** —— 负数 = 非法装配，同时出 `hardpoint_violation` flag | `assumed` |
+| `unclassified` | 高槽里**分不清**是炮还是发射器的件数（含探针发射器 / 牵引光束这类不占硬点的） | `assumed` |
+
+- 它**和 `slots` 并列出现在 L0**（`resources.slots` 与 `resources.hardpoints`）：
+  agent 只看摘要时也能分清「5 个高槽」与「3 个发射器挂点」；
+- `total` 缺失 → `free` 也是 `null`（不补 0），`used` 仍是数出来的真值；
+- 超装：`hardpoints.launcher = {total: 3, used: 5, free: -2}` → `hardpoint_violation`
+  flag（`evidence = {kind: "launcher", total: 3, used: 5, over: 2}`，L0 的 `hint` 是
+  `发射器超2`）。**`free` 为负绝不会静默通过**。
+
+### 4.7 `zkb_stats` 的调用注意（2026-10-19 实测）
+
+`zkb_stats(entity, entity_type, include=None)`。**`entity_type` 必填**（`character` /
+`corporation` / `alliance`）—— 同一串数字在三个命名空间里都可能存在，**不靠 id 猜**。
+
+#### ① 三个「不是成功」的响应，HTTP 状态码全都是 `200`
+
+zkb 的 `/api/stats/` **不用状态码表达失败**，所以判成败只能看正文：
+
+| 上游实际返回 | 我们的 `error.kind` |
+|---|---|
+| `{"error": "Invalid type or id"}`（id 不存在，或 id 与 `entity_type` 不匹配） | `unknown_entity` |
+| **空响应体（0 字节）** —— URL 少了结尾 `/` 时就是这样 | `internal_error` + `warnings: ["empty_body: …"]` |
+| **空壳文档**：只有 `activepvp` / `info`（**无 `name`**）/ `topIskKillIDs` / `topLists`，战斗字段全缺 | `unknown_entity` + `warnings: ["empty_entity: …"]` |
+
+> 第二条最阴：本层的 URL 构造**恒以 `/` 结尾**，所以线上看到 `empty_body` 意味着上游异常，
+> 不是参数问题。第三条的实体「存在但没有任何可报告的画像」，**别当成 0 战绩**。
+
+#### ② 四个 ratio 的公式未公开 —— 只转述，判词一律不给
+
+`solo_ratio` / `avg_gang_size` / `danger_ratio` / `gang_ratio` 全部是 **zkb 自有指标**，
+返回里 `style.formula` 恒为 `null`。实测反推不出公式（N=10 实体）：
+
+| 候选式 | 与 `dangerRatio` 的最大偏差 |
+|---|---|
+| `shipsDestroyed/(shipsDestroyed+shipsLost)` | **22.18** 个百分点 |
+| `pointsDestroyed/(pointsDestroyed+pointsLost)` | **7.47** 个百分点（最接近，但仍不吻合） |
+| `iskDestroyed/(iskDestroyed+iskLost)` | **38.34** 个百分点 |
+
+`avgGangSize` 的三个候选式（`attackersDestroyed/shipsDestroyed`、`attackersLost/shipsLost`、
+两者合并）也都不吻合（30.70 / 64.95 / 29.08）。**别自己补一个「看起来像」的公式。**
+
+两个量纲必须记牢：
+
+- `solo_ratio` 是 **0–100 的百分数**（1 位小数），**不是 0–1 比例** —— 写 `1.8` 不是 `0.018`；
+- `avg_gang_size` 是 **「人/次」的实数均值**（实测 2–38.7），**不是比例**；
+- `gang_ratio + solo_ratio ≠ 100`（实测 100.0–103.7）—— 两者**不互补**，别互相反推。
+
+#### ③ `efficiency` 是我们派生的，不等于 `danger_ratio`
+
+```json
+"combat": {"efficiency": {"value": 0.829, "kind": "derived",
+                          "formula": "isk_destroyed / (isk_destroyed + isk_lost)",
+                          "note": "我们派生，与 style.danger_ratio 不是同一个东西"}}
+```
+
+同一角色实测：isk 效率 **82.9%**，而 zkb 的 `dangerRatio` 是 **69**。**把 82.9 说成「威胁度」就是错的。**
+
+#### ④ `top.locations` 不是星系
+
+`top` 有且仅有 6 类：`characters` / `corporations` / `alliances` / `ships` / `systems` /
+`locations`（**没有 `regions`** —— zkb 没有区域榜）。其中 `locations` 是**「天体 / 站点」级**：
+
+```
+Y5J-EU IV - Asteroid Belt 1        （小行星带）
+OL3-78 (Star)                      （恒星）
+Stargate (MQ-O27)                  （星门）
+OSY-UD X - Moon 14                 （月球）
+Thera VII / 1DH-SX VI              （行星）
+```
+
+**要看星系用 `top.systems`。** 空榜一律返回 `[]`，**键不会省略**（形状是契约）。
+
+#### ⑤ 体积：默认约 3 KB，大块必须显式 `include`
+
+默认（`include=None`）实测紧凑 JSON：角色 **1,586 B** / 公司 **2,371 B** / 联盟 **2,876 B**，
+**都 ≤ 4 KB**（守卫断言 `<= 4096`）。四个大块只能点名索取：
+
+| 块 | 角色 | 公司 | 联盟 |
+|---|---:|---:|---:|
+| `months` | 9,145 / +10.8K | 1,653 / +4.1K | **33,532 / +36.4K** |
+| `rankings` | 1,215 / +2.9K | 1,964 / +4.4K | 2,314 / +5.2K |
+| `top_all_time` | 7,776 / +9.4K | 8,055 / +10.5K | **26,085 / +29.0K** |
+| `groups` | 4,355 / +6.0K | 3,994 / +6.4K | **16,630 / +19.5K** |
+| 四块全要 | 24.3 KB | 18.3 KB | **~80 KB ← 触发 `large_response` 软警告** |
+
+- **没有「全量」开关**：原始全量联盟响应 168 KB，逐个点名是唯一的门槛；
+- 单块上限 64 KB（实测最大 33.5 KB，正常不触发）；超了才截断 + `truncated: true`；
+- 整个响应 > 64 KB **不截断**，只追加 `warnings: ["large_response: …"]` —— **隐式截断比大响应更坏**；
+- `months` 只补 `[首次有数据月, 末次有数据月]` **之间**的空洞（`filled_internal_gaps`），
+  **不向两端外扩**：`range` 是**观测区间**，不是「实体存在区间」。缺失 ≠ 零。
 
 ## 5. 返回契约
 

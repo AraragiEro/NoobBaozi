@@ -69,6 +69,7 @@ from typing import Callable
 from noobbaozi.config import attributes as _a
 from noobbaozi.config import paths as _paths
 from noobbaozi.project import units
+from noobbaozi.project.views import resources as _resources
 from noobbaozi.project.views import shared as _shared
 from noobbaozi.project.views.base import SLOT_CARGO, ViewContext, ship_attributes
 
@@ -481,14 +482,36 @@ def _rule_resource_slack(facts: _Facts) -> dict | None:
 
 
 def _rule_empty_hardpoint(facts: _Facts) -> dict | None:
-    """炮台/发射器挂点有余，但高槽有空位。属性：102 turretSlotsLeft / 101 launcherSlotsLeft。"""
-    turret_free = _num(facts.attrs, _a.ATTR_TURRET_SLOTS_LEFT)
-    launcher_free = _num(facts.attrs, _a.ATTR_LAUNCHER_SLOTS_LEFT)
-    if turret_free is None and launcher_free is None:
-        return None
-    turret = _as_count(turret_free)
-    launcher = _as_count(launcher_free)
-    if turret <= 0 and launcher <= 0:
+    """「**已经在用的那一类**硬点还没装满，同时高槽还有空位」。
+
+    T-54 修正 1（口径）：旧实现把 `102 turretSlotsLeft` / `101 launcherSlotsLeft` 直接当
+    「余量」，那是船的**基准炮位数**、与装配无关（装 0 / 3 / 5 门发射器都输出同一个数）。
+    现在余量 = `total − used`，`used` 由投影层同一份分类规则数出来
+    （`views.resources.hardpoints`，**同一条口径只有一份**）。
+
+    T-54 修正 2（**独立审查：收窄门槛，去掉噪音**）。只看 `free > 0` 会把两种完全不同的情形
+    混成同一条 flag：
+
+    - `used > 0`：这一类**已经在用**却没装满 —— 真事实（少装了炮/发射器，还能补）；
+    - `used == 0`：这套配装**根本不用**这一类 —— 纯导弹船的 2 个炮位、无人机船的 6 个炮位。
+      每次都报就是噪音：实测 Osprey NI 真实装配（3 门 RLML 用满、炮位 0/2）与 Dominix
+      纯无人机（炮位 0/6）都会命中，而这两条都不是装配问题。
+
+    所以只在「`used > 0` 且 `free > 0`」的类别上出结论。`free < 0`（超装）也**不进本规则**：
+    那是 `hardpoint_violation` 的事实，混进来会出现「发射器挂点余 -1」这种自相矛盾的措辞。
+    任一数值未知 → 不出结论（**unknown 不是 0**，与同文件其它规则一致）。
+    """
+    hardpoints = _resources.hardpoints(facts.attrs, facts.fitted())
+    rows: dict[str, dict] = {}
+    for kind in _resources.HARDPOINT_KINDS:
+        row = _hardpoint_row(hardpoints, kind)
+        if row is None:
+            # 任一硬点的 total/used/free 未知 → 不下「还有余量」的结论（不补 0 去凑一条 flag）
+            return None
+        rows[kind] = row
+
+    in_use = {kind: row for kind, row in rows.items() if row["used"] > 0 and row["free"] > 0}
+    if not in_use:
         return None
 
     high = facts.slot_usage()["high"]
@@ -496,12 +519,83 @@ def _rule_empty_hardpoint(facts: _Facts) -> dict | None:
         return None
 
     return {
-        "turret_free": turret,
-        "launcher_free": launcher,
+        "turret_free": rows["turret"]["free"],
+        "launcher_free": rows["launcher"]["free"],
+        "turret_used": rows["turret"]["used"],
+        "launcher_used": rows["launcher"]["used"],
         "high_used": high["used"],
         "high_total": high["total"],
         "high_empty": high["empty"],
+        # 预渲染的「哪一类没装满」：L0 的 hint 靠它才说得清是炮位还是发射器
+        "free_kinds": "、".join(
+            f"{_resources.HARDPOINT_LABELS[kind]}{row['free']}" for kind, row in in_use.items()
+        ),
     }
+
+
+def _hardpoint_row(hardpoints: dict, kind: str) -> dict[str, int] | None:
+    """`hardpoints[kind]` → `{total, used, free}`；任一段不是整数就给 `None`（不猜）。"""
+    row = hardpoints.get(kind)
+    if not isinstance(row, dict):
+        return None
+    total = row.get("total")
+    used = row.get("used")
+    free = row.get("free")
+    if not all(isinstance(value, int) for value in (total, used, free)):
+        return None
+    return {"total": total, "used": used, "free": free}
+
+
+def _rule_hardpoint_violation(facts: _Facts) -> dict | None:
+    """炮/发射器**超装**：`used > total`（`free` 为负）→ 这套配装在游戏里装不上。
+
+    T-54 新增。`total` 是船体给的硬点上限（102 `turretSlotsLeft` / 101
+    `launcherSlotsLeft`），`used` 是**我们自己数**的已装模块（分类规则见
+    `views.resources.HARDPOINT_*`：只数高槽、按名字/组名关键词、分不清就进 `unclassified`）。
+    **`free` 为负不能静默通过** —— 那就是「5 个发射器挂点装 5 门、船只有 3 个挂点」这种
+    非法装配，引擎不会替我们报（SDE 里没有「模块占几个炮位」的属性）。
+
+    `evidence` 给一项一条（按 `turret` → `launcher` 的顺序，两类都超就出**一条** flag：
+    `kind/total/used/over` 是最严重的那一类，其余放进 `others`）。
+
+    **`over_kinds`（独立审查补）**：把**所有**超装的类别预渲染成一句话（`"炮位超1+发射器超1"`
+    / `"发射器超2"`）。没有它的时候，L1 的 `message` 与 L0 的 `hint` 都只说最严重的那一类，
+    另一类只活在 `evidence.others` 里 —— 读文案的人会以为只超了一种。
+    """
+    hardpoints = _resources.hardpoints(facts.attrs, facts.fitted())
+    findings: list[dict] = []
+    for kind in _resources.HARDPOINT_KINDS:
+        row = hardpoints.get(kind)
+        if not isinstance(row, dict):
+            continue
+        total = row.get("total")
+        used = row.get("used")
+        free = row.get("free")
+        if not isinstance(total, int) or not isinstance(used, int) or not isinstance(free, int):
+            continue  # 总量未知 → 不下「超装」的结论（N4）
+        if free >= 0:
+            continue
+        findings.append(
+            {
+                "kind": kind,
+                "total": total,
+                "used": used,
+                "over": used - total,
+            }
+        )
+    if not findings:
+        return None
+    # 一条 flag 只能带一个 evidence：两类都超时，取超得最多的那类，另一类放进 `others`
+    worst = max(findings, key=lambda finding: finding["over"])
+    evidence = dict(worst)
+    if len(findings) > 1:
+        evidence["others"] = [finding for finding in findings if finding is not worst]
+    # 两类都说到（单类时就是 "发射器超2"）——文案层不许只报一类
+    evidence["over_kinds"] = "+".join(
+        f"{_resources.HARDPOINT_LABELS[finding['kind']]}超{finding['over']}"
+        for finding in findings
+    )
+    return evidence
 
 
 def _rule_drone_bandwidth_idle(facts: _Facts) -> dict | None:
@@ -973,6 +1067,7 @@ _HANDLERS: dict[str, Callable[[_Facts], dict | None]] = {
     "resource_over_budget_unflyable": _rule_resource_over_budget_unflyable,
     "resource_slack": _rule_resource_slack,
     "empty_hardpoint": _rule_empty_hardpoint,
+    "hardpoint_violation": _rule_hardpoint_violation,
     "drone_bandwidth_idle": _rule_drone_bandwidth_idle,
     "no_propulsion": _rule_no_propulsion,
     "mwd_sig_increase": _rule_mwd_sig_increase,

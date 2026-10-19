@@ -45,3 +45,37 @@
 
 测试直接断言这三个字符串 —— 名字写错、解析漏批、返回空字典，都会当场变红。
 
+---
+
+# `zkb_stats` 样本（3 份，2026-10-19 抓取）
+
+给「实体画像 / 威胁度」工具（`zkb_stats`，第 8 个工具）用的离线样本。同样是 python `urllib`
+直连 zkb 抓的**真实响应**，**一个字段都没删**（三份都远小于 2 MB 的门槛，没有裁剪理由）。
+
+| 文件 | 来源请求 | 顶层键 | 体积 |
+|---|---|---|---|
+| `stats-character-2117515414.json` | `GET https://zkillboard.com/api/stats/characterID/2117515414/` | 59 | 48,666 B |
+| `stats-corporation-98821127.json` | `GET https://zkillboard.com/api/stats/corporationID/98821127/` | 48 | 64,835 B |
+| `stats-alliance-1354830081.json` | `GET https://zkillboard.com/api/stats/allianceID/1354830081/` | 49 | 167,789 B |
+
+三个实体：`SixtyEverSnake`（角色）、`The big boys`（公司，ticker `SE4E`）、
+`Goonswarm Federation`（联盟，ticker `CONDI`，id 由 ESI `/universe/ids/` 解析得到）。
+
+## 为什么三份的顶层键数不一样
+
+zkb 会**省略值为空/0 的整体块**，所以键集合天然不同，**不能**按「必须有 59 个键」来断言：
+
+- `associates` / `recentShips` / `topShips` / `allTimeSum` / `calcTrophies` 只有角色才有；
+- `hasSupers` / `supers` / `updatingSupers` / `calcAlltime` 只有联盟才有；
+- `allTimeSum` 在公司样本里等于 `shipsDestroyed`（734），在角色样本里等于
+  `topAllTime[0].data[0].kills`（816），在联盟样本里**整个键都不存在**。
+
+## 抓取时必须知道的两件事（都实测过）
+
+1. **URL 结尾的 `/` 不能省。** 省了返回 `200` + **空响应体**（0 字节），不是报错；
+2. **错误体也是 `200`。** id 不存在或类型错配时，HTTP 状态码仍是 `200`，正文是
+   `{"error":"Invalid type or id"}`（31 字节）。所以**不能拿状态码判成败**，必须看正文。
+
+字段实测表、`dangerRatio` 比对结论、返回形状草案见
+`noobbaozi/.tmp/zkb_stats_contract.md`（临时区，不入库）。
+

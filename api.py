@@ -130,6 +130,8 @@ from noobbaozi.config import paths as _paths
 from noobbaozi.engine import adapter, normalize
 from noobbaozi.engine.assumptions import default_assumptions
 from noobbaozi.project import render
+from noobbaozi.project.eft import EftError
+from noobbaozi.project.eft import emit as eft_emit
 from noobbaozi.project.views import ViewContext, available_views
 from noobbaozi.project.views.base import SLOT_CARGO
 from noobbaozi.sde.index import Index
@@ -628,8 +630,14 @@ def _read_json(request: urllib.request.Request, url: str) -> object:
     try:
         return json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # `payload_bytes` 是给上游的**机读**线索：0 字节 ≠ 「返回了坏 JSON」。
+        # zkb 的 `/api/stats/.../` 在 URL 少了结尾 `/` 时正是 `200` + **0 字节空体**
+        # （实测），调用方（`zkb_stats`）据此把它判成「上游异常」而不是「网络不通」。
         raise _ApiFailure(
-            "network_failed", f"{url} 返回的不是 UTF-8 JSON：{exc}", url=url
+            "network_failed",
+            f"{url} 返回的不是 UTF-8 JSON：{exc}",
+            url=url,
+            payload_bytes=len(raw),
         ) from exc
 
 
@@ -1095,11 +1103,20 @@ def parse_fit(
         ```json
         {"source_format": "eft",
          "fit": {...},                      // 引擎 fit 结构（原样，不加工）
+         "eft": "[Osprey Navy Issue, Solo]\n\nDamage Control II\n...",
          "warnings": ["module states are inferred by import rules"],
          "ship": {"type_id": 35683, "name": "Hecate", "group": "Tactical Destroyer"},
          "modules": {"fitted": 17, "cargo": 12, "by_slot": {"high": 6, ...}},
          "skills": {"name": "all4+min_required", "count": 512}}
         ```
+
+        `fit` 是**引擎结构原样**：本层不加字段、不改值（下游 `fit_index` 等读的就是它）。
+        `eft`（T-54）是**可直接复制的规范 EFT 文本**（渲染规则见
+        `project/eft.py` 的模块 docstring：低 → 中 → 高 → 改装 → 子系统、组间空行、
+        同型模块每件一行、无人机 / 货舱带 `xN`、`\n` 换行、末尾无空行），且满足
+        `parse(emit(fit))` 的已装模块集合（`type_id` + 数量）与原始一致。
+        **渲染失败时是 `null`**（名字查不到 / 槽位类型没有 EFT 表示），原因写进
+        `warnings`——**不编造任何一行**：要 EFT 文本就只读这个字段，不要自己拼。
 
         `fit` 是**引擎结构原样**：本层不加字段、不改值（下游 `fit_index` 等读的就是它）。
         注意它是**注入技能之前**的结构；本次真正用来计算的技能档在 `result.skills`
@@ -1111,10 +1128,21 @@ def parse_fit(
 
     def compute(ctx: ViewContext, parsed: dict) -> tuple[object, bool]:
         assumptions = ctx.assumptions if isinstance(ctx.assumptions, dict) else {}
+        warnings = list(parsed.get("warnings") or [])
+        eft_text: str | None
+        try:
+            # T-54：规范文本由**我们**给（此前只有解析、没有渲染，agent 只能自己拼，
+            # 于是模块名 / 件数 / 槽位全靠记忆 → 实测拼出「5 门 RLML」这种不存在的配装）。
+            eft_text = eft_emit(parsed["fit"], ctx.index)
+        except EftError as exc:
+            # **不猜、不半成品**：渲染失败就诚实给 null，并说明为什么（不编行）。
+            eft_text = None
+            warnings.append(f"EFT 渲染失败（eft 为 null）：{exc}")
         result = {
             "source_format": parsed.get("source_format"),
             "fit": parsed["fit"],
-            "warnings": list(parsed.get("warnings") or []),
+            "eft": eft_text,
+            "warnings": warnings,
             "ship": _ship_block(ctx),
             "modules": _module_counts(parsed["fit"]),
             "skills": _skill_tier_block(
@@ -3176,6 +3204,621 @@ def zkb_search(
         )
 
 
+# =============================================================================
+# 十四、实体画像（T-55）：`zkb_stats` —— 战斗总量 / 风格指标 / 榜单
+# =============================================================================
+#
+# 全部口径都是**实测**的（2026-10-19，python urllib 直连 zkb；本机 curl /
+# Invoke-WebRequest 的 TLS 不可用，只有 urllib 能出网）：
+#
+# | 请求 | 实测 |
+# |---|---|
+# | `stats/characterID/2117515414/` | 200，48,666 B，**59** 个顶层键 |
+# | `stats/corporationID/98821127/` | 200，64,835 B，**48** 键 |
+# | `stats/allianceID/1354830081/` | 200，167,789 B，**49** 键 |
+# | `stats/characterID/2117515414`（**少了结尾 `/`**） | 200 + **0 字节空体** |
+# | `stats/characterID/999999999999/`（id 不存在） | 200 + `{"error":"Invalid type or id"}` |
+# | `stats/allianceID/98821127/`（拿公司 id 当联盟） | 200 + `{"error":"Invalid type or id"}` |
+# | `stats/characterID/1/`（**存在但没名字**） | 200 + 702 B **空壳**（5 键，`info` 无 name） |
+#
+# 由此定下六条口径：
+#
+# 1. **错误体也是 HTTP 200**：判成败只能看正文 —— `{"error": ...}` → `unknown_entity`。
+# 2. **URL 结尾的 `/` 不能省**：省了是 200 + 空体；空体 → `internal_error` + warning
+#    （`_read_json` 已经带上 `payload_bytes`，这里按「0 字节」判，不靠字符串匹配）。
+# 3. **空壳实体**（`info.name` 缺失 **且** 战斗字段全缺）也判 `unknown_entity`。
+# 4. **zkb 会省略空块**（三份样本顶层键 59/48/49 各不相同）→ **本层补空值**，
+#    返回形状里所有键永远存在。缺失 ≠ 零，不适用 ≠ 不知道。
+# 5. **四个 ratio 的公式 zkb 未公开，实测也反推不出来**：
+#    `dangerRatio` 与 ships / points / isk 三个候选式**都不吻合**（N=10 实体，
+#    max|diff| = 22.18 / 7.47 / 38.34 个百分点）；`avgGangSize` 的三个候选式也都不吻合
+#    （30.70 / 64.95 / 29.08）→ 一律 `formula: null`，只转述数值，**不给威胁等级判词**。
+# 6. **`soloRatio` 是 0–100 的百分数（1 位小数）**，`avgGangSize` 是「人/次」的实数均值
+#    ——**都不是 0–1 比例**；且 `gangRatio + soloRatio ≠ 100`（实测 100.0–103.7），
+#    两者不互补，不能互相反推。
+#
+# 体积（默认形状实测，紧凑 JSON）：角色 1,586 B / 公司 2,371 B / 联盟 2,876 B —— 都 ≤ 4 KB。
+# 大块（`months` / `rankings` / `top_all_time` / `groups`）只能由调用方显式 `include`，
+# 单块上限 `ZKB_STATS_BLOCK_MAX_BYTES`，超了才截断；整个响应超 64 KB 只加软警告、不截断
+# （**隐式截断比大响应更坏**）。
+
+ZKB_STATS_API: str = "https://zkillboard.com/api/stats/{segment}/{entity_id}/"
+"""实体画像 URL 模板。**结尾的 `/` 不可省**：省了 zkb 回 `200` + **0 字节空体**（实测）。"""
+
+ZKB_STATS_ENTITY_KINDS: tuple[str, ...] = ("character", "corporation", "alliance")
+"""`entity_type` 的三个合法值。**必填、不靠 id 猜**：同一串数字在三个命名空间里都可能存在。"""
+
+ZKB_STATS_SEGMENTS: dict[str, str] = {
+    "character": "characterID",
+    "corporation": "corporationID",
+    "alliance": "allianceID",
+}
+"""实体类型 → zkb 的 URL 段名（**单一真源**，别在函数里裸写字符串）。"""
+
+ZKB_STATS_ERROR_BODY: str = "Invalid type or id"
+"""id 不存在 / 类型错配时 zkb 的 error 正文（**HTTP 状态仍是 200**）。"""
+
+ZKB_STATS_TOP_LIMIT: int = 5
+"""`top.*` 每类取前几条（实测 6 类各 5 条约 1.5 KB，撑得住 4 KB 预算）。"""
+
+ZKB_STATS_TOP_LISTS: tuple[tuple[str, str], ...] = (
+    ("character", "characters"),
+    ("corporation", "corporations"),
+    ("alliance", "alliances"),
+    ("shipType", "ships"),
+    ("solarSystem", "systems"),
+    ("location", "locations"),
+)
+"""zkb `topLists[].type` → 我们返回的键。
+
+**就是这 6 个，没有 `regions`** —— zkb 没有区域榜（实测）。`locations` 是「天体 / 站点」级，
+不是星系，别按名字望文生义。
+"""
+
+ZKB_STATS_LOCATIONS_NOTE: str = (
+    "top.locations 是「天体 / 站点」级（行星、月球、小行星带、恒星、星门、玩家建筑），"
+    "**不是星系**；要看星系请用 top.systems"
+)
+
+ZKB_STATS_BLOCKS: tuple[str, ...] = ("months", "rankings", "top_all_time", "groups")
+"""`include` 的白名单。**没有「全量开关」**：大块必须逐个点名，免得一次灌进 121 KB。"""
+
+ZKB_STATS_BLOCK_MAX_BYTES: int = 64 * 1024
+"""单块上限（实测最大块 = 联盟 `months` 33.6 KB，正常永远不触发）。"""
+
+ZKB_STATS_RESPONSE_SOFT_BYTES: int = 64 * 1024
+"""整个响应的**软**阈值：超了不截断，只加一条 `large_response` 警告。"""
+
+ZKB_STATS_ACTIVITY_KEYS: tuple[str, ...] = (
+    "ships",
+    "systems",
+    "regions",
+    "characters",
+    "corporations",
+    "kills",
+)
+"""`activity_7d` 的固定 6 键（zkb 的 `activepvp` 键集随实体类型变，本层归一）。"""
+
+ZKB_STATS_ACTIVITY_NOT_APPLICABLE: dict[str, tuple[str, ...]] = {
+    "character": ("characters", "corporations"),
+    "corporation": ("corporations",),
+    "alliance": (),
+}
+"""**本类型天生没有**的 `activepvp` 键 → `null` 且**不产生 warning**（`not_applicable` 不是「不知道」）。
+
+每次查角色都报「characters/corporations 不适用」是噪音而不是信号 —— 天天报警的告警等于没有告警。
+"""
+
+ZKB_STATS_MONTH_FIELDS: tuple[str, ...] = (
+    "iskDestroyed",
+    "iskLost",
+    "pointsDestroyed",
+    "pointsLost",
+    "shipsDestroyed",
+    "shipsLost",
+)
+"""`months` 块里每月的固定 6 个数值键（zkb 把 0 值键**整个省略**，本层补 0）。"""
+
+ZKB_STATS_STYLE_NOTE: str = (
+    "dangerRatio / gangRatio / soloRatio / avgGangSize 均为 zkb 自有指标，公式未公开；"
+    "soloRatio 是 0-100 百分数、avgGangSize 是人/次均值，都不是 0-1 比例；"
+    "gangRatio + soloRatio != 100（两者不互补，不可互相反推）；本工具不据此给出威胁等级判定"
+)
+
+ZKB_STATS_EFFICIENCY_NOTE: str = "我们派生，与 style.danger_ratio 不是同一个东西"
+
+ZKB_STATS_NOTE: str = (
+    "战斗总量与风格指标来自 zkb /api/stats/（原样转述）；只有 efficiency 是本层派生的。"
+    "大块数据需显式 include（months / rankings / top_all_time / groups）"
+)
+
+
+def _stats_size(payload: object) -> int:
+    """紧凑 JSON 的字节数（**和 MCP 实际发出的量级一致**，不带缩进）。"""
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return len(text.encode("utf-8"))
+
+
+def _stats_int(value: object) -> int | None:
+    """把 zkb 的数值收成整数（`bool` 不算整数；非数值给 `None`，**不拿 0 冒充**）。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return None
+
+
+def _stats_top_row(entry: dict) -> dict:
+    """`topLists[].values[i]` → 统一形状 `{id, name, count, isk}`。
+
+    `count` 就是 zkb 的 `kills`（改名只为 6 类形状一致，**不是「数量」的意思**）。
+    实测这 4 个键在 6 个 type 里**恒有**，所以不做「若有」分支。
+    """
+    isk = entry.get("isk")
+    return {
+        "id": _stats_int(entry.get("id")),
+        "name": entry.get("name"),
+        "count": _stats_int(entry.get("kills")),
+        "isk": round(float(isk), 2) if isinstance(isk, (int, float)) and not isinstance(isk, bool) else isk,
+    }
+
+
+def _stats_entity_block(payload: dict, kind: str, resolved_name: str | None) -> dict:
+    """`entity` 块：类型 / id / 名字 / ticker / 安全等级 / 成立日期（**所有键恒在**）。
+
+    `security_status` **只对角色有意义**：公司 / 联盟一律 `None`（不拿 0 冒充「安全等级 0」）。
+    成立日期：角色读 `info.birthday`，公司 / 联盟读 `info.date_founded`。
+    """
+    info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+    sec = info.get("security_status")
+    founded = info.get("birthday") if kind == "character" else info.get("date_founded")
+    return {
+        "type": kind,
+        "id": _stats_int(payload.get("id")) or _stats_int(info.get("id")),
+        "name": info.get("name") or resolved_name,
+        "ticker": info.get("ticker"),
+        "security_status": (
+            float(sec) if kind == "character" and isinstance(sec, (int, float)) and not isinstance(sec, bool) else None
+        ),
+        "founded": founded if isinstance(founded, str) else None,
+    }
+
+
+def _stats_combat_block(payload: dict) -> dict:
+    """`combat` 块：六个原始总量 + 一个**明确标注派生**的 `efficiency`。
+
+    `efficiency` 用的是 isk 口径，和 zkb 的 `dangerRatio` **不是同一个东西**
+    （同一角色实测 82.9% vs 69）—— 所以它带 `kind: derived` + `formula` + `note`。
+    """
+    isk_destroyed = _stats_int(payload.get("iskDestroyed"))
+    isk_lost = _stats_int(payload.get("iskLost"))
+    total = (isk_destroyed or 0) + (isk_lost or 0)
+    return {
+        "ships_destroyed": _stats_int(payload.get("shipsDestroyed")),
+        "ships_lost": _stats_int(payload.get("shipsLost")),
+        "isk_destroyed": isk_destroyed,
+        "isk_lost": isk_lost,
+        "points_destroyed": _stats_int(payload.get("pointsDestroyed")),
+        "points_lost": _stats_int(payload.get("pointsLost")),
+        "efficiency": {
+            "value": round((isk_destroyed or 0) / total, 4) if total else None,
+            "kind": "derived",
+            "formula": "isk_destroyed / (isk_destroyed + isk_lost)",
+            "note": ZKB_STATS_EFFICIENCY_NOTE,
+        },
+    }
+
+
+def _stats_style_block(payload: dict) -> dict:
+    """`style` 块：四个 zkb 自有指标 + solo 计数，**公式一律 `null`**。
+
+    为什么不填公式：实测反推不出来（见本节开头第 5 条）。写一个「看着像」的公式，
+    比写 `null` 危险得多 —— 调用方会拿它去算别的实体。
+    """
+    return {
+        "danger_ratio": _stats_int(payload.get("dangerRatio")),
+        "gang_ratio": _stats_int(payload.get("gangRatio")),
+        "solo_ratio": payload.get("soloRatio") if isinstance(payload.get("soloRatio"), (int, float)) and not isinstance(payload.get("soloRatio"), bool) else None,
+        "avg_gang_size": payload.get("avgGangSize") if isinstance(payload.get("avgGangSize"), (int, float)) and not isinstance(payload.get("avgGangSize"), bool) else None,
+        "solo_kills": _stats_int(payload.get("soloKills")),
+        "solo_losses": _stats_int(payload.get("soloLosses")),
+        "source": "zkillboard",
+        "formula": None,
+        "notes": ZKB_STATS_STYLE_NOTE,
+    }
+
+
+def _stats_activity_block(payload: dict, kind: str) -> tuple[dict, dict, list[str]]:
+    """`activity_7d`（固定 6 键）+ `field_reasons` + `warnings`。
+
+    **`not_applicable` 与「数据缺失」分开**：本类型天生没有的键 → `null` 且静默；
+    本该有却被 zkb 省略 → `null` + 进 `field_reasons`。
+    """
+    pvp = payload.get("activepvp") if isinstance(payload.get("activepvp"), dict) else {}
+    not_applicable = ZKB_STATS_ACTIVITY_NOT_APPLICABLE.get(kind, ())
+    block: dict = {}
+    reasons: dict = {}
+    warnings: list[str] = []
+    for key in ZKB_STATS_ACTIVITY_KEYS:
+        if key in not_applicable:
+            block[key] = None
+            continue
+        cell = pvp.get(key)
+        count = _stats_int(cell.get("count")) if isinstance(cell, dict) else None
+        block[key] = count
+        if count is None:
+            reasons[key] = "zkb_response_missing"
+    if not pvp:
+        warnings.append("insufficient_activity: 该实体 7 天内无战斗记录（activepvp 为空）")
+    return block, reasons, warnings
+
+
+def _stats_top_block(payload: dict) -> dict:
+    """`top` 块：**6 类全部保留**，空榜给 `[]`（键不许省略 —— 形状是契约）。"""
+    by_type: dict[object, list] = {}
+    for entry in payload.get("topLists") or []:
+        if isinstance(entry, dict) and isinstance(entry.get("values"), list):
+            by_type[entry.get("type")] = entry["values"]
+    return {
+        out_key: [
+            _stats_top_row(row)
+            for row in (by_type.get(zkb_type) or [])[:ZKB_STATS_TOP_LIMIT]
+            if isinstance(row, dict)
+        ]
+        for zkb_type, out_key in ZKB_STATS_TOP_LISTS
+    }
+
+
+def _stats_months_data(payload: dict) -> dict:
+    """`months` 补齐**只填内部空洞**，不向两端外扩。
+
+    为什么这件事必须说清楚：「这个月他没活动」和「这个月他还不存在」是两件事。
+    把区间外扩到首末观测月之外等于**编造不存在的零活动历史**；
+    `range` 给的是**观测区间**（首次 / 末次有数据），`observed_months` 是 zkb 真正给了
+    数据的月份数，`filled_internal_gaps` 只数区间内的空洞。
+    """
+    raw = payload.get("months") if isinstance(payload.get("months"), dict) else {}
+    observed = sorted(int(key) for key in raw if str(key).isdigit())
+    if not observed:
+        return {
+            "range": {"first": None, "last": None},
+            "observed_months": 0,
+            "filled_internal_gaps": 0,
+            "data": {},
+        }
+    first, last = observed[0], observed[-1]
+    data: dict = {}
+    filled = 0
+    year, month = first // 100, first % 100
+    while (year * 100 + month) <= last:
+        key = f"{year:04d}{month:02d}"
+        source = raw.get(key)
+        if not isinstance(source, dict):
+            filled += 1
+            row = {"year": year, "month": month}
+            row.update({field: 0 for field in ZKB_STATS_MONTH_FIELDS})
+        else:
+            row = {"year": _stats_int(source.get("year")) or year,
+                   "month": _stats_int(source.get("month")) or month}
+            row.update({field: _stats_int(source.get(field)) or 0 for field in ZKB_STATS_MONTH_FIELDS})
+        data[key] = row
+        month += 1
+        if month > 12:
+            year, month = year + 1, 1
+    return {
+        "range": {
+            "first": f"{first // 100:04d}-{first % 100:02d}",
+            "last": f"{last // 100:04d}-{last % 100:02d}",
+        },
+        "observed_months": len(observed),
+        "filled_internal_gaps": filled,
+        "data": data,
+    }
+
+
+def _stats_block(kind: str, payload: dict) -> dict:
+    """一个 `include` 块的内容（**不含**外壳的 `bytes` / `truncated`）。"""
+    if kind == "months":
+        return _stats_months_data(payload)
+    if kind == "rankings":
+        data = payload.get("rankings")
+        return {"data": data if isinstance(data, dict) else {}}
+    if kind == "top_all_time":
+        data = payload.get("topAllTime")
+        return {"data": data if isinstance(data, list) else []}
+    data = payload.get("groups")
+    return {"data": data if isinstance(data, dict) else {}}
+
+
+def _stats_truncate(block: dict) -> tuple[dict, int]:
+    """把超 `ZKB_STATS_BLOCK_MAX_BYTES` 的块按**原顺序保留前若干项**截断。
+
+    Returns:
+        `(块, 丢掉几项)`。没超就原样返回、丢 0 项（**绝大多数情况走这条**）。
+    """
+    if _stats_size(block) <= ZKB_STATS_BLOCK_MAX_BYTES:
+        return block, 0
+    data = block.get("data")
+    dropped = 0
+    while isinstance(data, (list, dict)) and data and _stats_size(block) > ZKB_STATS_BLOCK_MAX_BYTES:
+        if isinstance(data, list):
+            data.pop()
+        else:
+            data.popitem()
+        dropped += 1
+    return block, dropped
+
+
+def _stats_include(include: object) -> tuple[str, ...]:
+    """校验 `include`：`None` / 空 → 空元组；否则必须是白名单内 `str` 组成的列表。
+
+    Raises:
+        _ApiFailure: `invalid_argument`（类型不对 / 含未知块名，**不静默忽略**）。
+    """
+    if include is None:
+        return ()
+    if isinstance(include, str) or not isinstance(include, (list, tuple)):
+        raise _ApiFailure(
+            "invalid_argument",
+            f"include 必须是字符串列表，收到 {type(include).__name__}",
+            field="include",
+            hint={"accepted": list(ZKB_STATS_BLOCKS)},
+        )
+    selected: list[str] = []
+    for item in include:
+        if not isinstance(item, str):
+            raise _ApiFailure(
+                "invalid_argument",
+                f"include 的元素必须是字符串，收到 {type(item).__name__}",
+                field="include",
+                hint={"accepted": list(ZKB_STATS_BLOCKS)},
+            )
+        name = item.strip()
+        if name not in ZKB_STATS_BLOCKS:
+            raise _ApiFailure(
+                "invalid_argument",
+                f"不认识的 include 块 {item!r}",
+                field="include",
+                hint={"accepted": list(ZKB_STATS_BLOCKS)},
+            )
+        if name not in selected:
+            selected.append(name)
+    return tuple(selected)
+
+
+def _stats_entity_type(entity_type: object) -> str:
+    """校验 `entity_type`（必填；三个值之一，**不靠 id 猜**）。
+
+    Raises:
+        _ApiFailure: `invalid_argument`。
+    """
+    if entity_type is None:
+        raise _ApiFailure(
+            "invalid_argument",
+            "entity_type 不能为空：同一串数字在角色 / 公司 / 联盟三个命名空间里都可能存在，"
+            "必须显式指定",
+            field="entity_type",
+            hint={"accepted": list(ZKB_STATS_ENTITY_KINDS)},
+        )
+    if not isinstance(entity_type, str) or entity_type.strip() not in ZKB_STATS_ENTITY_KINDS:
+        raise _ApiFailure(
+            "invalid_argument",
+            f"entity_type 必须是 {' / '.join(ZKB_STATS_ENTITY_KINDS)} 之一，收到 {entity_type!r}",
+            field="entity_type",
+            hint={"accepted": list(ZKB_STATS_ENTITY_KINDS)},
+        )
+    return entity_type.strip()
+
+
+def zkb_stats_url(entity_type: str, entity_id: int) -> str:
+    """拼一条实体画像 URL（**纯函数**：可离线断言，且保证结尾有 `/`）。"""
+    segment = ZKB_STATS_SEGMENTS[entity_type]
+    return ZKB_STATS_API.format(segment=segment, entity_id=entity_id)
+
+
+def _stats_payload(url: str, payload: object, warnings: list[str]) -> dict:
+    """校验响应正文 → 画像文档（**判成败只看正文，不看状态码**）。
+
+    Raise:
+        _ApiFailure: `unknown_entity`（`{"error": ...}` / 空壳）/ `network_failed`（形状不对）。
+    """
+    if not isinstance(payload, dict):
+        raise _ApiFailure(
+            "network_failed",
+            f"zkb 返回的不是对象：{type(payload).__name__}",
+            url=url,
+        )
+    error = payload.get("error")
+    if error:
+        raise _ApiFailure(
+            "unknown_entity",
+            f"zkb 不认这个实体：{error}（id 不存在或与 entity_type 不匹配）",
+            url=url,
+            raw=str(error),
+        )
+    info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+    if not info.get("name") and "shipsDestroyed" not in payload:
+        # 实测 `stats/characterID/1/`：200 + 702 B 空壳（5 个键、info 无 name、战斗字段全缺）。
+        warnings.append(
+            "empty_entity: zkb 只返回了空壳（没有 name、没有战斗字段），"
+            "这个 id 存在但没有任何可报告的画像"
+        )
+        raise _ApiFailure(
+            "unknown_entity",
+            "zkb 返回了空壳画像（没有 name、也没有任何战斗字段），这个实体没有可用的统计",
+            url=url,
+            warnings=list(warnings),
+        )
+    return payload
+
+
+def zkb_stats(
+    entity: object,
+    *,
+    entity_type: object = None,
+    include: object = None,
+    requester: ZkbRequester | None = None,
+    clock: Callable[[], float] | None = None,
+    sleeper: Callable[[float], None] | None = None,
+    **common: object,
+) -> dict:
+    """取一个实体（角色 / 公司 / 联盟）的**画像**：战斗总量、风格指标、7 天活动、6 类榜单。
+
+    「这个人在 zkb 上是什么水平、打得多不多 / 亏不亏、主要在哪儿活动」。**只给事实**：
+    四个 ratio 的公式 zkb 未公开，本层也不反推（`formula: null`），**不给「威胁等级」判词**。
+
+    Args:
+        entity: 名字或整数 id。名字走 ESI `/universe/ids/`（复用 `_zkb_resolve_entity`，
+            带进程内缓存、与 `zkb_search` 同一套解析）。
+        entity_type: **必填**，`character` / `corporation` / `alliance`。不靠 id 猜类型：
+            zkb 自己会校验 id 与类型，错配会返回 `unknown_entity`。
+        include: 可选大块白名单 `months` / `rankings` / `top_all_time` / `groups`。
+            **没有「全量」开关** —— 全量联盟响应 121 KB，必须逐个点名。
+        requester / clock / sleeper: 测试注入点（生产不传）。
+        **common: 允许 `skill_tier` / `damage_profile` / `state_policy`（无影响）。
+
+    Returns:
+        成功时 `result`（**所有键恒在**）：
+
+        ```json
+        {"entity": {"type": "character", "id": 2117515414, "name": "SixtyEverSnake",
+                    "ticker": null, "security_status": 4.3, "founded": "2020-09-03T21:05:25Z"},
+         "combat": {"ships_destroyed": 823, "ships_lost": 384,
+                    "isk_destroyed": 222758096336, "isk_lost": 45961938028,
+                    "points_destroyed": 3693, "points_lost": 1622,
+                    "efficiency": {"value": 0.829, "kind": "derived",
+                                   "formula": "isk_destroyed / (isk_destroyed + isk_lost)",
+                                   "note": "..."}},
+         "style": {"danger_ratio": 69, "gang_ratio": 99, "solo_ratio": 1.8,
+                   "avg_gang_size": 3.6, "solo_kills": 14, "solo_losses": 50,
+                   "source": "zkillboard", "formula": null, "notes": "..."},
+         "activity_7d": {"ships": 4, "systems": 5, "regions": 4,
+                         "characters": null, "corporations": null, "kills": 8},
+         "top": {"characters": [...], "corporations": [...], "alliances": [],
+                 "ships": [...], "systems": [...], "locations": [...]},
+         "warnings": []}
+        ```
+
+        `top` 的 6 类各取前 `ZKB_STATS_TOP_LIMIT` 条，元素恒为
+        `{"id", "name", "count", "isk"}`（`count` 是 zkb 的 `kills`）。
+        **空榜给 `[]`，键不省略** —— 形状是契约。
+
+        `include` 的块挂在 `result.blocks.<name>`，每块带 `bytes`（该块去掉
+        `bytes`/`truncated` 之后的紧凑 JSON 字节数）与 `truncated`；
+        超 `ZKB_STATS_BLOCK_MAX_BYTES` 才截断并追加 warning。
+
+        `meta` 给 `source` / `min_interval_s` / `urls` / `bytes`（本次结果体积）。
+
+    失败时 `error.kind` ∈ `invalid_argument` / `unknown_entity` / `network_failed` /
+    `rate_limited` / `internal_error`（空响应体）。
+    """
+    try:
+        # 时间区间类参数先在这里拦：`_zkb_check_common()` 的提示是给列表接口写的
+        # （「用 past_seconds + page 回溯」），而 `/api/stats/` 两个参数都不接受
+        # —— 它返回的是全时期累计。照抄那条提示只会把人带偏。
+        rejected = [name for name in common if name in ZKB_REJECTED_PARAMETERS]
+        if rejected:
+            raise _ApiFailure(
+                "invalid_argument",
+                f"{rejected[0]} 不受支持：/api/stats/ 不接受时间区间参数，"
+                "它返回的是全时期累计（没有 past_seconds / page 这类窗口）",
+                field=rejected[0],
+                hint={"accepted": list(ZKB_IGNORED_PARAMETERS)},
+            )
+        _zkb_check_common(common)
+        if entity is None:
+            raise _ApiFailure(
+                "invalid_argument",
+                "entity 不能为空：给角色 / 公司 / 联盟的名字或整数 id",
+                field="entity",
+                hint={"accepted": ["实体名字", "整数 id"]},
+            )
+        kind = _stats_entity_type(entity_type)
+        blocks = _stats_include(include)
+        resolved = _zkb_resolve_entity(kind, entity, requester)
+        url = zkb_stats_url(kind, int(resolved["id"]))
+        warnings: list[str] = []
+        try:
+            payload = _zkb_request(url, requester=requester, clock=clock, sleeper=sleeper)
+        except _ApiFailure as exc:
+            if exc.kind == "network_failed" and exc.extra.get("payload_bytes") == 0:
+                raise _ApiFailure(
+                    "internal_error",
+                    f"zkb 返回了**空响应体**（0 字节）：{url}；本层 URL 恒以 `/` 结尾，"
+                    "空体说明上游异常（实测少写结尾斜杠就是这个现象），请稍后重试",
+                    url=url,
+                    hint={"url_ends_with_slash": True},
+                    warnings=[
+                        "empty_body: 上游返回 0 字节；本层 URL 构造恒以 `/` 结尾，"
+                        "这不是参数问题"
+                    ],
+                ) from exc
+            raise
+
+        document = _stats_payload(url, payload, warnings)
+        activity, reasons, activity_warnings = _stats_activity_block(document, kind)
+        warnings.extend(activity_warnings)
+        result: dict = {
+            "entity": _stats_entity_block(document, kind, resolved.get("name")),
+            "combat": _stats_combat_block(document),
+            "style": _stats_style_block(document),
+            "activity_7d": activity,
+            "top": _stats_top_block(document),
+            "note": ZKB_STATS_NOTE,
+            "warnings": warnings,
+        }
+        if reasons:
+            result["field_reasons"] = reasons
+
+        if blocks:
+            packed: dict = {}
+            for name in blocks:
+                block = _stats_block(name, document)
+                block, dropped = _stats_truncate(block)
+                size = _stats_size(block)
+                block["bytes"] = size
+                block["truncated"] = dropped > 0
+                if dropped:
+                    block["dropped_items"] = dropped
+                    warnings.append(
+                        f"truncated: {name} 超过 {ZKB_STATS_BLOCK_MAX_BYTES} B 上限，"
+                        f"按原顺序截掉 {dropped} 项"
+                    )
+                packed[name] = block
+            result["blocks"] = packed
+            result["warnings"] = warnings
+            total = _stats_size(result)
+            if total > ZKB_STATS_RESPONSE_SOFT_BYTES:
+                warnings.append(
+                    f"large_response: 响应 {total / 1024:.1f} KB（>64 KB）；"
+                    "建议按需只 include 1-2 块"
+                )
+                result["warnings"] = warnings
+
+        meta: dict = {
+            "spec_version": SPEC_VERSION,
+            "source": "zkillboard",
+            "min_interval_s": ZKB_MIN_INTERVAL_S,
+            "top_limit": ZKB_STATS_TOP_LIMIT,
+            "blocks": list(blocks),
+            "urls": [url],
+            "bytes": _stats_size(result),
+        }
+        return _success(result, meta)
+    except _ApiFailure as exc:
+        return _failure(exc.payload())
+    except Exception as exc:  # noqa: BLE001 - 边界层：任何异常都不得裸抛给 agent
+        return _failure(
+            {
+                "kind": "internal_error",
+                "message": "接口层内部异常，本次没有可用结果",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+        )
+
+
 __all__ = [
     "BY_PILOT_ROWS",
     "CACHE_MAX_ENTRIES",
@@ -3224,6 +3867,22 @@ __all__ = [
     "ZKB_SIDE_BOTH",
     "ZKB_SIDE_KILLS",
     "ZKB_SIDE_LOSSES",
+    "ZKB_STATS_ACTIVITY_KEYS",
+    "ZKB_STATS_ACTIVITY_NOT_APPLICABLE",
+    "ZKB_STATS_API",
+    "ZKB_STATS_BLOCKS",
+    "ZKB_STATS_BLOCK_MAX_BYTES",
+    "ZKB_STATS_EFFICIENCY_NOTE",
+    "ZKB_STATS_ENTITY_KINDS",
+    "ZKB_STATS_ERROR_BODY",
+    "ZKB_STATS_LOCATIONS_NOTE",
+    "ZKB_STATS_MONTH_FIELDS",
+    "ZKB_STATS_NOTE",
+    "ZKB_STATS_RESPONSE_SOFT_BYTES",
+    "ZKB_STATS_SEGMENTS",
+    "ZKB_STATS_STYLE_NOTE",
+    "ZKB_STATS_TOP_LIMIT",
+    "ZKB_STATS_TOP_LISTS",
     "ZKB_USER_AGENT",
     "cache_stats",
     "clear_caches",
@@ -3242,5 +3901,7 @@ __all__ = [
     "universe_system",
     "weapon_family",
     "zkb_search",
+    "zkb_stats",
+    "zkb_stats_url",
     "zkb_url",
 ]

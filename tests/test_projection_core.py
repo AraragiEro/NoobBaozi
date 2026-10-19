@@ -736,6 +736,15 @@ def test_unimplemented_rule_id_fails_loudly(ctx: ViewContext) -> None:
 MINIMAL_EFT = "[Hecate, 极简]\nDamage Control II"
 """只装一件 DC II：高槽全空、无推进模块、CPU/PG 余量远大于一半。"""
 
+HARD_POINT_EFT = "[Hecate, 炮位]\nDamage Control II\nLight Neutron Blaster II"
+"""一件 DC II + 一门炮：`empty_hardpoint` 的命中形态。
+
+**T-54 审查改判**：门槛收窄成「**已经在用**（`used > 0`）且没装满（`free > 0`）」的硬点类，
+所以「高槽全空、一件武器都没装」的 `MINIMAL_EFT` 不该再命中它（纯导弹船 / 无人机船那次
+是噪音，判据见 `project/diagnostics._rule_empty_hardpoint`）。要证明它不是死规则，
+就得给它一个**已经在用炮位**的配装 —— 只加一门炮，其余不变。
+"""
+
 CAP_SENSITIVE_EFT = (
     "[Hecate, 电容敏感]\n"
     "50MN Quad LiF Restrained Microwarpdrive\n"
@@ -770,13 +779,22 @@ def ctx_from_eft(engine: Engine, index):
 
 
 def test_slack_empty_hardpoint_and_no_propulsion_can_fire(ctx_from_eft) -> None:
-    """极简配装必须同时命中这三条（否则就是死规则）。"""
+    """三条规则都必须能命中（否则就是死规则）。
+
+    `empty_hardpoint` 换用 `HARD_POINT_EFT`（装了 1 门炮、4 个炮位还空）：T-54 审查把它的门槛
+    收窄成「已经在用且没装满」，所以「一件武器都没装」的极简配装**不该**再命中它。
+    """
     flags = {flag["id"]: flag for flag in D.evaluate(ctx_from_eft(MINIMAL_EFT))}
 
-    assert {"resource_slack", "empty_hardpoint", "no_propulsion"} <= set(flags)
+    assert {"resource_slack", "no_propulsion"} <= set(flags)
     assert flags["no_propulsion"]["evidence"]["propulsion_modules"] == 0
-    assert flags["empty_hardpoint"]["evidence"]["high_empty"] > 0
     assert flags["resource_slack"]["evidence"]["empty_slots"] > 0
+    assert "empty_hardpoint" not in flags, "一件武器都没装 → 不报「有空炮位」（这是设计选择）"
+
+    point_flags = {flag["id"]: flag for flag in D.evaluate(ctx_from_eft(HARD_POINT_EFT))}
+    assert "empty_hardpoint" in point_flags, "装了炮却没装满 + 高槽有空位 → 必须报"
+    assert point_flags["empty_hardpoint"]["evidence"]["high_empty"] > 0
+    assert point_flags["empty_hardpoint"]["evidence"]["turret_used"] == 1
 
 
 def test_cap_sensitive_hit_path(ctx_from_eft) -> None:

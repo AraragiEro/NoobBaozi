@@ -276,12 +276,28 @@ def test_resources_slots_are_complete_and_counted_from_items(
 
 
 def test_resources_hardpoints_drones_cargo(views: dict[str, dict], ctx: ViewContext) -> None:
-    """挂点 / 无人机 / 货舱：上限来自船体属性，占用来自 items（样本无无人机 → 真 0）。"""
+    """炮位 / 无人机 / 货舱：`total` 来自船体属性，`used` 数 items，`free = total - used`。
+
+    **T-54 改口径**：旧断言把 102 / 101（**船体基准炮位数**）直接当「剩余」，实测与装配
+    无关（同一艘船装 0 / 3 / 5 门发射器都输出同一个数）。现在旧键 `hardpoints_free` 已删除，
+    改成 `hardpoints.{turret,launcher}.{total,used,free}` + `unclassified` 件数。
+    """
     overview = views["resources"]["overview"]
     attrs = ctx.attrs(BASE)
+    hardpoints = overview["hardpoints"]
 
-    assert overview["hardpoints_free"]["turret"] == int(round(attrs[A.ATTR_TURRET_SLOTS_LEFT]))
-    assert overview["hardpoints_free"]["launcher"] == int(round(attrs[A.ATTR_LAUNCHER_SLOTS_LEFT]))
+    assert "hardpoints_free" not in overview, "旧口径字段已删除（T-54）"
+    assert hardpoints["turret"]["total"] == int(round(attrs[A.ATTR_TURRET_SLOTS_LEFT]))
+    assert hardpoints["launcher"]["total"] == int(round(attrs[A.ATTR_LAUNCHER_SLOTS_LEFT]))
+    for kind in ("turret", "launcher"):
+        row = hardpoints[kind]
+        assert set(row) == {"total", "used", "free"}
+        assert row["used"] >= 0
+        # free 是算出来的，**可以为负**（负数 = 非法装配），不许用 max(…, 0) 夹
+        assert row["free"] == row["total"] - row["used"]
+    # 已装的炮/发射器必须真的被数进去（样本 Hecate 装了 5 门 Light Neutron Blaster II）
+    assert hardpoints["turret"]["used"] == 5
+    assert isinstance(hardpoints["unclassified"], int) and hardpoints["unclassified"] >= 0
 
     bandwidth = overview["drone"]["bandwidth"]
     capacity = overview["drone"]["capacity"]
@@ -570,7 +586,12 @@ def test_missing_values_stay_none_not_zero() -> None:
         assert resources["cpu"][key] is None
         assert resources["powergrid"][key] is None
         assert resources["calibration"][key] is None
-    assert resources["hardpoints_free"]["turret"] is None
+    # 炮位：总量来自船体属性（缺 → None），`used` 是数出来的真 0，`free` 跟着总量缺
+    for kind in ("turret", "launcher"):
+        assert resources["hardpoints"][kind]["total"] is None
+        assert resources["hardpoints"][kind]["used"] == 0
+        assert resources["hardpoints"][kind]["free"] is None, "总量未知时 free 不得补 0"
+    assert resources["hardpoints"]["unclassified"] == 0
     assert resources["drone"]["bandwidth"]["total"] is None
     assert resources["cargo"]["used"] is None, "没有索引就查不到体积，必须给 None"
     for name in ("high", "medium", "low", "rig"):

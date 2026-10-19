@@ -1649,3 +1649,605 @@ def test_zkb_search_missing_name_is_null_and_warned(zkb_state: None) -> None:
     assert victim["character"] == {"id": victim_character, "name": None}
     assert victim["corporation"]["name"], "缺一个不该连累别人"
     assert any("个实体名未解析" in warning for warning in result["warnings"]), result["warnings"]
+
+
+# =============================================================================
+# 十四、实体画像（T-55）：`zkb_stats`
+# =============================================================================
+
+STATS_CHARACTER = ZKB_FIXTURES / "stats-character-2117515414.json"
+STATS_CORPORATION = ZKB_FIXTURES / "stats-corporation-98821127.json"
+STATS_ALLIANCE = ZKB_FIXTURES / "stats-alliance-1354830081.json"
+"""三份真实 `/api/stats/` 响应（**未裁剪任何字段**，见 `tests/fixtures/zkb/README.md`）。"""
+
+STATS_CASES = (
+    ("character", 2117515414, STATS_CHARACTER),
+    ("corporation", 98821127, STATS_CORPORATION),
+    ("alliance", 1354830081, STATS_ALLIANCE),
+)
+
+
+class _StatsRecorder:
+    """假请求器：**任何 URL** 都回同一份 stats 文档；POST 直接判失败（stats 只该走 GET）。
+
+    不区分 URL 是故意的：如果哪天本层错误地对 ESI 发了一次名字解析，`urls` 里会多一条，
+    测试的「只发了一次请求」断言就会红。
+    """
+
+    def __init__(self, payload: object) -> None:
+        self.payload = payload
+        self.urls: list[str] = []
+        self.posts: list[object] = []
+
+    def __call__(self, url: str, body: object | None = None) -> object:
+        self.urls.append(url)
+        if body is not None:
+            self.posts.append(body)
+        return self.payload
+
+
+_FAKE_NOW: dict[str, float] = {"now": 0.0}
+"""`zkb_stats` 测试共用的虚拟时钟游标（**跨调用单调**）。"""
+
+_SLEPT: list[float] = []
+"""虚拟睡眠记录（只记录、**不抛异常**）。
+
+不抛异常是有意的：`_zkb_resolve_entity()` 内部那次 `POST /universe/ids/` **不转发**
+clock/sleeper（既有设计，本任务不改 api 的解析函数），所以它会用真实时钟写一次
+`_ZKB_LAST_START`；随后用虚拟时钟的请求算出的等待必然是个大数。这里记录下来即可，
+断言「没有真的睡」交给 `test_zkb_search_respects_the_1_2s_gap` 那条已有测试。
+"""
+
+
+def _instant() -> tuple[Callable[[], float], Callable[[float], None]]:
+    """虚拟时钟 + 假睡眠：每次调用前进 10 s，于是**永远不需要真的等 1.2 s**。
+
+    必须是**模块级共享**的游标，不能每次调用新建一个从 0 开始的时钟：限流闸门是全局的
+    （`_ZKB_LAST_START`），第二个调用若拿到「又从 0 开始」的时刻，算出的等待会是 1.2 s，
+    于是测试真的睡下去。
+
+    基准值取 `0.0`（而不是某个大数）：万一某个测试忘了用 `zkb_state` 复位，留下的时间戳
+    也只有十几秒，既不会让真实时钟的后续调用白等，也不会让虚拟时钟白等。
+    """
+
+    def clock() -> float:
+        _FAKE_NOW["now"] += 10.0
+        return _FAKE_NOW["now"]
+
+    def sleeper(seconds: float) -> None:
+        _SLEPT.append(seconds)
+
+    return clock, sleeper
+
+
+def _stats(
+    entity: object,
+    kind: str,
+    path: Path,
+    *,
+    include: object = None,
+    **kwargs: object,
+) -> tuple[dict, _StatsRecorder]:
+    """跑一次 `zkb_stats`（注入 fixture 请求器 + **虚拟时钟**），返回 `(信封, 记录器)`。"""
+    recorder = _StatsRecorder(_fixture(path))
+    virtual_clock, sleeper = _instant()
+    envelope = api.zkb_stats(
+        entity,
+        entity_type=kind,
+        requester=recorder,
+        include=include,
+        clock=virtual_clock,
+        sleeper=sleeper,
+        **kwargs,
+    )
+    return envelope, recorder
+
+
+def _result_size(result: object) -> int:
+    """紧凑 JSON 的字节数（= MCP 实际发出的量级）。"""
+    return len(
+        json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+
+
+def test_zkb_stats_url_always_ends_with_a_slash(zkb_state: None) -> None:
+    """URL 形态：`/api/stats/<段名>/<id>/`，**结尾斜杠不可省**。
+
+    实测：省了结尾 `/`，zkb 回 `200` + **0 字节空体**（不是报错）—— 所以这条不是洁癖，
+    是唯一能让「空体」永不发生的结构性保证。三个类型段的映射也必须对。
+    """
+    assert api.zkb_stats_url("character", 2117515414) == (
+        "https://zkillboard.com/api/stats/characterID/2117515414/"
+    )
+    assert api.zkb_stats_url("corporation", 98821127) == (
+        "https://zkillboard.com/api/stats/corporationID/98821127/"
+    )
+    assert api.zkb_stats_url("alliance", 1354830081) == (
+        "https://zkillboard.com/api/stats/allianceID/1354830081/"
+    )
+    for kind in api.ZKB_STATS_ENTITY_KINDS:
+        url = api.zkb_stats_url(kind, 1)
+        assert url.endswith("/"), f"{kind} 的 URL 少了结尾斜杠：{url}"
+        assert f"/stats/{api.ZKB_STATS_SEGMENTS[kind]}/1/" in url
+
+
+def test_zkb_stats_default_shape_is_every_key_present(zkb_state: None) -> None:
+    """默认形状：**所有键恒在**（zkb 省空块是它的问题），且三实体都 ≤ 4 KB。
+
+    zkb 三份样本的顶层键是 59 / 48 / 49（各不相同的省略方式），所以这里断言的是
+    **我们补出来的固定形状**，不是 zkb 的键数。
+    """
+    for kind, entity, path in STATS_CASES:
+        envelope, recorder = _stats(entity, kind, path)
+        assert envelope["ok"] is True, envelope
+        result = envelope["result"]
+        assert recorder.urls == [api.zkb_stats_url(kind, entity)], "只该发一次 GET"
+        assert recorder.posts == [], "stats 不该发 POST（名字解析在纯 id 下不该触发）"
+
+        assert set(result) == {
+            "entity", "combat", "style", "activity_7d", "top", "note", "warnings"
+        }, f"{kind} 的顶层键不是固定形状：{sorted(result)}"
+        assert set(result["entity"]) == {
+            "type", "id", "name", "ticker", "security_status", "founded"
+        }
+        assert set(result["combat"]) == {
+            "ships_destroyed", "ships_lost", "isk_destroyed", "isk_lost",
+            "points_destroyed", "points_lost", "efficiency",
+        }
+        assert set(result["style"]) == {
+            "danger_ratio", "gang_ratio", "solo_ratio", "avg_gang_size",
+            "solo_kills", "solo_losses", "source", "formula", "notes",
+        }
+        assert set(result["activity_7d"]) == set(api.ZKB_STATS_ACTIVITY_KEYS)
+        assert set(result["top"]) == {
+            "characters", "corporations", "alliances", "ships", "systems", "locations"
+        }, f"{kind} 的 top 不是 6 类"
+        assert "regions" not in result["top"], "zkb 没有区域榜，不该编一个 regions 出来"
+        assert result["style"]["formula"] is None, "四个 ratio 的公式未公开，必须是 null"
+
+        size = _result_size(result)
+        assert size <= 4096, f"{kind} 的默认形状 {size} B 超过 4 KB 预算"
+        assert envelope["meta"]["bytes"] == size
+        assert "blocks" not in result, "默认不该带任何大块"
+
+
+def test_zkb_stats_transcribes_the_measured_values(zkb_state: None) -> None:
+    """三实体的实测值逐项钉住（**改了任何一个都会红**）。
+
+    `solo_ratio` / `avg_gang_size` 的**量纲**在这条里体现：`1.8` 而不是 `0.018`，
+    `3.6` 而不是 `0.036`。
+    """
+    expected = {
+        "character": dict(
+            ships_destroyed=823, ships_lost=384, isk_destroyed=222758096336,
+            isk_lost=45961938028, points_destroyed=3693, points_lost=1622,
+            danger_ratio=69, gang_ratio=99, solo_ratio=1.8, avg_gang_size=3.6,
+            solo_kills=14, solo_losses=50, name="SixtyEverSnake",
+            ticker=None, security_status=4.3, founded="2020-09-03T21:05:25Z",
+        ),
+        "corporation": dict(
+            ships_destroyed=734, ships_lost=187, isk_destroyed=94220569550,
+            isk_lost=61029355087, points_destroyed=5595, points_lost=952,
+            danger_ratio=84, gang_ratio=89, solo_ratio=14.7, avg_gang_size=2,
+            solo_kills=85, solo_losses=17, name="The big boys",
+            ticker="SE4E", security_status=None, founded="2025-12-15T23:19:12Z",
+        ),
+        "alliance": dict(
+            ships_destroyed=3979640, ships_lost=3647189,
+            isk_destroyed=793436069915270, isk_lost=465835324896055,
+            points_destroyed=13796523, points_lost=16070650,
+            danger_ratio=47, gang_ratio=89, solo_ratio=11.2, avg_gang_size=12,
+            solo_kills=441760, solo_losses=489270, name="Goonswarm Federation",
+            ticker="CONDI", security_status=None, founded="2010-06-01T05:36:00Z",
+        ),
+    }
+    for kind, entity, path in STATS_CASES:
+        want = expected[kind]
+        envelope, _recorder = _stats(entity, kind, path)
+        assert envelope["ok"] is True, envelope
+        result = envelope["result"]
+        entity_block = result["entity"]
+        combat = result["combat"]
+        style = result["style"]
+        assert entity_block["type"] == kind
+        assert entity_block["id"] == entity
+        assert entity_block["name"] == want["name"]
+        assert entity_block["ticker"] == want["ticker"], "角色没有 ticker，公司/联盟才有"
+        assert entity_block["security_status"] == want["security_status"], (
+            "安全等级只对角色有意义；公司/联盟必须是 null（不拿 0 冒充）"
+        )
+        assert entity_block["founded"] == want["founded"], (
+            "角色读 info.birthday，公司/联盟读 info.date_founded"
+        )
+        for key in ("ships_destroyed", "ships_lost", "isk_destroyed", "isk_lost",
+                    "points_destroyed", "points_lost"):
+            assert combat[key] == want[key], f"{kind}.combat.{key} 变了"
+        for key in ("danger_ratio", "gang_ratio", "solo_ratio", "avg_gang_size",
+                    "solo_kills", "solo_losses"):
+            assert style[key] == want[key], f"{kind}.style.{key} 变了"
+
+
+def test_zkb_stats_danger_ratio_assertion_is_not_vacuous(
+    zkb_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**非永真证明**：把 `danger_ratio` 写死成 `0`，上一条的断言必须红。
+
+    不做这一步，「`danger_ratio == 69`」就不能证明是真的从响应里读出来的 —— 它也可能
+    恒等于某个常量而永远通过（PROGRESS 第 180 / 196 条：空转的断言比没有断言更危险）。
+    """
+    original = api._stats_style_block
+
+    def broken(payload: dict) -> dict:
+        block = original(payload)
+        block["danger_ratio"] = 0
+        return block
+
+    monkeypatch.setattr(api, "_stats_style_block", broken)
+    envelope, _recorder = _stats(2117515414, "character", STATS_CHARACTER)
+    assert envelope["ok"] is True, envelope
+    got = envelope["result"]["style"]["danger_ratio"]
+    assert got == 0, "注入没生效，这条证明无效"
+    assert got != 69, "主断言在这条注入下必须红（否则它是永真的）"
+
+
+def test_zkb_stats_efficiency_is_marked_derived_and_differs_from_danger_ratio(
+    zkb_state: None,
+) -> None:
+    """`efficiency` 是我们按 isk 派生的，**与 zkb 的 `dangerRatio` 不是同一个数**。
+
+    同一角色实测：isk 效率 0.829，而 dangerRatio 69 —— 把 82.9% 说成「威胁度」就是错。
+    """
+    envelope, _recorder = _stats(2117515414, "character", STATS_CHARACTER)
+    efficiency = envelope["result"]["combat"]["efficiency"]
+    assert efficiency["value"] == 0.829
+    assert efficiency["kind"] == "derived"
+    assert efficiency["formula"] == "isk_destroyed / (isk_destroyed + isk_lost)"
+    assert "danger_ratio" in efficiency["note"], "必须点名它 ≠ danger_ratio"
+    assert envelope["result"]["style"]["danger_ratio"] == 69
+    assert round(efficiency["value"] * 100, 1) != 69, (
+        "如果这两个数字相等，那么「它们不是同一个东西」这句话就没意义了"
+    )
+
+
+def test_zkb_stats_activity_not_applicable_is_silent(zkb_state: None) -> None:
+    """`not_applicable` ≠ 「不知道」：本类型天生没有的键给 `null`，**不产生 warning**。
+
+    每次查角色都报一条「characters/corporations 不适用」是噪音，不是信号 ——
+    天天报警的告警等于没有告警。
+    """
+    envelope, _recorder = _stats(2117515414, "character", STATS_CHARACTER)
+    result = envelope["result"]
+    activity = result["activity_7d"]
+    assert activity["ships"] == 4 and activity["systems"] == 5
+    assert activity["regions"] == 4 and activity["kills"] == 8
+    assert activity["characters"] is None, "角色自己没有 characters 这一栏"
+    assert activity["corporations"] is None
+    assert result["warnings"] == [], f"不该有任何 warning，实际 {result['warnings']}"
+    assert "field_reasons" not in result, "not_applicable 不进 field_reasons"
+
+    # 联盟两种都有（实测 activepvp 有 characters / corporations）
+    alliance, _rec = _stats(1354830081, "alliance", STATS_ALLIANCE)
+    assert alliance["result"]["activity_7d"]["characters"] == 4287
+    assert alliance["result"]["activity_7d"]["corporations"] == 173
+    assert alliance["result"]["warnings"] == []
+
+
+def test_zkb_stats_activity_missing_on_a_required_key_is_reported(
+    zkb_state: None,
+) -> None:
+    """**本该有却被省略**才进 `field_reasons`（与 `not_applicable` 分开）。
+
+    用「角色文档 + 声称是联盟」造一个真缺失的现场：联盟本该有 `characters`。
+    """
+    document = _fixture(STATS_CHARACTER)
+    recorder = _StatsRecorder(document)
+    virtual_clock, sleeper = _instant()
+    envelope = api.zkb_stats(
+        1354830081, entity_type="alliance", requester=recorder,
+        clock=virtual_clock, sleeper=sleeper,
+    )
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    assert result["activity_7d"]["characters"] is None
+    assert result["field_reasons"] == {
+        "characters": "zkb_response_missing",
+        "corporations": "zkb_response_missing",
+    }, "本该有的键缺失才进 field_reasons"
+    assert result["warnings"] == [], "field_reasons 不进 warnings"
+
+
+def test_zkb_stats_top_keeps_empty_buckets_and_has_no_regions(zkb_state: None) -> None:
+    """空榜返回 `[]` 且**键不省略**；`top` 是 6 类，**没有 `regions`**。
+
+    角色 / 公司样本的 `alliances` 榜实测为空 —— 那不是错误，是形状。
+    """
+    for kind, entity, path in STATS_CASES:
+        envelope, _recorder = _stats(entity, kind, path)
+        top = envelope["result"]["top"]
+        assert "alliances" in top, "空榜也要保留键"
+        assert isinstance(top["alliances"], list)
+    character_top = _stats(2117515414, "character", STATS_CHARACTER)[0]["result"]["top"]
+    assert character_top["alliances"] == []
+    assert len(character_top["characters"]) == 1
+    assert len(character_top["systems"]) == 3
+    # 每个元素的形状固定四键，且 count 就是 zkb 的 kills
+    for bucket in character_top.values():
+        for row in bucket:
+            assert set(row) == {"id", "name", "count", "isk"}
+    assert character_top["ships"][0] == {
+        "id": 11198, "name": "Stiletto", "count": 3, "isk": 182068148.24
+    }
+    # locations 是「天体 / 站点」级，不是星系
+    location_names = [row["name"] for row in character_top["locations"]]
+    assert any("Asteroid Belt" in name or "(Star)" in name for name in location_names), (
+        f"locations 应该是小行星带 / 恒星这一级，实际 {location_names}"
+    )
+
+
+def test_zkb_stats_top_is_capped_at_five(zkb_state: None) -> None:
+    """每类最多前 5 条（联盟的 characters 榜原始有 10 条）。"""
+    raw = _fixture(STATS_ALLIANCE)
+    raw_count = len(
+        next(e for e in raw["topLists"] if e["type"] == "character")["values"]
+    )
+    assert raw_count > api.ZKB_STATS_TOP_LIMIT, "样本本身要超过 5 条，这条才有意义"
+    envelope, _recorder = _stats(1354830081, "alliance", STATS_ALLIANCE)
+    top = envelope["result"]["top"]
+    for bucket in top.values():
+        assert len(bucket) <= api.ZKB_STATS_TOP_LIMIT
+    assert len(top["characters"]) == api.ZKB_STATS_TOP_LIMIT
+
+
+def test_zkb_stats_months_fills_only_internal_gaps(zkb_state: None) -> None:
+    """`months` 只补**观测区间内**的空洞，**不向两端外扩**。
+
+    实测角色：zkb 给 29 个月，区间 2021-05..2026-10；补齐后 66 条、其中 37 条是补的 0。
+    区间外的月份**一条都不造** —— 「这个月他没活动」和「这个月他还不存在」是两件事。
+    """
+    envelope, _recorder = _stats(
+        2117515414, "character", STATS_CHARACTER, include=["months"]
+    )
+    assert envelope["ok"] is True, envelope
+    block = envelope["result"]["blocks"]["months"]
+    assert block["range"] == {"first": "2021-05", "last": "2026-10"}
+    assert block["observed_months"] == 29
+    assert block["filled_internal_gaps"] == 37
+    assert block["truncated"] is False
+    data = block["data"]
+    keys = sorted(data)
+    assert len(keys) == 66, f"补齐后应是 66 个月（29 观测 + 37 空洞），实际 {len(keys)}"
+    assert keys[0] == "202105" and keys[-1] == "202610", "端点必须与 range 一致"
+    # 区间外一条都不许有
+    assert all("202105" <= key <= "202610" for key in keys)
+    # 补出来的 0 是「零」而不是「缺字段」：6 个数值键都在
+    zero_filled = [key for key, row in data.items() if row["shipsDestroyed"] == 0]
+    assert len(zero_filled) >= block["filled_internal_gaps"]
+    for row in data.values():
+        assert set(row) == {"year", "month", *api.ZKB_STATS_MONTH_FIELDS}
+    # 有数据的那一个月原样保留
+    assert data["202105"]["shipsDestroyed"] == 17
+    assert data["202105"]["iskDestroyed"] == 1257701232
+
+
+def test_zkb_stats_months_does_not_extend_outside_the_observed_range(
+    zkb_state: None,
+) -> None:
+    """**非永真证明**：把 `months` 缩成两个月再看区间端点 —— 若实现会外扩，这里就红。
+
+    做法：拿一份把 `months` 砍到只剩首尾两个月的文档，断言补齐后**只有中间那些月份**，
+    既没有更早的、也没有更晚的。
+    """
+    document = _fixture(STATS_CHARACTER)
+    raw = document["months"]
+    keep = sorted(raw)
+    document["months"] = {keep[0]: raw[keep[0]], keep[-1]: raw[keep[-1]]}
+    recorder = _StatsRecorder(document)
+    virtual_clock, sleeper = _instant()
+    envelope = api.zkb_stats(
+        2117515414, entity_type="character", include=["months"],
+        requester=recorder, clock=virtual_clock, sleeper=sleeper,
+    )
+    block = envelope["result"]["blocks"]["months"]
+    first, last = keep[0], keep[-1]
+    assert block["observed_months"] == 2
+    assert block["range"] == {
+        "first": f"{int(first) // 100:04d}-{int(first) % 100:02d}",
+        "last": f"{int(last) // 100:04d}-{int(last) % 100:02d}",
+    }
+    keys = sorted(block["data"])
+    assert keys[0] == first and keys[-1] == last, "端点必须落在实测的首末月，不许外扩"
+    assert all(first <= key <= last for key in keys)
+
+
+def test_zkb_stats_include_whitelist_and_hints(zkb_state: None) -> None:
+    """`include` 只认白名单；未知块名 → `invalid_argument` + 可用清单（**不静默忽略**）。"""
+    document = _fixture(STATS_CHARACTER)
+    recorder = _StatsRecorder(document)
+    for bad in (["months", "nope"], "months", [123]):
+        envelope = api.zkb_stats(
+            2117515414, entity_type="character", include=bad, requester=recorder
+        )
+        assert envelope["ok"] is False, f"{bad!r} 应该被拒"
+        error = envelope["error"]
+        assert error["kind"] == "invalid_argument"
+        assert error["field"] == "include"
+        assert error["hint"]["accepted"] == list(api.ZKB_STATS_BLOCKS)
+    assert recorder.urls == [], "参数错误不该发任何请求"
+
+    # 重复的块名去重，顺序按给出顺序
+    envelope = api.zkb_stats(
+        2117515414, entity_type="character",
+        include=["groups", "months", "groups"], requester=recorder,
+    )
+    assert envelope["ok"] is True, envelope
+    assert list(envelope["result"]["blocks"]) == ["groups", "months"]
+
+
+def test_zkb_stats_all_blocks_warn_but_never_truncate(zkb_state: None) -> None:
+    """四块全要时：**绝不静默截断**，只在 > 64 KB 时加一条软警告。
+
+    实测联盟四块约 80 KB；单块最大（`months` 33.6 KB）仍远低于 64 KB 硬上限。
+    """
+    envelope, _recorder = _stats(
+        1354830081, "alliance", STATS_ALLIANCE,
+        include=list(api.ZKB_STATS_BLOCKS),
+    )
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    blocks = result["blocks"]
+    assert set(blocks) == set(api.ZKB_STATS_BLOCKS)
+    for name, block in blocks.items():
+        assert block["truncated"] is False, f"{name} 不该被截断"
+        assert "dropped_items" not in block
+        assert isinstance(block["bytes"], int) and block["bytes"] > 0
+    total = _result_size(result)
+    assert total > api.ZKB_STATS_RESPONSE_SOFT_BYTES, "这个样本本来就该超 64 KB"
+    assert any(warning.startswith("large_response") for warning in result["warnings"]), (
+        f"超了 64 KB 必须有软警告，实际 {result['warnings']}"
+    )
+    # 软警告只说体积，不说「我截了」
+    assert all("truncated" not in warning for warning in result["warnings"])
+
+    # 单块加入后不超 64 KB 的情况**不该**有软警告
+    small, _rec = _stats(
+        98821127, "corporation", STATS_CORPORATION, include=["rankings"]
+    )
+    assert small["result"]["warnings"] == []
+
+
+def test_zkb_stats_error_body_is_unknown_entity_despite_http_200(
+    zkb_state: None,
+) -> None:
+    """`{"error": "Invalid type or id"}`（**HTTP 200**）→ `unknown_entity`，不是 network_failed。
+
+    实测：id 越界、以及「拿公司 id 当联盟」都返回这个正文，状态码是 200 ——
+    靠状态码判成败的实现会把它当成成功，然后交出一份空画像。
+    """
+    payload = api.zkb_stats(
+        999999999999, entity_type="character",
+        requester=_StatsRecorder({"error": "Invalid type or id"}),
+    )
+    assert payload["ok"] is False
+    assert payload["error"]["kind"] == "unknown_entity"
+    assert payload["error"]["raw"] == "Invalid type or id"
+
+    # 类型错配同一个正文（zkb 自己校验 id 与类型）
+    mismatched = api.zkb_stats(
+        98821127, entity_type="alliance",
+        requester=_StatsRecorder({"error": "Invalid type or id"}),
+    )
+    assert mismatched["error"]["kind"] == "unknown_entity"
+
+
+def test_zkb_stats_empty_body_is_internal_error_with_warning(zkb_state: None) -> None:
+    """`200` + **0 字节空体** → `internal_error` + 说明「URL 构造没问题」的 warning。
+
+    这是最阴的一种：zkb 在 URL 少了结尾 `/` 时就是这样。本层 URL 恒以 `/` 结尾，
+    所以线上出现它意味着上游异常，not 参数问题。
+    """
+
+    def empty_body(url: str, body: object | None = None) -> object:
+        raise api._ApiFailure(
+            "network_failed", f"{url} 返回的不是 UTF-8 JSON", url=url, payload_bytes=0
+        )
+
+    envelope = api.zkb_stats(
+        2117515414, entity_type="character", requester=empty_body
+    )
+    assert envelope["ok"] is False
+    error = envelope["error"]
+    assert error["kind"] == "internal_error", error
+    assert error["hint"]["url_ends_with_slash"] is True
+    assert any("empty_body" in warning for warning in error["warnings"])
+
+
+def test_zkb_stats_empty_shell_entity_is_unknown_entity(zkb_state: None) -> None:
+    """空壳实体（`info` 无 name + 战斗字段全缺）→ `unknown_entity` + warning。
+
+    实测 `stats/characterID/1/`：`200` + 702 B、只有 5 个键。那个 id 存在，但**没有任何
+    可报告的画像** —— 不能当成「0 战绩」返回。
+    """
+    shell = {
+        "activepvp": {},
+        "info": {"type": "characterID", "id": 1, "corporationID": 0},
+        "topIskKillIDs": [],
+        "topLists": [],
+        "topListsSort": "kills",
+    }
+    envelope = api.zkb_stats(1, entity_type="character", requester=_StatsRecorder(shell))
+    assert envelope["ok"] is False
+    error = envelope["error"]
+    assert error["kind"] == "unknown_entity"
+    assert any("empty_entity" in warning for warning in error["warnings"])
+
+
+def test_zkb_stats_entity_type_is_required_and_validated(zkb_state: None) -> None:
+    """`entity_type` 必填且三选一；**不靠 id 猜**（同一串数字在三个命名空间都可能存在）。"""
+    recorder = _StatsRecorder(_fixture(STATS_CHARACTER))
+    for bad in (None, "ship", "Character", 123):
+        envelope = api.zkb_stats(2117515414, entity_type=bad, requester=recorder)
+        assert envelope["ok"] is False, f"{bad!r} 应该被拒"
+        error = envelope["error"]
+        assert error["kind"] == "invalid_argument", error
+        assert error["field"] == "entity_type"
+        assert error["hint"]["accepted"] == list(api.ZKB_STATS_ENTITY_KINDS)
+    assert recorder.urls == [], "参数错误不该发任何请求"
+
+    missing_entity = api.zkb_stats(None, entity_type="character", requester=recorder)
+    assert missing_entity["ok"] is False
+    assert missing_entity["error"]["field"] == "entity"
+
+
+def test_zkb_stats_rejects_time_range_parameters_without_network(
+    zkb_state: None,
+) -> None:
+    """`/api/stats/` 不接受时间区间 —— 拒绝，且**不发请求**。
+
+    提示语必须指向 stats 自己的语义（它返回全时期累计），`hint.accepted` 只能是那三个
+    「无影响」的配装参数 —— 绝不能变成列表接口那份「用 past_seconds + page 回溯」。
+    """
+    recorder = _StatsRecorder(_fixture(STATS_CHARACTER))
+    envelope = api.zkb_stats(
+        2117515414, entity_type="character", startTime=20260101, requester=recorder
+    )
+    assert envelope["ok"] is False
+    error = envelope["error"]
+    assert error["kind"] == "invalid_argument"
+    assert error["field"] == "startTime"
+    assert "/api/stats/" in error["message"], "提示必须说清是 stats 接口的语义"
+    assert "全时期" in error["message"], "stats 返回的是全时期累计，不是窗口"
+    assert error["hint"]["accepted"] == list(api.ZKB_IGNORED_PARAMETERS), (
+        "hint 不能指向 past_seconds / page —— stats 没有这两个参数"
+    )
+    assert recorder.urls == []
+
+
+def test_zkb_stats_goes_through_the_shared_rate_limiter(zkb_state: None) -> None:
+    """出网走**同一个**全局限流闸门（`_ZKB_LAST_START` 会被设置）。"""
+    assert api._ZKB_LAST_START is None
+    _envelope, _recorder = _stats(2117515414, "character", STATS_CHARACTER)
+    assert api._ZKB_LAST_START is not None, "stats 必须复用 zkb 的限流闸门"
+
+
+def test_zkb_stats_resolves_a_name_through_esi(zkb_state: None) -> None:
+    """名字 → id 复用 `_zkb_resolve_entity`（走 ESI `/universe/ids/`），**不另写一份解析**。"""
+    seen: list[tuple[str, object]] = []
+
+    def requester(url: str, body: object | None = None) -> object:
+        seen.append((url, body))
+        if body is not None:
+            return {"characters": [{"id": 2117515414, "name": "SixtyEverSnake"}]}
+        return _fixture(STATS_CHARACTER)
+
+    virtual_clock, sleeper = _instant()
+    envelope = api.zkb_stats(
+        "SixtyEverSnake", entity_type="character",
+        requester=requester, clock=virtual_clock, sleeper=sleeper,
+    )
+    assert envelope["ok"] is True, envelope
+    assert [url for url, _body in seen] == [
+        api.ESI_UNIVERSE_IDS_API,
+        "https://zkillboard.com/api/stats/characterID/2117515414/",
+    ]
+    assert seen[0][1] == ["SixtyEverSnake"], "名字解析的请求体就是名字数组"
+    assert envelope["result"]["entity"]["name"] == "SixtyEverSnake"

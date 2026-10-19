@@ -22,8 +22,53 @@
   （在这些船上取不到值），1367 才是船体侧的槽位上限。实测（SDE build 3607705 /
   引擎 13.6.0）：Loki（T3C）= 5，Hecate / Drake / Griffin 引擎连键都不给。
   这是 `FIELD_SOURCES` 里唯一的**条件字段**（见 `CONDITIONAL_SOURCES`）；
-- `hardpoints_free` ← 102 `turretSlotsLeft` / 101 `launcherSlotsLeft`；
+- `hardpoints.{turret,launcher}.total` ← 102 `turretSlotsLeft` / 101 `launcherSlotsLeft`
+  （**船体基准值**，`measured`；`used` / `free` 见下）；
 - `drone.*.total` ← 1271 `droneBandwidth` / 283 `droneCapacity`；`cargo.total` ← 38 `capacity`。
+
+**`hardpoints`（T-54）：高槽 ≠ 炮位，`free` 必须扣掉已装的炮/发射器**。旧的
+`hardpoints_free` 是 **T-54 之前的口径错误**：它直接把 102 / 101（船体的**基准炮位数**）
+当成「剩余」，实测**与装配无关**（同一艘 Osprey Navy Issue 的高槽装 0 / 3 / 5 门
+`Rapid Light Missile Launcher II`，旧字段恒为 `{"turret": 2, "launcher": 3}`）。
+「高槽 5 个」**不是**「5 个发射器挂点」——这是 agent 把 `slots.high.total` 当挂点数、
+进而得出「白扔两个发射器」的直接原因（战报 139274776 实测：5 高槽 / 2 turret / 3 launcher）。
+
+现在的三段是**算出来的**（`total` 与 `used` 的口径不同，谁都替代不了谁）：
+
+| 段 | 来源 | 三态 |
+|---|---|---|
+| `total` | 船体属性 102 / 101（引擎已叠加模块的 `turretHardPointModifier` 等修正） | `measured` |
+| `used` | **我们自己数已装模块**（分类规则见下） | `assumed` |
+| `free` | `total - used`，**可以为负**（负数 = 非法装配，由 `hardpoint_violation` flag 报） | `assumed` |
+| `unclassified` | 高槽里**未计入**任何硬点类的已装模块件数（含「确定不占硬点」与「分不清」两类，**都不许猜进 `used`**） | `assumed` |
+
+`total` 缺失（属性没有）时 `free` 也是 `None`（缺值不补 0，红线 N4）；`used` 仍然是数出来的
+真值（0 就是真 0）。
+
+**模块分类规则（可审计常量表，`HARDPOINT_*`）**——只在**高槽模块**里分（炮位只在高槽：
+
+低槽的 `Mining Laser Upgrade` 名字含 `Laser`，但不是炮位，靠「只看高槽」这一条挡掉）：
+
+1. 组名命中 `HARDPOINT_UNCLASSIFIED_GROUPS` → **不计入任何一类**，进 `unclassified`
+   （确定不占硬点的，如 `Scan Probe Launcher` / `Tractor Beam`；以及**分不清**的，
+   如 `Festival Launcher` / `Interdiction Sphere Launcher`——**不许猜**）；
+2. 名字或组名含 `launcher` → `launcher`（`Rapid Light Missile Launcher` /
+   `Heavy Missile Launcher` / `Torpedo Launcher` / `Rocket Launcher` / `Cruise Missile Launcher`…）；
+3. 名字或组名含 `HARDPOINT_TURRET_KEYWORDS` 之一 → `turret`；其中 `ion` 按**整词**匹配
+   （SDE 实测：`ion` 当子串会命中 447 个模块——凡是 `-tion` 结尾的普通词都会中，
+   整词匹配后只剩 `Ion Blaster` 这类真正的炮）；
+4. 都不命中 → `unclassified`（计数，不给结论）。
+
+`unclassified` 是个**混装计数**，别把它读成「我们不知道」：它同时收两类完全不同的东西——
+①**确定不占硬点**（`Cloaking Device` / `Smart Bomb` / `Energy Neutralizer` / `Energy Nosferatu` /
+`Remote Armor Repairer` / `Scan Probe Launcher` / `Tractor Beam`，它们本来就不该进任何一类）；
+②**分不清**（`Festival Launcher` / `Interdiction Sphere Launcher`）。两类在输出上等价
+（都不许计入 `used`），但语义不同：①是已知事实，②才是未知。字段名保持 `unclassified`
+（L0 已暴露的路径是契约），这里把话说清楚，免得下游把「一件隐身」读成「一件来路不明的模块」。
+
+`used` 一律 `assumed`：这是**按名字/组名的启发式分类**，不是引擎算出来的（SDE 里没有
+「这个模块占几个炮位」的属性，只有船体侧的 102 / 101 总量）。分不清就进 `unclassified`，
+不猜、不补。
 
 **`feasible` / `over_budget` 是 T-22 新增的可行性事实（字段规格 §0.6）**：
 
@@ -64,6 +109,7 @@
 from __future__ import annotations
 
 import math
+import re
 
 from noobbaozi.config import attributes as A
 from noobbaozi.config.attributes import ATTR_DRONE_BANDWIDTH_USED, ATTR_MAX_SUBSYSTEMS
@@ -85,6 +131,120 @@ SLOT_SOURCES: dict[str, int] = {
 
 SUBSYSTEM_SLOT_TYPE: str = "subsystem"
 """T3C 子系统槽位的 `slot.type`（`ctx.items()` 里 4 个子系统模块的槽位类别）。"""
+
+# =============================================================================
+# 炮位（T-54）：高槽 ≠ 炮位
+# =============================================================================
+
+HARDPOINT_SLOT_TYPE: str = "high"
+"""炮位只出现在**高槽**：turret / launcher 是两种硬点，都长在高槽模块上。"""
+
+HARDPOINT_SOURCES: dict[str, int] = {
+    "turret": A.ATTR_TURRET_SLOTS_LEFT,
+    "launcher": A.ATTR_LAUNCHER_SLOTS_LEFT,
+}
+"""炮位类别 → **船体基准值**属性 ID（102 `turretSlotsLeft` / 101 `launcherSlotsLeft`）。顺序即输出顺序。"""
+
+LAUNCHER_KEYWORDS: tuple[str, ...] = ("launcher",)
+"""`launcher` 类的名字/组名关键词（含 `Rapid Light Missile Launcher` / `Torpedo Launcher`…
+——SDE 实测 12 个 `Missile Launcher *` 组 + `Missile Launcher Bomb` 的模块名全都带这个词）。"""
+
+HARDPOINT_TURRET_KEYWORDS: tuple[str, ...] = (
+    "cannon",
+    "artillery",
+    "railgun",
+    "blaster",
+    "laser",
+    "beam",
+    "pulse",
+    "neutron",
+    "ion",
+    "electron",
+    "disintegrator",
+    "miner",
+    "harvester",
+)
+"""`turret` 类的名字/组名关键词（SDE 实测：`Cannon` / `Artillery` 落在 `Projectile Weapon`，
+`Railgun` / `Blaster` / `Neutron` / `Ion` / `Electron` 落在 `Hybrid Weapon`，`Laser` / `Beam` /
+`Pulse` 落在 `Energy Weapon`，`Miner` 落在 `Mining Laser` / `Strip Miner` ——**这四个组都占炮位**）。
+
+`miner` 是任务书里带问号的那一项，这里**收**：`Mining Laser II` / `Strip Miner I` 确实占炮位；
+低槽的 `Mining Laser Upgrade` 名字也含 `Laser`，但它不是高槽模块，被 `HARDPOINT_SLOT_TYPE`
+这一条挡在分类之外（不靠关键词表兜）。
+
+`disintegrator` 是任务书清单**之外**的一个（三神裔 `Precursor Weapon` 组的
+`Light Entropic Disintegrator II`）：那一组同样是**炮位**（SDE group 1986），
+不收就会白白落进 `unclassified`。关键词表的取舍标准是「SDE 组名 + 是否占炮位」，
+不是「任务书列了几个词」——多收一个**有证据**的词，比让一件真炮去 unclassified 更有用。
+
+`harvester` 是**独立审查补的漏分类**（T-54 只收了 `miner`）：`Gas Cloud Harvester I/II`
+落在 SDE group `Gas Cloud Harvesters`，名字与组名都不含上面任何一个词，于是整族落进
+`unclassified`。它是**占炮位**的采掘炮——Prospect（2 turret 硬点）装 2 门后实测
+`turret {total:2, used:0, free:2}`：`free` **虚报 2**，装 3 门（超 1 门）时**一条 flag 都不出**。
+全 SDE 4714 个 Module/Subsystem 类型里，含 `harvester` 的**高槽**模块只有 Gas Cloud Harvester
+一族；其余命中是 `Gang Coordinator`（`Mining Foreman Link - Harvester …`）/ `Mining Upgrade`
+（`Ice Harvester Upgrade`）/ `Rig Resource Processing` / `Strip Miner`（`Ice Harvester` 本来
+就该算炮位）—— 前三个都不在高槽。
+"""
+
+HARDPOINT_WHOLE_WORD_KEYWORDS: frozenset[str] = frozenset({"ion"})
+"""必须**整词**匹配的关键词。`ion` 当子串在 SDE 里命中 **447** 个模块——凡是 `-tion`
+结尾的普通词（`Compression` / `Reaction` / `Station`…）都会中，整词匹配后只剩
+`Ion Blaster` / `Ion Siege Blaster` 这类真正的炮。"""
+
+HARDPOINT_UNCLASSIFIED_GROUPS: frozenset[str] = frozenset(
+    {
+        # —— 确定**不占**炮位（高槽、名字/组名含关键词，但装它不消耗 turret/launcher 硬点）
+        "Scan Probe Launcher",  # 探针发射器：占高槽，不占发射器硬点（SDE group 481）
+        "Survey Probe Launcher",  # 同上（group 1226）
+        "Tractor Beam",  # 名字含 Beam，但它是牵引光束（group 650）
+        "Super Weapon",  # 旗舰末日武器（group 588）
+        "Gang Coordinator",  # Mining Foreman Link - Laser Optimization 等指挥模块（名字含 Laser）
+        # —— **分不清**（任务书：不许猜 → 一律 unclassified）
+        "Festival Launcher",
+        "Breacher Pod Launchers",
+        "Interdiction Sphere Launcher",
+    }
+)
+"""名字/组名含关键词、但**不计入** `turret` / `launcher` 的组（一律进 `unclassified`）。
+两类都放这里，理由写在每一行的注释上——**确定不占硬点**与**分不清**在输出上等价
+（都不许计入 `used`），但都不是「猜一个」。
+"""
+
+HARDPOINT_UNCLASSIFIED: str = "unclassified"
+"""`hardpoints` 里「**未计入**任何硬点类」的件数字段名。
+
+名字容易读歪：它**不是**「我们不知道这是什么」，而是「我们**没有把它算进** `turret` / `launcher`」。
+里面混着两类（见模块 docstring 第 4 条）：确定不占硬点的（隐身 / 智能炸弹 / 吸电 / 毁电 /
+遥修 / 探针发射器 / 牵引光束）与真正分不清的（`Festival Launcher` 一族）。
+"""
+
+HARDPOINT_LABELS: dict[str, str] = {"turret": "炮位", "launcher": "发射器"}
+"""硬点类别的中文短名（`diagnostics` 的 evidence 文案用它；`summary` 也有一份同值的表）。
+
+**只做领域词翻译，不产生任何新事实**：键就是 `HARDPOINT_KINDS` 的两个值。
+"""
+
+HARDPOINT_UNCLASSIFIED_GROUPS_FOLDED: frozenset[str] = frozenset(
+    name.casefold() for name in HARDPOINT_UNCLASSIFIED_GROUPS
+)
+"""`HARDPOINT_UNCLASSIFIED_GROUPS` 的小写影子表（组名比对统一走小写，避免大小写分叉）。"""
+
+HARDPOINT_KINDS: tuple[str, ...] = tuple(HARDPOINT_SOURCES)
+"""两个硬点类别（顺序即输出顺序：`turret` → `launcher`）。"""
+
+# 为什么**删掉**了旧键 `hardpoints_free`（任务书允许「删除并说明」的选项）
+# ------------------------------------------------------------------------
+# 保留一个版本要花约 **150 字符**（body 48 + 逐叶子 provenance ~96 + 分隔符），而
+# `render.BUDGET_CHARS` 只剩几百字符余量：实测 f12-logistics-oneiros 加完 `hardpoints`
+# 后是 **19,112**，超预算触发降级（`flags` 整块丢 `evidence` —— 那不是「少几行」，是
+# 诊断证据消失）。删掉旧键后 **18,962 < 19,000**，f47 / f67 也都 < 18,000。
+# 另一个理由：旧键的价值是「不破坏既有断言」，但它的值必须改成真实 `free` 才正确——
+# 那既有断言的期望值**本来就要改**（原来断言的是 `total`），所以「保留旧键」并不能
+# 真的让老断言继续绿：新增 `hardpoints.*.free` 才是唯一正确口径，一份数据说两遍只会漂移。
+# 改掉的断言：`tests/test_views_b.py::test_resources_hardpoints_drones_cargo`
+# （原来断言 `hardpoints_free.turret == 102 属性值`，现在按 `hardpoints` 三段核对）。
+
 
 CONDITIONAL_SOURCES: frozenset[str] = frozenset(
     {
@@ -171,9 +331,15 @@ FIELD_SOURCES: dict[str, int | None] = {
     # 只在船体真有子系统槽时出现（见 CONDITIONAL_SOURCES）
     "slots.subsystem.used": None,
     "slots.subsystem.total": ATTR_MAX_SUBSYSTEMS,
-    # 挂点：102 / 101
-    "hardpoints_free.turret": A.ATTR_TURRET_SLOTS_LEFT,
-    "hardpoints_free.launcher": A.ATTR_LAUNCHER_SLOTS_LEFT,
+    # 挂点（T-54）：`total` 来自船体 102 / 101；`used` 是数出来的、`free` 是相减的
+    # → 后两者登记 `None`（合成值，判 `assumed`，不冒充 `measured`）
+    "hardpoints.turret.total": A.ATTR_TURRET_SLOTS_LEFT,
+    "hardpoints.turret.used": None,
+    "hardpoints.turret.free": None,
+    "hardpoints.launcher.total": A.ATTR_LAUNCHER_SLOTS_LEFT,
+    "hardpoints.launcher.used": None,
+    "hardpoints.launcher.free": None,
+    "hardpoints.unclassified": None,
     # 无人机：上限来自船体，占用是从 items 合成的
     "drone.bandwidth.used": None,
     "drone.bandwidth.total": A.ATTR_DRONE_BANDWIDTH,
@@ -283,6 +449,65 @@ def _slots(attrs: dict[int, float], fitted: list[tuple[int, dict]]) -> dict:
         )
         slots[SUBSYSTEM_SLOT_TYPE] = {"used": used, "total": total}
     return slots
+
+
+def _matches_keyword(text: str, keyword: str) -> bool:
+    """`text`（已小写）是否命中 `keyword`：整词表里的按**整词**，其余按子串。"""
+    if keyword in HARDPOINT_WHOLE_WORD_KEYWORDS:
+        return re.search(rf"(?<![0-9a-z]){re.escape(keyword)}(?![0-9a-z])", text) is not None
+    return keyword in text
+
+
+def _hardpoint_kind(name: object, group_name: object) -> str | None:
+    """一个高槽模块 → `"turret"` / `"launcher"` / `None`（分不清或确定不占硬点）。
+
+    规则顺序就是 `HARDPOINT_UNCLASSIFIED_GROUPS` → launcher → turret（见模块 docstring）：
+    先排除「不占硬点 / 分不清」的组，再判发射器（`launcher` 比 `laser` 这类词更具体），
+    最后判炮。**全部判不出来就是 `None`，不猜。**
+    """
+    group = str(group_name or "").strip()
+    if group.casefold() in HARDPOINT_UNCLASSIFIED_GROUPS_FOLDED:
+        return None
+    text = f"{name or ''} {group}".lower()
+    if not text.strip():
+        return None
+    if any(_matches_keyword(text, keyword) for keyword in LAUNCHER_KEYWORDS):
+        return "launcher"
+    if any(_matches_keyword(text, keyword) for keyword in HARDPOINT_TURRET_KEYWORDS):
+        return "turret"
+    return None
+
+
+def hardpoints(attrs: dict[int, float], fitted: list[tuple[int, dict]]) -> dict:
+    """炮位三段 `{kind: {total, used, free}}` + `unclassified` 件数（T-54）。
+
+    - `total` ← 船体属性 102 / 101（**基准值**，引擎已把模块的 hardpoint 修正叠进去）；
+    - `used` ← **数**高槽里被 `_hardpoint_kind()` 判成该类的已装模块（启发式 → `assumed`）；
+    - `free = total - used`，**可以为负**（负数 = 非法装配，`hardpoint_violation` 负责报）；
+    - `total` 缺失 → `free = None`（缺值不补 0）；`used` 仍是数出来的真值。
+    """
+    counted = dict.fromkeys(HARDPOINT_KINDS, 0)
+    unclassified = 0
+    for _position, item in fitted:
+        if item.get("slot_type") != HARDPOINT_SLOT_TYPE:
+            continue
+        kind = _hardpoint_kind(item.get("name"), item.get("group_name"))
+        if kind is None:
+            unclassified += 1
+            continue
+        counted[kind] += 1
+
+    block: dict[str, object] = {}
+    for kind in HARDPOINT_KINDS:
+        total = _count(_number(attrs, HARDPOINT_SOURCES[kind]))
+        used = counted[kind]
+        block[kind] = {
+            "total": total,
+            "used": used,
+            "free": None if total is None else total - used,
+        }
+    block[HARDPOINT_UNCLASSIFIED] = unclassified
+    return block
 
 
 def _empty_slots(slots: dict) -> dict:
@@ -504,6 +729,8 @@ def build(ctx: ViewContext) -> dict:
     slots = _slots(attrs, fitted)
     drones = [(position, item) for position, item in fitted if item.get("slot_type") == SLOT_DRONE_BAY]
     feasible, over_budget = _feasibility(attrs)
+    # 炮位（T-54）：高槽 ≠ 炮位。`used` 从已装模块数出来，`free = total - used` 可为负
+    hardpoint_block = hardpoints(attrs, fitted)
 
     overview = {
         "cpu": {
@@ -525,10 +752,9 @@ def build(ctx: ViewContext) -> dict:
         "feasible": feasible,
         "over_budget": over_budget,
         "slots": slots,
-        "hardpoints_free": {
-            "turret": _count(_number(attrs, A.ATTR_TURRET_SLOTS_LEFT)),
-            "launcher": _count(_number(attrs, A.ATTR_LAUNCHER_SLOTS_LEFT)),
-        },
+        # 炮位（T-54）：和 `slots` 并列。**高槽 5 个 ≠ 5 个发射器挂点**，
+        # 炮/发射器是不是超装看这里的 `free`（负数 = 非法装配）。
+        "hardpoints": hardpoint_block,
         "drone": {
             "bandwidth": {
                 "used": _drone_used(drones, ATTR_DRONE_BANDWIDTH_USED),

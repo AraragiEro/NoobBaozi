@@ -132,6 +132,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "fit_get",
     "fit_detail",
     "zkb_search",
+    "zkb_stats",
 )
 """**工具清单的唯一真源**（单数真理）：`tools/list`、`/health` 的 `tools`、客户端冒烟、
 验收测试全部从这里派生 —— 本文件之外**不许再出现工具名清单或工具条数的字面量**。
@@ -141,7 +142,8 @@ TOOL_NAMES: tuple[str, ...] = (
 1. `fit_parse` —— 先确认这套配装被正确读懂了；
 2. `fit_killmail` —— 分析一条战报时拿上下文（损失价值 / 参战方 / 伤害构成）；
 3. `fit_index` / `fit_view` / `fit_get` / `fit_detail` —— 六维度从摘要到深挖；
-4. `zkb_search` —— 先按条件筛出 `killmail_id`，再回头对具体那条用 `fit_killmail`。
+4. `zkb_search` —— 先按条件筛出 `killmail_id`，再回头对具体那条用 `fit_killmail`；
+5. `zkb_stats` —— 看一个实体（角色 / 公司 / 联盟）的画像：值不值得往下翻战报。
 
 加工具的正确姿势：往这个元组里加一个名字、在 `_HANDLERS` 里加实现、在
 `_TOOL_DESCRIPTIONS` 里加文案、(必要时) 在 `_schema_for()` 里加 schema ——
@@ -509,6 +511,20 @@ def _tool_zkb_search(arguments: dict) -> dict:
     return _api().zkb_search(**params)
 
 
+def _tool_zkb_stats(arguments: dict) -> dict:
+    """`zkb_stats` → `api.zkb_stats(**arguments)`（**不做任何加工**）。
+
+    同样的纪律：`entity_type` 必填、`include` 白名单、时间区间参数拒绝 —— 全在 api 层判，
+    那里给得出 `field` + `hint`。本层只剔掉三个测试注入点。
+    """
+    params = {
+        key: value
+        for key, value in arguments.items()
+        if key not in _ZKB_INJECTION_KEYS
+    }
+    return _api().zkb_stats(**params)
+
+
 _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "fit_parse": _tool_fit_parse,
     "fit_killmail": _tool_fit_killmail,
@@ -517,6 +533,7 @@ _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "fit_get": _tool_fit_get,
     "fit_detail": _tool_fit_detail,
     "zkb_search": _tool_zkb_search,
+    "zkb_stats": _tool_zkb_stats,
 }
 """工具名 → 实现（键集合必须与 `TOOL_NAMES` 一致，`_build_tool_specs()` 会核对）。"""
 
@@ -542,12 +559,16 @@ _TOOL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
     # `tests/test_mcp_server.py::test_every_tool_description_is_self_explaining` 钉住三段，
     # 删掉任一段就变红（配对断言见同文件的 `test_description_guard_is_not_vacuous`）。
     "fit_parse": (
-        "解析配装（确认读懂了没有）",
+        "解析配装（确认读懂了没有）+ 规范 EFT 文本",
         "配装刚拿到手时用它：回答「这套到底读懂了没有」。把 EFT / DNA / killmail 归一化成"
         "结构，返回 source_format、船（type_id/name/group）、模块件数（已装 / 货舱 / 逐槽位）、"
-        "技能档与 warnings —— 先看 ship 与 modules.fitted，再看 warnings。"
-        "**推荐的第一步**。限制：只归一化、不算任何维度；模块名认不出时给 candidates 而不"
-        "代填；result.fit 是引擎结构原样（不加工）。",
+        "**`eft`（从真实装配渲染出的规范 EFT 文本，可直接复制）**、技能档与 warnings —— "
+        "先看 ship 与 modules.fitted，再看 warnings。"
+        "**推荐的第一步**，也是**唯一该用来拿 EFT 文本的地方**：需要把配装写成 EFT 时读 "
+        "`result.eft`，不要自己拼（自拼会漂成不存在的模块与件数）。"
+        "限制：只归一化、不算任何维度；模块名认不出时给 candidates 而不"
+        "代填；result.fit 是引擎结构原样（不加工）；`eft` 渲染不出来时是 null（原因在 "
+        "warnings 里，不编造任何一行）。",
     ),
     "fit_killmail": (
         "战报上下文（谁打的、损失多少、挨了多少伤害）",
@@ -608,6 +629,19 @@ _TOOL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
         "限制：列表不含明细"
         "（明细用 fit_killmail）；limit 只截断 kills 数组，count 与 aggregates 仍按整页算；"
         "1.2 s 限流，别在循环里逐条查。",
+    ),
+    "zkb_stats": (
+        "实体画像（战绩 / 风格 / 主要活动地）",
+        "想知道某个角色 / 公司 / 联盟「打得怎么样、主要在哪儿、值不值得深挖」时用它。"
+        "返回 combat（ships / isk / points 的 destroyed 与 lost，加 efficiency）、"
+        "style（danger_ratio / gang_ratio / solo_ratio / avg_gang_size，公式未公开故 "
+        "formula=null，只转述不给威胁等级判词）、activity_7d（固定 6 键，本类型天生没有的给 "
+        "null 且不告警）、top（characters / corporations / alliances / ships / systems / "
+        "locations 各前 5，空榜给 []）。"
+        "注意：efficiency 是我们按 isk 派生的，≠ danger_ratio；locations 是行星 / 月球 / "
+        "小行星带 / 星门级、**不是星系**（要看星系用 systems）；默认约 3KB，大块 "
+        "（months / rankings / top_all_time / groups）必须显式 include，联盟全要约 120KB；"
+        "entity_type 必填、不靠 id 猜。",
     ),
 }
 
@@ -765,10 +799,52 @@ def _zkb_input_schema() -> dict:
     return {"type": "object", "properties": properties, "required": []}
 
 
+def _stats_input_schema() -> dict:
+    """`zkb_stats` 的 `inputSchema`（**没有 `fit`**：它不是配装工具）。
+
+    `entity` 必填、`entity_type` **必填且是三选一 enum**（同一串数字在角色 / 公司 / 联盟三个
+    命名空间里都可能存在，靠 id 猜类型必然出错）；`include` 是白名单数组。
+    """
+    api = _api()
+    return {
+        "type": "object",
+        "properties": {
+            "entity": {
+                "type": ["string", "integer"],
+                "description": (
+                    "实体：角色 / 公司 / 联盟的名字或整数 id。"
+                    "名字走 ESI /universe/ids/ 解析（与 zkb_search 同一套，带进程内缓存）。"
+                ),
+            },
+            "entity_type": {
+                "type": "string",
+                "enum": list(api.ZKB_STATS_ENTITY_KINDS),
+                "description": (
+                    "实体类型（**必填**）：character / corporation / alliance。"
+                    "不靠 id 猜 —— 同一串数字在三个命名空间里都可能存在；"
+                    "给错类型会得到 unknown_entity（zkb 自己会校验 id 与类型）。"
+                ),
+            },
+            "include": {
+                "type": "array",
+                "items": {"type": "string", "enum": list(api.ZKB_STATS_BLOCKS)},
+                "description": (
+                    "可选大块，默认一块都不给：months（月度时间序列，只补内部空洞）/ "
+                    "rankings / top_all_time / groups。每块带 bytes 与 truncated；"
+                    "联盟四块全要约 120KB。不认识的块名会 invalid_argument。"
+                ),
+            },
+        },
+        "required": ["entity", "entity_type"],
+    }
+
+
 def _schema_for(name: str) -> dict:
-    """工具 → `inputSchema`（`zkb_search` 不是配装工具，走自己那一套）。"""
+    """工具 → `inputSchema`（`zkb_search` / `zkb_stats` 不是配装工具，各走自己那一套）。"""
     if name == "zkb_search":
         return _zkb_input_schema()
+    if name == "zkb_stats":
+        return _stats_input_schema()
     return _input_schema(
         view={"fit_view": "required", "fit_detail": "optional"}.get(name, "none"),
         path={"fit_get": "required", "fit_detail": "optional"}.get(name, "none"),
@@ -818,6 +894,7 @@ INSTRUCTIONS: str = (
     "④ fit_view 展开可疑维度；⑤ fit_get 只取一个数（带 provenance）；\n"
     "⑥ fit_detail 深挖，返回很大，按需；\n"
     "⑦ zkb_search 要先找战报：筛 killmail_id 再回 ②。\n"
+    "⑧ zkb_stats 先看实体画像：这实体值不值得深挖，再决定用⑦翻哪些战报。\n"
     "三条判读纪律：\n"
     "1) unknown 不是 0：provenance=unknown 别用常识补数，看 unknown_reasons"
     "（not_applicable=本配装不适用、不是「不知道」；input_incomplete=输入不足；"

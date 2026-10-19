@@ -160,7 +160,12 @@ def _human_error(error: object) -> str:
 
 
 def _human_parse(result: dict) -> str:
-    """`parse` 的人话摘要：**我读懂了什么**（船 / 件数 / 技能档 / 警告）。"""
+    """`parse` 的人话摘要：**我读懂了什么**（船 / 件数 / 技能档 / 警告）+ **规范 EFT 文本**。
+
+    EFT 段（T-54）是给人**直接复制**的：它不是给人读的摘要，所以原样整段贴出、
+    不加缩进、不折行（折行会破坏 EFT 的「一行一件」语义）。`eft` 为 `null` 时
+    只说明渲染失败的原因（原因在 `warnings` 里），**不手写一份补上**。
+    """
     lines = [
         f"parse ok · {result.get('source_format')} · {_header(result.get('ship'))}",
         f"{_INDENT}modules: {_block_line(result.get('modules'))}",
@@ -174,6 +179,13 @@ def _human_parse(result: dict) -> str:
         f"{_INDENT}fit: {len(fit.get('items') or [])} items"
         f"（完整结构走 --json 的 result.fit）"
     )
+    eft = result.get("eft")
+    if isinstance(eft, str) and eft:
+        # 原样贴出（可复制）：首尾各一条分隔线，段落内部一个字符都不动
+        lines.append(f"{_INDENT}eft（可直接复制）:")
+        lines.append(eft)
+    else:
+        lines.append(f"{_INDENT}eft: null（渲染失败，原因见 warnings；不要手拼）")
     return "\n".join(lines)
 
 
@@ -426,6 +438,80 @@ def _human_search(result: dict, meta: dict) -> str:
     return "\n".join(lines)
 
 
+_STATS_TOP_KEYS: tuple[str, ...] = (
+    "characters",
+    "corporations",
+    "alliances",
+    "ships",
+    "systems",
+    "locations",
+)
+"""`zkb_stats` 的 6 类榜单（顺序 = 人类的阅读顺序：人 → 组织 → 船 → 空间）。
+
+**没有 `regions`** —— zkb 没有区域榜；`locations` 是行星 / 月球 / 小行星带 / 星门级，
+不是星系（要星系看 `systems`）。
+"""
+
+
+def _human_stats(result: dict, meta: dict) -> str:
+    """`stats` 的人话摘要：身份 → 战斗总量 → 风格指标 → 7 天活动 → 6 类榜单 → 大块 → 警告。
+
+    两处**必须带量纲**，否则一定被误读：
+    - `solo_ratio` 后面写 `%`（它是 0–100 的百分数，不是 0–1 比例）；
+    - `avg_gang_size` 后面写 `人/次`（它是实数均值，不是比例）。
+    另外 `efficiency` 明确标成「按 isk 派生」，免得被当成 zkb 的 `danger_ratio`。
+    """
+    entity = result.get("entity") if isinstance(result.get("entity"), dict) else {}
+    combat = result.get("combat") if isinstance(result.get("combat"), dict) else {}
+    style = result.get("style") if isinstance(result.get("style"), dict) else {}
+    activity = result.get("activity_7d") if isinstance(result.get("activity_7d"), dict) else {}
+    top = result.get("top") if isinstance(result.get("top"), dict) else {}
+    efficiency = combat.get("efficiency") if isinstance(combat.get("efficiency"), dict) else {}
+
+    lines = [
+        f"stats · {entity.get('type')} · {entity.get('name') or '?'} (id={entity.get('id')})",
+        f"{_INDENT}ticker={entity.get('ticker')} · sec={entity.get('security_status')} · "
+        f"founded={entity.get('founded')}",
+        f"{_INDENT}combat: ships {combat.get('ships_destroyed')} 杀 / {combat.get('ships_lost')} 损 · "
+        f"points {combat.get('points_destroyed')} / {combat.get('points_lost')}",
+        f"{_INDENT}isk: 毁 {combat.get('isk_destroyed')} / 损 {combat.get('isk_lost')} · "
+        f"efficiency={efficiency.get('value')}（按 isk 派生，≠ zkb 的 danger_ratio）",
+        f"{_INDENT}style: danger={style.get('danger_ratio')} · gang={style.get('gang_ratio')} · "
+        f"solo={style.get('solo_ratio')}%（百分数） · "
+        f"avg_gang_size={style.get('avg_gang_size')} 人/次 · "
+        f"solo {style.get('solo_kills')} 杀 / {style.get('solo_losses')} 损",
+        f"{_INDENT}style 公式未公开（formula={style.get('formula')}）：只转述，不据此判威胁等级",
+        f"{_INDENT}activity_7d: {_block_line(activity, 220)}",
+    ]
+    for key in _STATS_TOP_KEYS:
+        rows = top.get(key) if isinstance(top.get(key), list) else []
+        lines.append(f"{_INDENT}top.{key}({len(rows)}): {_block_line(rows, 220)}")
+    blocks = result.get("blocks") if isinstance(result.get("blocks"), dict) else {}
+    for name, block in blocks.items():
+        if not isinstance(block, dict):
+            continue
+        extra = ""
+        if name == "months":
+            extra = (
+                f" · range={block.get('range')} · observed={block.get('observed_months')}"
+                f" · 补内部空洞={block.get('filled_internal_gaps')}（不向两端外扩）"
+            )
+        lines.append(
+            f"{_INDENT}block {name}: bytes={block.get('bytes')} "
+            f"truncated={block.get('truncated')}{extra}"
+        )
+    reasons = result.get("field_reasons")
+    if isinstance(reasons, dict) and reasons:
+        lines.append(f"{_INDENT}field_reasons: {_block_line(reasons, 220)}")
+    warnings = result.get("warnings") or []
+    if warnings:
+        lines.append(f"{_INDENT}warnings({len(warnings)}):")
+        lines.extend(f"{_INDENT * 2}- {warn}" for warn in warnings)
+    if isinstance(meta, dict) and meta.get("bytes") is not None:
+        lines.append(f"{_INDENT}bytes={meta.get('bytes')}")
+    return "\n".join(lines)
+
+
 _HUMAN: dict[str, Callable[[dict, dict], str]] = {
     "parse": lambda result, _meta: _human_parse(result),
     "killmail": lambda result, _meta: _human_killmail(result, _meta),
@@ -434,6 +520,7 @@ _HUMAN: dict[str, Callable[[dict, dict], str]] = {
     "get": lambda result, _meta: _human_get(result),
     "detail": _human_detail,
     "search": _human_search,
+    "stats": _human_stats,
 }
 
 
@@ -636,6 +723,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="输出机器可读 JSON（api 返回值原样）"
     )
 
+    stats_cmd = subparsers.add_parser(
+        "stats", help="实体画像（战绩 / 风格指标 / 6 类榜单）"
+    )
+    stats_cmd.add_argument("--character", metavar="NAME", help="角色（名字或整数 id）")
+    stats_cmd.add_argument("--corporation", metavar="NAME", help="公司（名字或整数 id）")
+    stats_cmd.add_argument("--alliance", metavar="NAME", help="联盟（名字或整数 id）")
+    stats_cmd.add_argument(
+        "--include",
+        action="append",
+        choices=api.ZKB_STATS_BLOCKS,
+        metavar="BLOCK",
+        help=(
+            "追加一个大块（可重复）：months / rankings / top_all_time / groups。"
+            "默认一块都不给；联盟四块全要约 120KB"
+        ),
+    )
+    stats_cmd.add_argument(
+        "--json", action="store_true", help="输出机器可读 JSON（api 返回值原样）"
+    )
+
     return parser
 
 
@@ -677,6 +784,34 @@ def _dispatch_search(args: argparse.Namespace) -> dict:
         side=args.side,
         limit=args.limit,
     )
+
+
+def _pick_stats(args: argparse.Namespace) -> tuple[dict | None, str | None]:
+    """从 `--character` / `--corporation` / `--alliance` 里挑**恰好一个**。
+
+    Returns:
+        `(api 参数, None)` 或 `(None, 人话问题描述)`。三个标志对应 zkb 的三个独立命名空间，
+        所以「同时给两个」是真歧义，不能猜（同一串数字在三处都可能存在）。
+    """
+    given = [
+        (kind, getattr(args, kind))
+        for kind in api.ZKB_STATS_ENTITY_KINDS
+        if getattr(args, kind) is not None
+    ]
+    if not given:
+        return None, (
+            "stats 需要恰好一个实体：--character / --corporation / --alliance"
+        )
+    if len(given) > 1:
+        return None, (
+            "stats 只能查一个实体：--character / --corporation / --alliance 请只给一个"
+            f"（收到 {', '.join(kind for kind, _value in given)}）"
+        )
+    kind, value = given[0]
+    params: dict = {"entity": value, "entity_type": kind}
+    if getattr(args, "include", None):
+        params["include"] = list(args.include)
+    return params, None
 
 
 # =============================================================================
@@ -724,6 +859,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "search":
         # `search` 没有配装输入：跳过 `_pick_fit`（它要求恰好一个来源，会直接报参数错）
         return _report(args, _dispatch_search(args))
+
+    if args.command == "stats":
+        # 同理：`stats` 的输入是「实体」，不是配装
+        params, problem = _pick_stats(args)
+        if problem is not None:
+            print(f"参数错误：{problem}", file=sys.stderr)
+            return EXIT_USAGE
+        return _report(args, api.zkb_stats(**params))
 
     fit, problem = _pick_fit(args)
     if problem is not None:

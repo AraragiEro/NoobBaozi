@@ -1065,3 +1065,131 @@ def test_skill_guard_is_not_vacuous() -> None:
     too_long = text + "\n" * (SKILL_MAX_LINES + 1)
     assert any("行数" in problem for problem in _skill_problems(too_long))
 
+
+# =============================================================================
+# 五、实体画像（T-55）：`zkb_stats` 在 MCP 表面的契约
+# =============================================================================
+
+STATS_CHARACTER_PATH = ZKB_FIXTURES / "stats-character-2117515414.json"
+STATS_ALLIANCE_PATH = ZKB_FIXTURES / "stats-alliance-1354830081.json"
+
+
+@pytest.fixture()
+def stats_offline(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """把**生产请求器**换成 stats fixture（不联网），清掉限流时间戳。
+
+    只拦 GET：`zkb_stats` 用整数 id 时不需要任何 ESI POST。真发了 POST 就说明 MCP 层
+    把参数递错了 —— 那正是这条 fixture 想抓的。
+    """
+    document = json.loads(STATS_CHARACTER_PATH.read_text(encoding="utf-8-sig"))
+    seen: list[str] = []
+
+    def fake(url: str, body: object | None = None) -> object:
+        seen.append(url)
+        if body is not None:
+            raise AssertionError(f"zkb_stats 用整数 id 不该发 POST：{url}")
+        return document
+
+    api._reset_zkb_state()
+    api.clear_caches()
+    monkeypatch.setattr(api, "_zkb_default_requester", fake)
+    yield seen
+    api._reset_zkb_state()
+
+
+def test_zkb_stats_schema_has_no_fit() -> None:
+    """`zkb_stats` 的 schema：**没有 `fit`**；`entity` 与 `entity_type` 必填。
+
+    `entity_type` 的 `enum` **与 api 同源**（不抄第二份），且它必须是必填 —— 同一串数字
+    在角色 / 公司 / 联盟三个命名空间里都可能存在，靠 id 猜类型必然出错。
+    """
+    spec = _tool_spec("zkb_stats")
+    assert "实体画像" in spec["title"]
+    schema = spec["inputSchema"]
+    assert "fit" not in schema["properties"], "zkb_stats 不是配装工具"
+    assert schema["required"] == ["entity", "entity_type"]
+    assert schema["properties"]["entity"]["type"] == ["string", "integer"]
+    assert schema["properties"]["entity_type"]["enum"] == list(
+        api.ZKB_STATS_ENTITY_KINDS
+    )
+    include = schema["properties"]["include"]
+    assert include["type"] == "array"
+    assert include["items"]["enum"] == list(api.ZKB_STATS_BLOCKS)
+    for token in ("entity_type", "include", "months"):
+        assert token in spec["description"], f"description 必须写清 {token}"
+
+
+def test_zkb_stats_description_pins_the_three_traps() -> None:
+    """description 必须点名三个**真会踩**的坑（它们是这个工具最容易误读的地方）。
+
+    ① `efficiency` 是我们派生的，≠ `danger_ratio`；② `locations` 不是星系；
+    ③ 大块要显式 `include`（默认约 3KB，联盟全要 120KB）。
+    """
+    description = _tool_spec("zkb_stats")["description"]
+    assert "danger_ratio" in description
+    assert "efficiency" in description
+    assert "不是星系" in description and "systems" in description
+    assert "include" in description
+    assert "formula=null" in description, "公式未公开这件事必须写出来"
+
+
+def test_zkb_stats_call_round_trip(stats_offline: list[str]) -> None:
+    """`tools/call zkb_stats` → MCP → api → 请求器整条链路（只有最后一跳是假的）。"""
+    call_result = _call(
+        "zkb_stats", {"entity": 2117515414, "entity_type": "character"}
+    )
+    assert call_result.get("isError") is not True, call_result
+    envelope = _envelope(call_result)
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    assert result["entity"]["name"] == "SixtyEverSnake"
+    assert result["style"]["danger_ratio"] == 69
+    assert result["style"]["solo_ratio"] == 1.8, "百分数量纲（不是 0.018）"
+    assert result["top"]["alliances"] == [], "空榜必须保留键"
+    assert stats_offline == [
+        "https://zkillboard.com/api/stats/characterID/2117515414/"
+    ], f"URL 拼错：{stats_offline}"
+
+
+def test_zkb_stats_missing_entity_type_is_a_business_error(
+    stats_offline: list[str],
+) -> None:
+    """不传 `entity_type` → 业务错误（`isError`），**不是** JSON-RPC 协议错误。
+
+    协议层只管「参数形状」；「必须显式指定实体类型」是业务判断，该由 api 给
+    `invalid_argument` + `hint`，客户端才读得懂怎么改。
+    """
+    call_result = _call("zkb_stats", {"entity": 2117515414})
+    assert call_result.get("isError") is True
+    envelope = _envelope(call_result)
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["field"] == "entity_type"
+    assert envelope["error"]["hint"]["accepted"] == list(api.ZKB_STATS_ENTITY_KINDS)
+    assert stats_offline == [], "参数错误不该发任何请求"
+
+
+def test_zkb_stats_unknown_block_is_a_business_error(
+    stats_offline: list[str],
+) -> None:
+    """`include` 里的未知块名 → `invalid_argument` + 可用清单（**不静默忽略**）。"""
+    call_result = _call(
+        "zkb_stats",
+        {"entity": 2117515414, "entity_type": "character", "include": ["nope"]},
+    )
+    assert call_result.get("isError") is True
+    envelope = _envelope(call_result)
+    assert envelope["error"]["field"] == "include"
+    assert envelope["error"]["hint"]["accepted"] == list(api.ZKB_STATS_BLOCKS)
+    assert stats_offline == []
+
+
+def test_zkb_stats_injected_requester_is_not_forwards() -> None:
+    """客户端**不能**塞 `requester` / `clock` / `sleeper` 进来（那三个是测试注入点）。
+
+    MCP 层必须把它们剔掉，否则外部客户端就能替换掉出网实现。这里从反面证明：
+    即使参数里带了 `requester`，也只会被丢掉（于是走生产请求器，被 fixture 拦下来）。
+    """
+    spec = _tool_spec("zkb_stats")["inputSchema"]
+    for name in ("requester", "clock", "sleeper"):
+        assert name not in spec["properties"], f"{name} 不该出现在协议表面"
+

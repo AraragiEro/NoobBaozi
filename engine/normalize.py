@@ -44,8 +44,28 @@ SOURCE_FORMATS = ("eft", "dna", "esf", "esi_fitting", "killmail", "structured")
 # EFT 首行：[船名, 配装名]（逗号是必须的，否则 `[Empty High slot]` 会被误判成船名行；
 # 配装名可以为空，且允许包含逗号）
 _EFT_HEADER_RE = re.compile(r"^\[(?P<ship>[^,\[\]]+),(?P<fit_name>.*)\]$")
+# 首行无配装名：`[Rifter]`。真实 EFT 文件两种写法都存在（EFT 自己也能读无逗号版），
+# 而我们的 `eft` 渲染器对「无名配装」正是写 `[Rifter]` —— 解析器不认就等于
+# `parse_fit()["eft"]` 的输出自己解析不了（DNA / ESF / killmail 输入都没有配装名）。
+# 只在不命中 `_EMPTY_SLOT_RE` 时才当首行，避免把 `[Empty High slot]` 认成船。
+_EFT_HEADER_NO_NAME_RE = re.compile(r"^\[(?P<ship>[^,\[\]]+)\]$")
 # [Empty High slot] / [Empty Rig slot] / [Empty Subsystem slot] ...
 _EMPTY_SLOT_RE = re.compile(r"^\[Empty [^\[\]]+\]$", re.IGNORECASE)
+
+
+def _match_eft_header(line: str) -> re.Match[str] | None:
+    """匹配 EFT 首行（`[Ship, name]` 或 `[Ship]`），排除 `[Empty X slot]`。
+
+    两种写法都接受：有逗号的优先；无逗号的必须不是空槽占位行。
+    """
+    matched = _EFT_HEADER_RE.match(line)
+    if matched is not None:
+        return matched
+    if _EMPTY_SLOT_RE.match(line):
+        return None
+    return _EFT_HEADER_NO_NAME_RE.match(line)
+
+
 # 尾部 Offline 标记（引擎不认，预扫描只负责识别形态）
 _OFFLINE_SUFFIX_RE = re.compile(r"(?:^|(?<=[\s\]\)]))offline\s*$", re.IGNORECASE)
 # 尾部数量：`Warrior II x5` / `Antimatter Charge S x100`
@@ -251,7 +271,7 @@ def _detect_format(text: str) -> str:
     """返回 `eft` / `dna` / `esf` / `json` / `unknown`。"""
     if text.startswith("%esf/1"):
         return "esf"
-    if _EFT_HEADER_RE.match(_first_line(text)):
+    if _match_eft_header(_first_line(text)):
         return "eft"
     if text.startswith("{") or text.startswith("["):
         # 不是 EFT 头的 `[...]`，只能是 JSON（数组）或格式错误
@@ -303,7 +323,7 @@ def _prescan_eft(text: str) -> list[contracts.NormalizeError]:
         if not line:
             continue
 
-        if _EFT_HEADER_RE.match(line):
+        if _match_eft_header(line) is not None:
             if seen_header:
                 errors.append(
                     _error(
@@ -387,8 +407,25 @@ def _engine_error(exc: Exception) -> contracts.NormalizeError:
 
 def _eft_ship_name(text: str) -> str | None:
     """EFT 头里的船名（用于区分"船名行失败"与"模块名行失败"）；取不到返回 `None`。"""
-    match = _EFT_HEADER_RE.match(_first_line(text))
+    match = _match_eft_header(_first_line(text))
     return match.group("ship").strip() if match else None
+
+
+def _patch_header_for_engine(text: str) -> str:
+    """把无配装名的首行 `[Ship]` 补成 `[Ship, ]` 再交给引擎。
+
+    引擎（Rust）的 EFT 解析器要求首行必须有逗号，而真实 EFT 文件与我们自己的
+    `eft` 渲染器对「无名配装」都写 `[Ship]`。这是**输入侧宽容**，不改引擎、不改输出格式。
+    """
+    first = _first_line(text)
+    if _EFT_HEADER_RE.match(first) is not None or _EMPTY_SLOT_RE.match(first):
+        return text
+    matched = _EFT_HEADER_NO_NAME_RE.match(first)
+    if matched is None:
+        return text
+    rest = text.split("\n", 1)
+    patched = f"[{matched.group('ship').strip()}, ]"
+    return patched if len(rest) == 1 else patched + "\n" + rest[1]
 
 
 def _normalize_eft(text: str) -> contracts.NormalizeResult:
@@ -397,7 +434,7 @@ def _normalize_eft(text: str) -> contracts.NormalizeResult:
     if errors:
         return _fail("eft", errors, ship_name=ship_name)
     try:
-        fit = adapter.load_eft(text)
+        fit = adapter.load_eft(_patch_header_for_engine(text))
     except Exception as exc:  # 边界层：引擎异常一律转成可修复错误
         return _fail("eft", [_engine_error(exc)], ship_name=ship_name)
     return _ok(fit, "eft")
