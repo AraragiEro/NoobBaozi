@@ -21,6 +21,8 @@ python -m noobbaozi.mcp_server --transport http --host 0.0.0.0 --port 8080
 | `docker-compose.yml` | 一条命令构建 + 起容器 + 卷 + 端口 + 健康检查 |
 | `.dockerignore` | 构建上下文排除清单（**注意位置陷阱，见 §10.1**） |
 | `run-native.ps1` | 没有 Docker 时，本机原生起同一个 HTTP 服务的等价脚本 |
+| `redeploy.sh` | **NAS 上一键重部署**：保护 `data/` 卷 → 对齐开发仓 → 重建镜像 → 重启 → 自检（见 §14） |
+| `sync-deploy.ps1` | ⛔ **已弃用**（DEPRECATED，运行即 `exit 1`）：旧的「推快照仓」脚本，为什么停用见 §14.4 |
 
 > ⚠️ **本机（开发机）没有安装 Docker**，所以 **镜像从未被构建过、容器从未被运行过**。
 > 哪些验证做了、哪些没做，见 §8「诚实声明」。读这份文档时请把这一点放在心上。
@@ -324,6 +326,27 @@ New-NetFirewallRule -DisplayName 'noobbaozi MCP 8080' -Direction Inbound -Action
 服务起来了，但索引库没建好（卷空了 / 建库失败）。看 entrypoint 日志有没有 `索引库就绪:`。
 手动建库见 §5。
 
+### 9.6 `git reset --hard` 把 `data/` 里的索引库删了（2026-10-20 真实事故）
+
+现象：容器突然以退出码 2 起不来，`entrypoint.sh` 报「既没有索引库也没有 SDE zip」；
+进 `data/` 一看，`noobbaozi-<build>.sqlite3`（14.3 MB）不见了。
+
+根因：部署源从「快照仓」（`data/*.sqlite3` 被 git **跟踪**）切回「开发仓」（`data/` 在
+`.gitignore` 里）。`git reset --hard origin/main` 会**删掉「旧历史跟踪、新历史不存在」的文件**
+—— 索引库正好是这种。注意 `git status` 完全看不出异常（它本来就已经不被跟踪了），
+所以别指望「先看一眼 status 再 reset」能防住。
+
+现在的处理：`docker/redeploy.sh` 在 fetch/reset **之前**把 `data/*.sqlite3` 与 `data/*.zip`
+拷进 `mktemp -d` 的临时目录，reset 之后再拷回来，并 log「保护了 N 个文件 / 恢复了 N 个文件」；
+恢复后数据卷仍为空 → **退出码 3**，不重建容器。中途异常由 `EXIT` trap 兜底拷回（见 §14）。
+
+手工恢复（万一是绕过脚本 reset 的）：
+
+1. 先找脚本的备份目录：`ls -d /tmp/noobbaozi-data-protect.*`（恢复成功后会自动删；
+   恢复失败会保留并把路径打出来，直接 `cp -p <备份>/* <repo>/data/`）；
+2. 没有备份就重建：`docker compose -f docker/docker-compose.yml down` → 把 SDE zip 放回
+   `data/` → 起容器让 entrypoint 建库，或 `NOOBBAOZI_SDE_FETCH=1` 让它下载（约 95 MiB）。
+
 ---
 
 ## 10. 已知偏离与坑（诚实记录）
@@ -470,3 +493,88 @@ python -c "import json,os,sys,urllib.request; port=os.environ.get('NOOBBAOZI_POR
 
 > 注：`python -c "..."` 里的双引号由 PowerShell 直接传给 python 时**不会被剥**（`python` 在 PATH 上是 exe，
 > 这里能过）；但含 `{}`/`[]`/多行的复杂脚本建议先落成 `.py` 文件再跑 —— 本任务验收时就踩过这个坑。
+
+---
+
+## 14. 在 NAS 上部署 / 重部署（`redeploy.sh`）
+
+**部署源 = 开发仓本身**（`AraragiEro/NoobBaozi`，线性历史）。NAS 上那份 checkout 是
+**纯部署目录**：没有本地改动、也不产生提交 —— 所以「对齐远端」的正确语义是 `reset --hard`
+而不是 `pull` / `merge`（部署目录里不存在值得保留的本地状态）。
+
+```sh
+# 常规重部署（必须 root：要停容器 / 构建镜像）
+sudo sh <仓库目录>/docker/redeploy.sh
+
+# 只做「保护数据卷 + 同步 + 恢复 + 预检」，不碰 docker（排查同步问题时用）
+sh <仓库目录>/docker/redeploy.sh --sync-only
+
+# 数据卷是空的、允许首次联网下载 SDE（约 95 MiB）
+sudo NOOBBAOZI_SDE_FETCH=1 sh <仓库目录>/docker/redeploy.sh
+
+# data 卷不在 <仓库>/data（例如挂在别处）：显式给路径
+sudo NOOBBAOZI_DATA_DIR=/volume1/docker/noobbaozi/data sh <仓库目录>/docker/redeploy.sh
+```
+
+七步（编号就是日志里的编号）：
+
+| 步骤 | 做什么 | 失败时 |
+|---|---|---|
+| 1/7 | 停掉 `evefit-mcp` / `noobbaozi-mcp`（只 stop 不 rm，释放 8080） | 退出 1 |
+| 2/7 | **保护 `data/*.sqlite3` 与 `data/*.zip`** → `mktemp -d`；逐个 log 文件名与字节数 | 复制失败即退出 1（**不继续** reset） |
+| 3/7 | `git fetch --all --prune` + `git reset --hard origin/<分支>`（游离 HEAD 回 `main`） | 退出 1（`EXIT` trap 兜底拷回数据卷） |
+| 4/7 | 备份拷回 `data/`（已存在且非空的**不覆盖**），再确认「有索引库或有 zip」 | 空卷 → **退出 3**，镜像与容器都不动 |
+| 5/7 | `docker compose build` | 退出 1 |
+| 6/7 | `docker compose up -d` | 退出 1 |
+| 7/7 | 轮询 `/health`（30 次）+ `initialize` 自检 + `compose ps` | 退出 1 |
+
+### 14.1 为什么第 2/4 步必须存在（事故复盘）
+
+见 §9.6。一句话：`git reset --hard` 会删「旧历史跟踪、新历史没有」的文件，而 `data/` 正好
+从「被跟踪」变成了「被忽略」。没有这两步，**同一条命令会再把索引库删一次**。
+
+`git status` / `git clean -n` 都帮不上忙：被删的是**当时已不再跟踪**的文件，`status`
+里根本不显示。唯一的办法就是 reset 前后自己拷。
+
+### 14.2 日志形状（`say()` 的输出；端到端由 `tests/test_docker_deploy.py` 在 POSIX 上断言）
+
+```
+[redeploy] repo: /volume1/docker/noobbaozi
+[redeploy] 2/7 保护数据卷（reset --hard 会删掉旧历史跟踪、新历史没有的文件）
+[redeploy]     data: /volume1/docker/noobbaozi/data
+[redeploy]     已保护: noobbaozi-3607705.sqlite3 (14995456 字节)
+[redeploy]     保护了 1 个文件 → /tmp/noobbaozi-data-protect.AbC123
+[redeploy] 3/7 同步到远端（部署目录无本地改动 → 对齐远端，不是合并）
+[redeploy]     HEAD = b0ca14a (main)
+[redeploy] 4/7 恢复数据卷 + 预检
+[redeploy]     恢复了 1 个文件（已存在跳过 0 个）
+[redeploy]     数据卷 OK：index=1 zip=0
+```
+
+数据卷为空（且没开 `SDE_FETCH`）时第 4 步就停：
+
+```
+[redeploy] !! 部署前检查失败：/volume1/docker/noobbaozi/data 下既没有索引库（noobbaozi-*.sqlite3）也没有 SDE zip（*.zip）
+[redeploy]    这个状态重建容器必然起不来（entrypoint 退出码 2）→ 现在退出（退出码 3）；镜像与容器都没动
+[redeploy]    修法：(a) 把索引库/zip 放回 /volume1/docker/noobbaozi/data；或 (b) 允许首次联网：
+```
+
+### 14.3 路径不写死
+
+仓库目录从**脚本自身位置**推导（`dirname $0` 的上一级），`data/` 从仓库目录推导
+（与 compose 的 `../data` 同源：compose 的相对路径以 `docker/` 为基准），也可用
+`NOOBBAOZI_DATA_DIR` 覆盖。早期脚本写死过 `/volume1/docker/noobbaozi`，项目从 evefit
+改名成 noobbaozi 之后整段失效 —— 别再写死绝对路径。
+
+### 14.4 `sync-deploy.ps1` 已弃用（DEPRECATED）
+
+旧流程是「开发机把代码 + `data/*.sqlite3` 打成一份**独立历史**的快照仓，推送到
+`AraragiEro/NoobBaozi`，NAS 再 `git pull`」。它有两个问题：
+
+1. **双轨**：同一个远端有两个来源（开发仓 / 快照仓），「该推哪个」没有唯一答案；
+2. **就是事故成因**：快照仓跟踪 `data/`，而开发仓不跟踪 → NAS 上 `reset --hard`
+   把索引库当成「旧历史文件」删掉。
+
+现在 `docker/sync-deploy.ps1` 只剩**墓碑**：打印原因并 `exit 1`，旧实现已删除（没有可被
+误改回去的代码）。真正要做的事只有两件 —— 开发机 `git push`；NAS 上 `sh docker/redeploy.sh`。
+
