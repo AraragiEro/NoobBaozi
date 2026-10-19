@@ -1465,10 +1465,22 @@ KILLMAIL_ORIGIN_LOCAL: str = "local"
 """原文是调用方直接贴进来的 killmail JSON（不经网络）。"""
 
 ZKB_ITEMS_FALLBACK_WARNING: str = (
-    "zkb 的 victim.items 为空，已回落到 ESI 取原文（多一次 1.7–2.6 s 的请求）；"
-    "两边都为空说明这条战报本来就没有模块（例如蛋 / 空船）"
+    "zkb 的响应里**没有 `victim.items` 这个键**（可能版本 / 裁剪差异），已回落到 ESI "
+    "取原文（多一次 1.7–2.6 s 的请求）"
 )
-"""回落 ESI 时写进 `warnings` 的说明（**沉默不行**：多花了一次时间要交代）。"""
+"""回落 ESI 时写进 `warnings` 的说明（**沉默不行**：多花了一次时间要交代）。
+
+注意措辞：回落只在「键不存在」时发生；`items: []` 是另一个分支（走
+`ZKB_EMPTY_ITEMS_WARNING`），别把两者混成一句话。
+"""
+
+ZKB_EMPTY_ITEMS_WARNING: str = "该战报没有已装模块（zkb 与 ESI 均为空）"
+"""`victim.items` 是 `[]` 时短路的那条约战报，**必须显式说出来**。
+
+为什么：`items: []` 与「我们漏了模块数据」在返回里长得一模一样。取证已证明这两种来源
+在该字段上一致（16/16），所以空数组是**事实**，不是缺失 —— 但 agent 看不到我们的取证，
+一句 warning 就是它唯一的判断依据。
+"""
 
 ZKB_COMPLETE_KILLMAIL_NOTE: str = (
     "zkb /api/killID/ 返回的是**整条完整 killmail**（实测 16/16 与 ESI 逐字段一致："
@@ -1873,13 +1885,20 @@ def fetch_killmail_report(
     1. 先 `GET zkillboard /api/killID/<id>/` —— 这一步本来就要做：它给 `zkb`（价值 /
        points / labels）与 `hash`，**而且它返回的就是整条 killmail**（attackers / victim /
        items 全在，16/16 样本与 ESI 逐字段一致）；
-    2. **若 `victim.items` 存在且非空** → 直接用它当原文，**不再请求 ESI**
-       （省掉 1.7–2.6 s 的那一跳）；`origin = "zkillboard"`；
-    3. 否则（items 缺失 / 空）→ 回落 ESI（原路径），`origin = "esi"`。
+    2. 再看 `victim.items`，**按「键在不在」而不是「真不真」分三种**：
 
-    为什么只降级到「items 非空」而不干脆全用 zkb：`items` 为空既可能是「这条战报本来
-    没有模块」（蛋 / 空船），也可能是 zkb 这次没带 —— **从响应里分不出这两种**，所以按
-    「拿不准就回落」处理，宁可多花一次时间也不猜。
+       | `victim.items` | 处理 | `origin` |
+       |---|---|---|
+       | **键不存在** | ❌ 可疑（可能是 zkb 版本 / 裁剪差异）→ **回落 ESI** | `esi` |
+       | **键在但为 `[]`** | ✅ 短路，不请求 ESI（这条战报本来就没模块） | `zkillboard` |
+       | **键在且非空** | ✅ 短路 | `zkillboard` |
+
+    为什么「空数组」可以短路而「键不存在」不行：取证里那 3 条 items 为空的样本，在
+    **zkb 与 ESI 里都是空**（蛋 / 空船）—— 空数组是**事实**；而键整个不见，说明这份响应
+    可能不是完整的那一版，**拿不准就回落**，宁可多花一次时间也不猜。
+
+    **可见性**：空数组短路时调用方会补一条 `ZKB_EMPTY_ITEMS_WARNING`，免得 agent 以为
+    我们漏了模块数据。
 
     Args:
         killmail_id: 战报 id。
@@ -1898,8 +1917,10 @@ def fetch_killmail_report(
 
     victim = entry.get("victim") if isinstance(entry.get("victim"), dict) else {}
     items = victim.get("items")
-    if isinstance(items, list) and items and isinstance(victim, dict):
-        # zkb 自带整条 killmail（含 items）→ 不花那 1.7–2.6 s 去 ESI 取同一份东西。
+    # **键存在性**判定，不是真假判定：`[]` 是「这条战报本来没模块」（事实，可短路），
+    # 而键整个不见是「这份响应可能不完整」（可疑，回落）。用 `if items:` 会把 `[]` 也
+    # 判成可疑，等于白白多花一次 1.7–2.6 s 的 ESI 请求。
+    if isinstance(items, list):
         merged = dict(entry)
         if isinstance(zkb_block, dict):
             merged["zkb"] = zkb_block
@@ -2522,6 +2543,16 @@ def _execute_killmail(
             if killmail_origin == KILLMAIL_ORIGIN_ESI:
                 # 多花了一次 ESI 请求就要交代（沉默不行）。
                 warnings.append(ZKB_ITEMS_FALLBACK_WARNING)
+            else:
+                # 短路来自 zkb：若 items 是空数组，**这是事实**（这条战报本来没模块），
+                # 但返回里与「我们漏了数据」长得一模一样，必须说出来。
+                short_items = (
+                    (killmail.get("victim") or {}).get("items")
+                    if isinstance(killmail.get("victim"), dict)
+                    else None
+                )
+                if isinstance(short_items, list) and not short_items:
+                    warnings.append(ZKB_EMPTY_ITEMS_WARNING)
         else:
             killmail = _killmail_from_text(payload["text"])
             killmail_source = "local"
@@ -2647,7 +2678,9 @@ def fit_killmail(
       `local`（不经网络）。
 
     回落时会往 `warnings` 里写一条 `ZKB_ITEMS_FALLBACK_WARNING` —— 多花了一次 1.7–2.6 s
-    的请求必须交代，不许静默。
+    的请求必须交代，不许静默。反过来，**短路时 `items` 是 `[]`** 会写一条
+    `ZKB_EMPTY_ITEMS_WARNING`（「该战报没有已装模块」）—— 空数组是事实，但它与
+    「我们漏了模块数据」在返回里长得一样，所以必须说出来。
 
     `null` 的语义（**别当 0 / 别当 false**）：
 
@@ -4119,6 +4152,7 @@ __all__ = [
     "WEAPON_FAMILIES",
     "WEAPON_FAMILY_OTHER",
     "ZKB_COMPLETE_KILLMAIL_NOTE",
+    "ZKB_EMPTY_ITEMS_WARNING",
     "ZKB_ITEMS_FALLBACK_WARNING",
     "ZKB_API_ROOT",
     "ZKB_ERROR_UNKNOWN_ENTITY",

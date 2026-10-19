@@ -849,15 +849,19 @@ def test_capsule_counts_are_not_vacuous(monkeypatch: pytest.MonkeyPatch) -> None
         _assert_capsule_facts(api.fit_killmail(text)["result"])
 
 
-def _zkb_payload_without_items() -> object:
-    """zkb `killID` 原文的副本，但把 `victim.items` 抹成空 —— 模拟「zkb 这次没带模块」。
+def _zkb_payload_with_items(items: object, *, drop_key: bool = False) -> object:
+    """zkb `killID` 原文的副本，只动 `victim.items` 一个字段。
 
-    只动这一个字段，其余（attackers / victim / zkb 块）一个字节都不变，
-    这样两次运行的差异就只可能是「items 短路有没有生效」。
+    `drop_key=True` 时把**键整个删掉**（模拟 zkb 版本 / 裁剪差异），否则把值换掉。
+    其余（attackers / victim 其它字段 / zkb 块）一个字节都不变 ——
+    这样两次运行的差异就只可能是「items 判定分支」。
     """
     payload = copy.deepcopy(json.loads(KILLMAIL_ZKB_PATH.read_text(encoding="utf-8")))
     entry = payload[0] if isinstance(payload, list) else payload
-    entry["victim"]["items"] = []
+    if drop_key:
+        entry["victim"].pop("items", None)
+    else:
+        entry["victim"]["items"] = items
     return payload
 
 
@@ -903,11 +907,49 @@ def test_fit_killmail_uses_the_complete_zkb_document(monkeypatch: pytest.MonkeyP
     assert not any("回落" in warning for warning in result["warnings"]), result["warnings"]
 
 
-def test_fit_killmail_falls_back_to_esi_when_zkb_items_are_empty(
+def test_fit_killmail_short_circuits_when_items_is_an_empty_array(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """items 为空 → 回落 ESI，**并且说出来**（多花了一次 1.7–2.6 s 的请求）。"""
-    zkb_payload = _zkb_payload_without_items()
+    """`items` 是 **`[]`**（键在、值为空）→ 直接短路，**不请求 ESI**，但要**说出来**。
+
+    `[]` 与「我们漏了模块数据」在返回里长得一模一样 —— agent 看不到我们的取证，
+    一句 `ZKB_EMPTY_ITEMS_WARNING` 就是它唯一的判断依据。
+    """
+    zkb_payload = _zkb_payload_with_items([])
+    seen: list[str] = []
+
+    def fake_http(url: str) -> object:
+        seen.append(url)
+        return zkb_payload
+
+    _offline_system(monkeypatch)
+    monkeypatch.setattr(api, "_http_json", fake_http)
+    api.clear_caches()
+
+    out = api.fit_killmail({"killmail_id": KILLMAIL_ID, "hash": KILLMAIL_HASH})
+    assert out["ok"] is True, out
+    result = out["result"]
+    assert result["killmail_origin"] == "zkillboard", "空数组是事实，不必回落"
+    assert seen == [
+        f"https://zkillboard.com/api/killID/{KILLMAIL_ID}/"
+    ], f"空数组不该触发 ESI，实际 {seen}"
+    assert api.ZKB_EMPTY_ITEMS_WARNING in result["warnings"], (
+        f"空 items 必须显式说明，实际 {result['warnings']}"
+    )
+    # 其余数据照常给（价值 / 参战方都在 zkb 原文里）
+    assert result["attackers"]["count"] == 79
+    assert result["killmail"]["value"]["total"] == 76942042803.52
+
+
+def test_fit_killmail_falls_back_to_esi_when_items_key_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`items` **键不存在**（不是设为空）→ 可疑，**仍然回落 ESI** 并说出来。
+
+    这是「zkb 可能被裁剪过」那条风险路径：空数组是事实，键不见是疑点，
+    两者必须分道 —— 拿不准就多花一次 1.7–2.6 s，不猜。
+    """
+    zkb_payload = _zkb_payload_with_items(None, drop_key=True)
     esi_payload = json.loads(KILLMAIL_ESI_PATH.read_text(encoding="utf-8"))
     seen: list[str] = []
 
@@ -923,7 +965,7 @@ def test_fit_killmail_falls_back_to_esi_when_zkb_items_are_empty(
     assert out["ok"] is True, out
     result = out["result"]
     assert result["killmail_origin"] == "esi"
-    assert any("回落" in warning for warning in result["warnings"]), (
+    assert api.ZKB_ITEMS_FALLBACK_WARNING in result["warnings"], (
         f"回落 ESI 必须写进 warnings，实际 {result['warnings']}"
     )
     # 回落后数据依然完整（ESI 是原路径）
@@ -937,16 +979,24 @@ def test_fit_killmail_falls_back_to_esi_when_zkb_items_are_empty(
 
 
 def test_zkb_items_shortcut_is_not_vacuous(monkeypatch: pytest.MonkeyPatch) -> None:
-    """**配对证明**：同一份 fixture 只改 `victim.items` 一个字段，请求数必须从 1 变 2。
+    """**配对证明**：同一份 fixture 只改 `victim.items`，请求数必须是 `1 / 1 / 2`。
 
-    如果「带 items 就跳过 ESI」那段被删掉，第一条运行会变成 2 个请求，这里立刻红 ——
-    所以它证明的不是「恰好没请求 ESI」，而是「短路真的在起作用」。
+    | `victim.items` | 期望请求数 |
+    |---|---:|
+    | 非空 | 1（短路） |
+    | `[]` | 1（短路 —— 空数组是事实） |
+    | 键不存在 | 2（回落 ESI —— 可疑） |
+
+    三种情况跑同一段代码，差异只来自那一个字段 —— 所以它证明的不是「恰好没请求 ESI」，
+    而是「判定分支真的按预期在分叉」。把 `isinstance(items, list)` 退化成 `if items:`，
+    中间那行立刻变 2；把分支整段删掉，第一行变 2。
     """
     esi_payload = json.loads(KILLMAIL_ESI_PATH.read_text(encoding="utf-8"))
     with_items = json.loads(KILLMAIL_ZKB_PATH.read_text(encoding="utf-8"))
-    without_items = _zkb_payload_without_items()
+    empty_items = _zkb_payload_with_items([])
+    missing_key = _zkb_payload_with_items(None, drop_key=True)
 
-    def run(payload: object) -> tuple[dict, list[str]]:
+    def run(payload: object) -> list[str]:
         seen: list[str] = []
 
         def fake_http(url: str) -> object:
@@ -958,12 +1008,11 @@ def test_zkb_items_shortcut_is_not_vacuous(monkeypatch: pytest.MonkeyPatch) -> N
         api.clear_caches()  # 结果缓存是进程级的：不清就会在上一次的结果上打转
         envelope = api.fit_killmail({"killmail_id": KILLMAIL_ID, "hash": KILLMAIL_HASH})
         assert envelope["ok"] is True, envelope
-        return envelope, seen
+        return seen
 
-    _, seen_with = run(with_items)
-    _, seen_without = run(without_items)
-    assert len(seen_with) == 1, f"带 items 应只请求 zkb，实际 {seen_with}"
-    assert len(seen_without) == 2, f"items 为空应多请求一次 ESI，实际 {seen_without}"
+    assert len(run(with_items)) == 1, "非空 items 应只请求 zkb"
+    assert len(run(empty_items)) == 1, "空数组也是事实，不该回落"
+    assert len(run(missing_key)) == 2, "键不存在必须回落 ESI"
 
 
 def test_fit_killmail_uses_the_zkb_hash_when_missing(
@@ -971,9 +1020,9 @@ def test_fit_killmail_uses_the_zkb_hash_when_missing(
 ) -> None:
     """只给 `killmail_id`（不给 hash）也能跑：hash 从 zkillboard 的 `zkb.hash` 拿。
 
-    （要用 items 为空的样本才能走到 ESI —— 带 items 时那条路根本不会走。）
+    （要用「items 键不存在」的样本才能走到 ESI —— 键在时那条路根本不会走。）
     """
-    zkb_payload = _zkb_payload_without_items()
+    zkb_payload = _zkb_payload_with_items(None, drop_key=True)
     esi_payload = json.loads(KILLMAIL_ESI_PATH.read_text(encoding="utf-8"))
     seen: list[str] = []
 
