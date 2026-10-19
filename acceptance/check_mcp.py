@@ -35,7 +35,11 @@ from check_layers import L0_CHECKLIST  # 我自己的清单（不是产品的 IN
 
 EXPECTED_VERSIONS = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 PREFERRED = EXPECTED_VERSIONS[0]
-TOOL_ORDER = ["fit_parse", "fit_index", "fit_view", "fit_get", "fit_detail"]
+#: 工具清单**从产品派生**（唯一真源 `evefit.mcp_server.TOOL_NAMES`）——
+#: 手写清单在加工具时会静默过期（我这次就过期了：5 → 10）。
+from evefit.mcp_server import TOOL_COUNT, TOOL_NAMES  # noqa: E402
+
+TOOL_ORDER = list(TOOL_NAMES)
 VIEWS = ["firepower", "survivability", "mobility", "resources", "constraints", "stability"]
 
 
@@ -224,9 +228,10 @@ def main() -> int:
         response = client.request("tools/list")
         tools = (response.get("result") or {}).get("tools") or []
         names = [tool.get("name") for tool in tools]
-        print(f"  tools/list → {len(tools)} 个：{names}")
-        if names != TOOL_ORDER:
-            defect("口径错误", "high", "tools/list", f"{TOOL_ORDER}", names)
+        print(f"  tools/list → {len(tools)} 个（TOOL_COUNT={TOOL_COUNT}）：{names}")
+        if names != TOOL_ORDER or len(tools) != TOOL_COUNT:
+            defect("口径错误", "high", "tools/list",
+                   f"{TOOL_ORDER}（共 {TOOL_COUNT}）", names)
 
         by_name = {tool.get("name"): tool for tool in tools}
         view_tool = by_name.get("fit_view") or {}

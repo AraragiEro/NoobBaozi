@@ -11,7 +11,7 @@
 
 | 组 | 结论 | 关键数字 |
 |---|---|---|
-| ① 协议层 | ✅ **PASS** | 5 个版本原样回；越界版本回首选；通知 0 回包；5 个工具；enum 六值；`required` 含 `path`；`-32700/-32601/-32602` 全对 |
+| ① 协议层 | ✅ **PASS** | 5 个协议版本原样回；越界版本回首选；通知 0 回包；**10 个工具**（从 `TOOL_NAMES` 派生）；`fit_view` 六值 enum；`required` 含 `path`；`-32700/-32601/-32602` 全对 |
 | ② stdout 纯净性 | ✅ **PASS** | **17 行，0 非 JSON-RPC 行**，首行无 BOM |
 | ③ 五个工具 | ✅ **PASS** | 六视角 23 字段全对；`speed` 三处**逐位相同**（1482.735）；`skill_tier = all4+min_required / 512` |
 | ④ 负例语义 | ✅ **PASS** | `invalid_path` / `unknown_module`（candidates 非空）/ 四种参数非法 → `-32602` |
@@ -30,7 +30,7 @@
 | `initialize("2024-11-05")` | → `'2024-11-05'` |
 | `initialize("1999-01-01")`（越界） | → `'2026-07-28'`（首选） |
 | `notifications/initialized` | **回包 0 条**（0.6s 窗口） |
-| `tools/list` | 5 个，顺序 `fit_parse → fit_index → fit_view → fit_get → fit_detail` |
+| `tools/list` | **10 个**（从 `evefit.mcp_server.TOOL_NAMES` 派生，不再手写）|
 | `fit_view.inputSchema.view.enum` | 六视角齐全 |
 | `fit_get.inputSchema.required` | `['fit', 'path']` |
 | `ping` | `result = {}` |
