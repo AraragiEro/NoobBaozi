@@ -2994,3 +2994,74 @@ def test_detail_matches_overview_apart_from_the_downgraded_path(
             assert isinstance(l1["overview"][path], dict)
             assert isinstance(l2["overview"][path], list)
 
+
+
+# =============================================================================
+# 十三、诊断规则不变式：`view` 必须是已注册视角（孤儿 flag 从源头不产生）
+#     T-55 裁决：L1 没有兜底桶（`result` 就是视角条目本体），所以不能靠出口兜底，
+#     只能要求配置里每条规则的 `view` 都是真的视角。孤儿在 L0 / L2 仍有顶层桶（纵深防御）。
+# =============================================================================
+
+
+def _assert_rule_views(rule_list: object, registered: set[str]) -> None:
+    """每条规则的 `view` 必须是已注册视角（畸形 / 缺失 / 不认识都算违规）。"""
+    bad = [
+        (getattr(rule, "id", "?"), getattr(rule, "view", None))
+        for rule in rule_list  # type: ignore[union-attr]
+        if not isinstance(getattr(rule, "view", None), str)
+        or getattr(rule, "view") not in registered
+    ]
+    assert bad == [], f"这些诊断规则的 view 不是已注册视角（会产生孤儿 flag）：{bad}"
+
+
+def test_every_diagnostic_rule_targets_a_registered_view() -> None:
+    """**源头不变式**：`config/diagnostics.json` 里每条规则的 `view` ∈ `available_views()`。
+
+    为什么必须在源头卡住：`view` 写错 → 该 flag 变成孤儿；L1 **没有**兜底桶
+    （`render_view` 的返回值就是视角条目本体，`result["flags"]` 已被本视角 flag 占用），
+    于是那条诊断会在 L1 **静默消失**（这正是「不静默忽略」红线要防的）。
+    L0 / L2 的顶层桶只是纵深防御，正常配置下孤儿的期望值是 **0**。
+    """
+    rules = D.load_rules()
+    assert rules, "反证：规则表不许为空，否则这条断言在空转"
+    registered = set(available_views())
+
+    _assert_rule_views(rules, registered)
+    # 规则确实跨多个视角（不是只登记一两个视角的退化表）——**不要求覆盖全部视角**：
+    # `constraints` 目前就没有诊断规则（它的可疑点走别的出口），那是正常状态不是缺陷。
+    covered = {rule.view for rule in rules}
+    assert len(covered) >= 2 and covered <= registered, f"规则覆盖视角异常：{sorted(covered)}"
+
+
+def test_rule_view_guard_catches_an_orphan_view() -> None:
+    """**非永真**：塞一条 `view="not_a_view"` / 缺 `view` 的规则 → 同一套检查必须红。"""
+    registered = set(available_views())
+    good = list(D.load_rules())
+
+    orphan = D.Rule(id="orphan_probe", view="not_a_view", enabled=True, message="x")
+    with pytest.raises(AssertionError):
+        _assert_rule_views([*good, orphan], registered)
+
+    class _NoView:
+        """缺 `view` 的畸形规则（`load_rules` 会拒，这里是纵深防御的第二层）。"""
+
+        id = "no_view_probe"
+
+    with pytest.raises(AssertionError):
+        _assert_rule_views([*good, _NoView()], registered)
+
+    # 反向：真实规则必须通过（否则上面两次 raises 可能只是 helper 有 bug）
+    _assert_rule_views(good, registered)
+
+
+def test_diagnostics_config_writes_a_view_name_on_every_entry() -> None:
+    """配置文件层面也钉一次：每个 `rules[]` 条目都必须有字符串 `view`（防止手改漏字段）。"""
+    data = json.loads(D.RULES_PATH.read_text(encoding="utf-8"))
+    assert isinstance(data, dict) and isinstance(data.get("rules"), list)
+    registered = set(available_views())
+    for raw in data["rules"]:
+        assert isinstance(raw, dict)
+        view = raw.get("view")
+        assert isinstance(view, str) and view, f"规则 {raw.get('id')!r} 缺少 view"
+        assert view in registered, f"规则 {raw.get('id')!r} 的 view={view!r} 不是已注册视角"
+

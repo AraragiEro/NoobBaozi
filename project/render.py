@@ -812,6 +812,15 @@ def _collect_flags(
     Returns:
         `(attributed, residual)`：`{视角名: [flag, ...]}` 与「不属于本次渲染视角」的
         flag 列表（进顶层 `flags` 兜底，绝不丢）。
+
+    **孤儿 flag 的去处（T-55 裁决）**：`residual` 是「`view` 不是已注册视角 / 压根没有 `view`」
+    的诊断。它**只可能在 L0 与 L2 出现** ——
+    L0（`render_index`）与 L2（`api.fit_detail`）都有顶层 `flags` 桶；
+    **L1 没有**（`render_view` 的返回值就是视角条目本体，`result["flags"]` 已被本视角 flag 占用，
+    硬加桶会破坏「L1 与 L0 逐字节相同」的契约）。
+    所以孤儿**不能靠出口兜底，只能从源头不产生**：`config/diagnostics.json` 每一条规则的 `view`
+    必须是已注册视角 —— 这条不变式由 `tests/test_render.py` 的
+    `test_every_diagnostic_rule_targets_a_registered_view` 顶着（正常配置下孤儿恒为 0）。
     """
     attributed: dict[str, list[dict]] = {}
     residual: list[dict] = []
@@ -1039,8 +1048,10 @@ def _merge(target: dict, parts: list[str], value: object) -> None:
 def _select(overview: dict, fields: list[str]) -> tuple[dict, list[str]]:
     """只保留指定点路径（找不到的字段名**原样**进 `missing`，不静默忽略）。
 
-    `missing` 里放的是**调用方传进来的字段串**（去掉视角名前缀之后的那一段），
-    用它 + 视角名就能拼回原请求。支持 `a.b` / `a[].b` / `a[0].b` 三种写法。
+    这里放的是 **`fields` 元素本身**（`render_detail` 的 `fields` 是**去掉视角名**之后的路径），
+    对外回显由 `render_detail` 用 `_echo_path()` **补回视角前缀** —— 于是调用方拿到的
+    `missing` 就是它自己传进来的那个串（可直接复制回 `fit_detail(path=...)`）。
+    支持 `a.b` / `a[].b` / `a[0].b` 三种写法。
     """
     picked: dict = {}
     missing: list[str] = []
