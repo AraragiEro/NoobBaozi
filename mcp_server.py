@@ -716,6 +716,8 @@ _TOOL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
         "想知道「拆掉那件 / 关掉它 / 换个模式，这个数会变多少」时用它：回答「哪件模块在撑着"
         "这个数」。返回 baseline + changes[]（每条的 op 与 value / delta / delta_pct / note）"
         "+ warnings / ops_planned / ops_executed / skipped / truncated / max_ops。"
+        "**计数恒等式：ops_planned == ops_executed + skipped**（skipped 是总数：空操作 / "
+        "截断 / 变体失败 / 指标缺失；逐条原因看 warnings[].kind，如 noop、modes_unknown）。"
         "ops 不给 = 自动计划（每件已装模块关一次 + 每个非当前模式切一次）。"
         "**delta_pct 是比例**（delta/baseline），基线为 0 时是 null —— 不是 0，也不是无限大。"
         "限制：每个 op 一次引擎重算，默认 max_ops=32，超了截断（truncated=true + warning）；"

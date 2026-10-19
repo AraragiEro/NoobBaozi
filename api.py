@@ -417,6 +417,9 @@ def clear_caches() -> None:
     # `explain` 自带一层 LRU（key = fit 内容哈希 + metric + depth）。它**不在**上面这个
     # 缓存里，所以必须单独清 —— 否则「改完实现测试仍绿」的老坑（拿到上一条用例的旧信封）
     # 会在归因入口重演一遍。
+    #
+    # `sensitivity` **没有**自己的进程级 LRU（每个变体走 `engine.calculate`，命中引擎自己的
+    # LRU；跨调用幂等靠上面的 api 结果缓存），所以这里**没有**第二层要清的对象。
     _explain.clear_cache()
 
 

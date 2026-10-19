@@ -1389,3 +1389,75 @@ def test_fit_sensitivity_missing_metric_is_invalid_params() -> None:
     )
     assert response["error"]["code"] == mcp_server.INVALID_PARAMS
     assert response["error"]["data"]["field"] == "metric"
+
+
+# =============================================================================
+# 八、README §4.11 与 sensitivity 契约一致（文档守卫：代码加了 kind，文档必须跟上）
+# =============================================================================
+#
+# 文档漂移最典型的形态：代码新增一个 warning kind，README 的表格没跟上 —— agent 就会把
+# 「这一维没覆盖」（`modes_unknown`）读成「切模式没影响」。这条守卫把两件事绑在一起。
+
+README_PATH = NOOBBAOZI_ROOT / "mcp" / "README.md"
+"""运维/契约手册（§4.11 是 `fit_sensitivity` 的口径）。"""
+
+SENSITIVITY_WARNING_KINDS: tuple[str, ...] = (
+    "noop",
+    "truncated",
+    "variant_error",
+    "metric_missing_after_change",
+    "mode_not_available",
+    "modes_unknown",
+    "no_index",
+    "invalid_op",
+    "invalid_ops",
+)
+"""`sensitivity` 会发出的 `warnings[].kind` 全集（与 `project/sensitivity.py` 的发射点一致）。"""
+
+
+def _readme_section(start_marker: str, end_marker: str) -> str:
+    """取 README 里 `[start_marker, end_marker)` 这一段（找不到就抛，不返回空串冒充）。"""
+    text = README_PATH.read_text(encoding="utf-8")
+    start = text.index(start_marker)
+    end = text.index(end_marker, start)
+    return text[start:end]
+
+
+def _section_411_problems(section: str) -> list[str]:
+    """§4.11 缺了什么（空列表 = 合格）。"""
+    problems: list[str] = []
+    if "ops_planned == ops_executed + skipped" not in section:
+        problems.append("缺计数恒等式 ops_planned == ops_executed + skipped")
+    for kind in SENSITIVITY_WARNING_KINDS:
+        if f"`{kind}`" not in section:
+            problems.append(f"缺 warning kind：{kind}")
+    if "全 offline" not in section:
+        problems.append("缺「全 offline ≡ 同型空配装」口径")
+    if "dps.base" not in section:
+        problems.append("缺 dps.base 的例外（0.0 vs None）")
+    if "没有自己的进程级缓存" not in section:
+        problems.append("缺「sensitivity 没有自己的 LRU」的准确说法")
+    return problems
+
+
+def test_readme_section_411_documents_the_sensitivity_contract() -> None:
+    """`mcp/README.md` §4.11 必须写全：恒等式 + 9 个 warning kind + 两条误读口径。"""
+    section = _readme_section("### 4.11", "## 5. 返回契约")
+    problems = _section_411_problems(section)
+    assert problems == [], f"§4.11 与实现脱节：{problems}"
+
+
+def test_readme_section_411_guard_is_not_vacuous() -> None:
+    """**配对断言**：从 §4.11 里删掉一个 warning kind → 守卫必须报出来。"""
+    section = _readme_section("### 4.11", "## 5. 返回契约")
+    assert _section_411_problems(section) == [], "前提：现在的 §4.11 是合格的"
+
+    broken = section.replace("`modes_unknown`", "")
+    problems = _section_411_problems(broken)
+    assert any("modes_unknown" in problem for problem in problems), (
+        f"删掉 kind 后守卫没报错：{problems}"
+    )
+
+    # 删掉恒等式也要报（否则「计数口径」可能被悄悄改回旧行为而不被发现）
+    without_identity = section.replace("ops_planned == ops_executed + skipped", "")
+    assert any("恒等式" in problem for problem in _section_411_problems(without_identity))
