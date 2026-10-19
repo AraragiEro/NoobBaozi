@@ -3339,15 +3339,29 @@ def _stats_size(payload: object) -> int:
     return len(text.encode("utf-8"))
 
 
-def _stats_int(value: object) -> int | None:
-    """把 zkb 的数值收成整数（`bool` 不算整数；非数值给 `None`，**不拿 0 冒充**）。"""
-    if isinstance(value, bool):
+def _stats_number(value: object) -> int | float | None:
+    """**原样透传** zkb 的数值：`int` 保持 `int`、`float` 保持 `float`。
+
+    为什么不做任何取整：zkb 这些指标（`dangerRatio` / `gangRatio` / `soloKills` …）
+    **没有承诺是整数**，我们也不理解它们的口径。`int(12.5)` 得到 `12` 是**静默的精度损失**
+    —— 调用方看不出少了半个点。纪律：**只转述，不加工**；要加工就必须显式声明
+    （`efficiency` 就是那样：派生 + 公式 + 精度都写在返回里）。
+
+    `bool` 不算数值（`True` 是 `1`，那是类型混淆）；非数值给 `None`，**不拿 0 冒充**。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    return None
+    return value
+
+
+def _stats_number_or(value: object, default: object) -> object:
+    """原样透传；缺失（`None` / 非数值）才退回 `default`。
+
+    不用 `x or default`：那会把合法的 `0` / `0.0` 也换成 `default`，还会把 `0.0` 变成
+    `int 0`（类型漂移）。这里只判 `None`。
+    """
+    number = _stats_number(value)
+    return default if number is None else number
 
 
 def _stats_top_row(entry: dict) -> dict:
@@ -3355,13 +3369,16 @@ def _stats_top_row(entry: dict) -> dict:
 
     `count` 就是 zkb 的 `kills`（改名只为 6 类形状一致，**不是「数量」的意思**）。
     实测这 4 个键在 6 个 type 里**恒有**，所以不做「若有」分支。
+
+    **四个值全部原样透传**：`isk` 不四舍五入（实测联盟某行原始是
+    `57388505453.520004`，`round(x, 2)` 会把它改写成 `…53.52` —— 那是我们编的 2 位精度，
+    zkb 没给这个承诺）。
     """
-    isk = entry.get("isk")
     return {
-        "id": _stats_int(entry.get("id")),
+        "id": _stats_number(entry.get("id")),
         "name": entry.get("name"),
-        "count": _stats_int(entry.get("kills")),
-        "isk": round(float(isk), 2) if isinstance(isk, (int, float)) and not isinstance(isk, bool) else isk,
+        "count": _stats_number(entry.get("kills")),
+        "isk": _stats_number(entry.get("isk")),
     }
 
 
@@ -3374,13 +3391,18 @@ def _stats_entity_block(payload: dict, kind: str, resolved_name: str | None) -> 
     info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
     sec = info.get("security_status")
     founded = info.get("birthday") if kind == "character" else info.get("date_founded")
+    identifier = payload.get("id")
+    if identifier is None:
+        identifier = info.get("id")
     return {
         "type": kind,
-        "id": _stats_int(payload.get("id")) or _stats_int(info.get("id")),
+        "id": _stats_number(identifier),
         "name": info.get("name") or resolved_name,
         "ticker": info.get("ticker"),
+        # `security_status` 原样透传（不做 `float()` 强转：zkb 给 4 就给 int 4，给 4.3 就给
+        # 4.3 —— 强转会把 int 变 float，那是我们改写了类型）。
         "security_status": (
-            float(sec) if kind == "character" and isinstance(sec, (int, float)) and not isinstance(sec, bool) else None
+            _stats_number(sec) if kind == "character" else None
         ),
         "founded": founded if isinstance(founded, str) else None,
     }
@@ -3390,22 +3412,25 @@ def _stats_combat_block(payload: dict) -> dict:
     """`combat` 块：六个原始总量 + 一个**明确标注派生**的 `efficiency`。
 
     `efficiency` 用的是 isk 口径，和 zkb 的 `dangerRatio` **不是同一个东西**
-    （同一角色实测 82.9% vs 69）—— 所以它带 `kind: derived` + `formula` + `note`。
+    （同一角色实测 82.9% vs 69）—— 所以它带 `kind: derived` + `formula` + `note`，
+    并且**显式声明精度**（`decimals`）：它是我们做的加工，加工就必须说清到什么位。
+    其余六个数是 zkb 原样，**一位都不动**。
     """
-    isk_destroyed = _stats_int(payload.get("iskDestroyed"))
-    isk_lost = _stats_int(payload.get("iskLost"))
+    isk_destroyed = _stats_number(payload.get("iskDestroyed"))
+    isk_lost = _stats_number(payload.get("iskLost"))
     total = (isk_destroyed or 0) + (isk_lost or 0)
     return {
-        "ships_destroyed": _stats_int(payload.get("shipsDestroyed")),
-        "ships_lost": _stats_int(payload.get("shipsLost")),
+        "ships_destroyed": _stats_number(payload.get("shipsDestroyed")),
+        "ships_lost": _stats_number(payload.get("shipsLost")),
         "isk_destroyed": isk_destroyed,
         "isk_lost": isk_lost,
-        "points_destroyed": _stats_int(payload.get("pointsDestroyed")),
-        "points_lost": _stats_int(payload.get("pointsLost")),
+        "points_destroyed": _stats_number(payload.get("pointsDestroyed")),
+        "points_lost": _stats_number(payload.get("pointsLost")),
         "efficiency": {
             "value": round((isk_destroyed or 0) / total, 4) if total else None,
             "kind": "derived",
             "formula": "isk_destroyed / (isk_destroyed + isk_lost)",
+            "decimals": 4,
             "note": ZKB_STATS_EFFICIENCY_NOTE,
         },
     }
@@ -3416,14 +3441,18 @@ def _stats_style_block(payload: dict) -> dict:
 
     为什么不填公式：实测反推不出来（见本节开头第 5 条）。写一个「看着像」的公式，
     比写 `null` 危险得多 —— 调用方会拿它去算别的实体。
+
+    为什么四个数**全部原样透传**：zkb 没有承诺这几个指标是整数。`dangerRatio: 12.5`
+    被 `int()` 成 `12` 是静默丢精度（实测过）。`solo_ratio` 是 0–100 的百分数、
+    `avg_gang_size` 是人/次均值，两者本来就可能带小数 —— 不加工才谈得上「只转述」。
     """
     return {
-        "danger_ratio": _stats_int(payload.get("dangerRatio")),
-        "gang_ratio": _stats_int(payload.get("gangRatio")),
-        "solo_ratio": payload.get("soloRatio") if isinstance(payload.get("soloRatio"), (int, float)) and not isinstance(payload.get("soloRatio"), bool) else None,
-        "avg_gang_size": payload.get("avgGangSize") if isinstance(payload.get("avgGangSize"), (int, float)) and not isinstance(payload.get("avgGangSize"), bool) else None,
-        "solo_kills": _stats_int(payload.get("soloKills")),
-        "solo_losses": _stats_int(payload.get("soloLosses")),
+        "danger_ratio": _stats_number(payload.get("dangerRatio")),
+        "gang_ratio": _stats_number(payload.get("gangRatio")),
+        "solo_ratio": _stats_number(payload.get("soloRatio")),
+        "avg_gang_size": _stats_number(payload.get("avgGangSize")),
+        "solo_kills": _stats_number(payload.get("soloKills")),
+        "solo_losses": _stats_number(payload.get("soloLosses")),
         "source": "zkillboard",
         "formula": None,
         "notes": ZKB_STATS_STYLE_NOTE,
@@ -3435,6 +3464,8 @@ def _stats_activity_block(payload: dict, kind: str) -> tuple[dict, dict, list[st
 
     **`not_applicable` 与「数据缺失」分开**：本类型天生没有的键 → `null` 且静默；
     本该有却被 zkb 省略 → `null` + 进 `field_reasons`。
+
+    数值原样透传：`activepvp.<k>.count` 是 zkb 的计数，我们不改写。
     """
     pvp = payload.get("activepvp") if isinstance(payload.get("activepvp"), dict) else {}
     not_applicable = ZKB_STATS_ACTIVITY_NOT_APPLICABLE.get(kind, ())
@@ -3446,7 +3477,7 @@ def _stats_activity_block(payload: dict, kind: str) -> tuple[dict, dict, list[st
             block[key] = None
             continue
         cell = pvp.get(key)
-        count = _stats_int(cell.get("count")) if isinstance(cell, dict) else None
+        count = _stats_number(cell.get("count")) if isinstance(cell, dict) else None
         block[key] = count
         if count is None:
             reasons[key] = "zkb_response_missing"
@@ -3500,9 +3531,18 @@ def _stats_months_data(payload: dict) -> dict:
             row = {"year": year, "month": month}
             row.update({field: 0 for field in ZKB_STATS_MONTH_FIELDS})
         else:
-            row = {"year": _stats_int(source.get("year")) or year,
-                   "month": _stats_int(source.get("month")) or month}
-            row.update({field: _stats_int(source.get(field)) or 0 for field in ZKB_STATS_MONTH_FIELDS})
+            # 原样透传；缺失才用「这个键对应的年月」/0 兜底。
+            # 不用 `x or default`：那会把合法的 0 / 0.0 也换掉，还会让 0.0 变成 int 0。
+            row = {
+                "year": _stats_number_or(source.get("year"), year),
+                "month": _stats_number_or(source.get("month"), month),
+            }
+            row.update(
+                {
+                    field: _stats_number_or(source.get(field), 0)
+                    for field in ZKB_STATS_MONTH_FIELDS
+                }
+            )
         data[key] = row
         month += 1
         if month > 12:

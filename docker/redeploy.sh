@@ -22,17 +22,27 @@ say() { echo "[redeploy] $*" | tee -a "$LOG"; }
 run() { echo "+ $*" >> "$LOG"; "$@" >> "$LOG" 2>&1; }
 
 say "repo: $REPO_DIR"
-say "1/4 拉取最新代码"
+say "1/5 释放端口（停掉旧版容器）"
+# 旧版（改名前的 evefit-mcp）会一直占着 8080，导致新容器起不来。
+# 只 stop 不 rm：主人说过「旧的留着」，随时能 start 回来。
+for legacy in evefit-mcp noobbaozi-mcp; do
+  if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$legacy"; then
+    say "    停掉旧容器 $legacy"
+    run docker stop "$legacy"
+  fi
+done
+
+say "2/5 拉取最新代码"
 run git -c core.hooksPath=/dev/null pull --ff-only
 say "    HEAD = $(git rev-parse --short HEAD)"
 
-say "2/4 重建镜像（可能几分钟）"
+say "3/5 重建镜像（可能几分钟）"
 run $COMPOSE build
 
-say "3/4 重启容器"
+say "4/5 重启容器"
 run $COMPOSE up -d
 
-say "4/4 等待健康检查"
+say "5/5 等待健康检查"
 i=0
 while [ "$i" -lt 30 ]; do
   if curl -s -m 3 "http://127.0.0.1:$PORT/health" 2>/dev/null | grep -q '"ok": *true'; then

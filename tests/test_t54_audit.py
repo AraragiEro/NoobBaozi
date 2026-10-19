@@ -837,3 +837,170 @@ def test_empty_hardpoint_refuses_to_conclude_when_high_total_is_unknown() -> Non
     with_high = {**attrs, A.ATTR_HI_SLOTS: 4}
     fired = D.evaluate(_stub_ctx(with_high), rules=[rule])
     assert fired and fired[0]["evidence"]["free_kinds"] == "炮位3", "补上高槽总量就能报（反证）"
+
+
+# =============================================================================
+# 十二、装填弹药（charge）：必须跟着模块行往返（T-54 追加缺陷，independent 实测）
+# =============================================================================
+
+_NOOBBAOZI_ROOT = Path(__file__).resolve().parents[1]
+KILLMAIL_ESI = _NOOBBAOZI_ROOT / "tests" / "fixtures" / "killmail" / "139239127-esi.json"
+F1_EFT = _NOOBBAOZI_ROOT / "acceptance" / "fixtures" / "f1-hecate-killmail.eft"
+"""真实样本：前者是仓库内的 killmail fixture，后者是独立验收用的 f1（5 门中子炮 + Void S）。"""
+
+
+def _charges(fit: dict) -> list[tuple[int, int | None]]:
+    """已装条目的 `(模块 type_id, 弹药 type_id)`，**排序后**比较（不依赖 item 顺序）。"""
+    return sorted(
+        (int(item["type_id"]), (item.get("charge") or {}).get("type_id"))
+        for item in fit["items"]
+        if (item.get("slot") or {}).get("type") != "cargo"
+    )
+
+
+def test_eft_roundtrip_preserves_every_loaded_charge() -> None:
+    """**核心回归**：真实 killmail 配装的 7 个装填弹药必须逐个回来（不只是模块集合一致）。
+
+    改之前：模块行只写 `Light Neutron Blaster II`，弹药被丢进货舱段，再解析时
+    **5 门炮的 `charge` 全变 `None`** —— 而且渲染「成功」、没有任何 warning。
+    """
+    from noobbaozi.engine import adapter
+
+    payload = json.loads(KILLMAIL_ESI.read_text(encoding="utf-8"))
+    api.clear_caches()
+    fit = adapter.load_killmail(payload)
+    charged_before = [charge for _module, charge in _charges(fit) if charge]
+    assert len(charged_before) >= 3, "反证：这个样本确实带装填弹药，否则断言永真"
+
+    emitted = eft.emit(fit, api.get_index())
+    again = adapter.load_eft(emitted)
+
+    assert _charges(again) == _charges(fit), "装填弹药（charge type_id）必须逐个一致"
+    assert [charge for _module, charge in _charges(again) if charge] == charged_before
+    # 渲染幂等：再渲染一次逐字节相同
+    assert eft.emit(again, api.get_index()) == emitted
+
+
+def test_f1_sample_keeps_all_five_blaster_charges() -> None:
+    """独立验收用的 f1 样本：**5 门 `Light Neutron Blaster II` 各带 `Void S`**，往返后 type_id 不变。"""
+    if not F1_EFT.is_file():
+        pytest.skip(f"缺少 f1 样本：{F1_EFT}")
+
+    text = F1_EFT.read_text(encoding="utf-8-sig")
+    api.clear_caches()
+    fit = normalize.normalize_fit(text)["fit"]
+    assert fit is not None
+
+    blasters_before = [
+        (item["type_id"], (item.get("charge") or {}).get("type_id"))
+        for item in fit["items"]
+        if item["type_id"] == 3178  # Light Neutron Blaster II
+    ]
+    assert len(blasters_before) == 5, f"f1 应有 5 门中子炮，实际 {len(blasters_before)}"
+    assert all(charge == 12612 for _module, charge in blasters_before), (
+        "5 门炮都必须装填 Void S（12612）"
+    )
+
+    emitted = eft.emit(fit, api.get_index())
+    again = normalize.normalize_fit(emitted)["fit"]
+    assert again is not None
+    assert _charges(again) == _charges(fit), "f1 的 7 个 charge 必须逐个回来"
+    assert eft.emit(again, api.get_index()) == emitted, "幂等：逐字节稳定"
+
+
+def test_charge_line_has_no_quantity_and_cargo_is_not_duplicated() -> None:
+    """弹药行的三条口径：`武器名, 弹药名` / **不带数量** / 货舱堆不被装填复制。
+
+    数量不写是实测结论：引擎解析器**拒绝** `Weapon, Ammo x100`（`unknown type …`），
+    EVE 剪贴板也不带，且引擎解析出的 `charge` 本身只有 `type_id`。
+    """
+    text = "[Hecate, loaded]\n\nLight Neutron Blaster II, Void S\n\nVoid S x1044\n"
+    api.clear_caches()
+    fit = normalize.normalize_fit(text)["fit"]
+    assert fit is not None
+
+    emitted = eft.emit(fit, api.get_index())
+    lines = emitted.split("\n")
+    module_line = next(line for line in lines if line.startswith("Light Neutron Blaster II"))
+
+    assert module_line == "Light Neutron Blaster II, Void S"
+    assert " x" not in module_line, "模块行不带数量后缀"
+    assert lines.count("Void S x1044") == 1, "货舱里那一堆只出现一次（不与装填重复）"
+
+    again = normalize.normalize_fit(emitted)["fit"]
+    assert again is not None
+    high = [
+        (item["type_id"], (item.get("charge") or {}).get("type_id"))
+        for item in again["items"]
+        if (item.get("slot") or {}).get("type") == "high"
+    ]
+    assert high == [(3178, 12612)], "装填回来"
+    cargo = [
+        (item["type_id"], item.get("quantity"))
+        for item in again["items"]
+        if (item.get("slot") or {}).get("type") == "cargo"
+    ]
+    assert cargo == [(12612, 1044)], "货舱数量没被装填吃掉"
+
+
+def test_unknown_charge_type_fails_loudly() -> None:
+    """弹药名查不到 → `EftError`（**绝不静默丢**），且错误里带上门户模块名。"""
+    text = "[Hecate, loaded]\n\nLight Neutron Blaster II, Void S\n"
+    fit = normalize.normalize_fit(text)["fit"]
+    assert fit is not None
+    high = next(i for i in fit["items"] if (i.get("slot") or {}).get("type") == "high")
+
+    broken = {**fit, "items": [{**high, "charge": {"type_id": 999_999_999}}]}
+    with pytest.raises(eft.EftError) as excinfo:
+        eft.emit(broken, api.get_index())
+    message = str(excinfo.value)
+    assert "装填弹药" in message and "999999999" in message
+    assert "Light Neutron Blaster II" in message, "错误信息必须指出是哪门炮的弹药"
+
+    # 结构不对（不是对象 / 缺 type_id）同样失败，不猜它是「没装弹」
+    for bad in ({"charge": "Void S"}, {"charge": {"name": "Void S"}}):
+        with pytest.raises(eft.EftError):
+            eft.emit({**fit, "items": [{**high, **bad}]}, api.get_index())
+
+
+def test_comma_in_a_name_fails_loudly() -> None:
+    """模块名/弹药名**含逗号** → `EftError`：EFT 用逗号分隔，含逗号的实体在文本里无法无歧义表达。
+
+    SDE 实测 18 个含逗号的已发布类型全是商品/服饰/箱子（不是模块也不是弹药）—— 这是护栏。
+    """
+
+    class _CommaIndex:
+        def get_type(self, type_id: int) -> dict:
+            return {"name": {1: "Hecate", 2: "Weird, Module", 3: "Void S"}[type_id]}
+
+    base = {"ship": {"type_id": 1}, "items": [
+        {"type_id": 2, "slot": {"type": "high", "index": 0}},
+    ]}
+    with pytest.raises(eft.EftError) as excinfo:
+        eft.emit(base, _CommaIndex())
+    assert "逗号" in str(excinfo.value)
+
+    charge_with_comma = {
+        "ship": {"type_id": 1},
+        "items": [{"type_id": 3, "slot": {"type": "high", "index": 0}, "charge": {"type_id": 2}}],
+    }
+    with pytest.raises(eft.EftError) as excinfo:
+        eft.emit(charge_with_comma, _CommaIndex())
+    assert "弹药名" in str(excinfo.value) or "逗号" in str(excinfo.value)
+
+
+def test_charge_on_a_cargo_or_drone_item_fails_loudly() -> None:
+    """无人机 / 货舱条目带 `charge` → `EftError`：EFT 没有这种表示，不许静默丢掉。"""
+    fit = {
+        "ship": {"type_id": 1},
+        "items": [{"type_id": 2, "slot": {"type": "cargo"}, "quantity": 5,
+                   "charge": {"type_id": 3}}],
+    }
+
+    class _Index:
+        def get_type(self, type_id: int) -> dict:
+            return {"name": {1: "Hecate", 2: "Void S", 3: "Nanite Repair Paste"}[type_id]}
+
+    with pytest.raises(eft.EftError) as excinfo:
+        eft.emit(fit, _Index())
+    assert "货舱" in str(excinfo.value) or "charge" in str(excinfo.value)

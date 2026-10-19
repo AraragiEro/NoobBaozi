@@ -318,17 +318,45 @@ def test_eft_format_matches_eve_convention() -> None:
     assert not any(line.startswith(LAUNCHER + " x") for group in groups for line in group)
 
 
-def test_eft_keeps_loaded_charge_out_of_module_lines() -> None:
-    """带弹药的发射器：模块行只有模块名，弹药留在货舱/弹药段。"""
+def test_eft_keeps_loaded_charge_on_the_module_line() -> None:
+    """带弹药的发射器：模块行写 `武器名, 弹药名`，货舱段只放**真的在货舱里**的弹药。
+
+    **T-54 追加缺陷的回归钉子**（独立验收实测）：旧实现把 `charge` 整块丢掉，`emit` 出来
+    的文本是空炮 —— 复制回游戏装不上弹、复制回 `parse_fit` 五门炮 `charge` 全变 `None`，
+    而渲染还「成功」。EFT 惯例就是 `Weapon, Ammo Name`，本模块必须照写。
+    """
     text = api.parse_fit(
         _eft([f"{LAUNCHER}, Scourge Fury Light Missile"], name="Loaded",
              cargo=("Scourge Fury Light Missile x379",))
     )["result"]["eft"]
     lines = text.split("\n")
 
-    assert lines[2] == LAUNCHER, "模块行不带逗号弹药"
-    assert not any("," in line for line in lines[1:]), "任何模块行都不许把弹药写进去"
+    assert lines[2] == f"{LAUNCHER}, Scourge Fury Light Missile", "模块行必须带回装填弹药"
+    # 弹药数量**不写在模块行上**（引擎解析器拒绝 `, 弹药名 x100`，EVE 剪贴板也不带）
+    assert " x" not in lines[2], "模块行不带数量后缀"
+    # 货舱段只放货舱里的那堆（379 发），不与装填重复
     assert lines[-1] == "Scourge Fury Light Missile x379"
+    assert sum(1 for line in lines[1:] if line.startswith(LAUNCHER)) == 1
+
+    # 往返：charge 的 type_id 必须回来
+    from noobbaozi.engine import normalize
+
+    first = normalize.normalize_fit(
+        _eft([f"{LAUNCHER}, Scourge Fury Light Missile"], name="Loaded",
+             cargo=("Scourge Fury Light Missile x379",))
+    )["fit"]
+    second = normalize.normalize_fit(text)["fit"]
+    assert first is not None and second is not None
+
+    def charges(fit: dict) -> list:
+        return [
+            (item["type_id"], (item.get("charge") or {}).get("type_id"))
+            for item in fit["items"]
+            if (item.get("slot") or {}).get("type") == "high"
+        ]
+
+    assert charges(second) == charges(first), "装填弹药必须在往返后保持一致"
+    assert [charge for _module, charge in charges(second) if charge], "至少有一门炮带着弹药"
 
 
 ROUNDTRIP_FITS: tuple[str, ...] = (

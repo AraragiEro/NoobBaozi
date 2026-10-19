@@ -2181,6 +2181,109 @@ def test_zkb_stats_empty_shell_entity_is_unknown_entity(zkb_state: None) -> None
     assert any("empty_entity" in warning for warning in error["warnings"])
 
 
+def test_zkb_stats_passes_numbers_through_without_any_rounding(zkb_state: None) -> None:
+    """**只转述，不加工**：zkb 给 `12.5` 就必须回 `12.5`，不许变 `12`。
+
+    实测缺陷（测试员抓到，判 high）：旧实现用 `int()` 收口，`dangerRatio: 12.5` 输出 `12`、
+    `gangRatio: 45.5` 输出 `45` —— zkb 这几个指标**没有承诺是整数**，取整是静默精度损失。
+
+    这里**一次查全同类字段**（不再只修一处）：
+    `danger_ratio` / `gang_ratio` / `solo_ratio` / `avg_gang_size` / `solo_kills` /
+    `solo_losses` / `combat` 六项 / `activity_7d` 六项 / `top.*.{count,isk}` / `entity.id` /
+    `entity.security_status` / `blocks.months.*` —— 全部原样透传。
+    """
+    document = _fixture(STATS_CHARACTER)
+    document["dangerRatio"] = 12.5
+    document["gangRatio"] = 45.5
+    document["soloRatio"] = 3.75
+    document["avgGangSize"] = 2.5
+    document["soloKills"] = 7.5
+    document["soloLosses"] = 0.25
+    document["shipsDestroyed"] = 100.5
+    document["shipsLost"] = 0.5
+    document["iskDestroyed"] = 1234.567
+    document["iskLost"] = 0.125
+    document["pointsDestroyed"] = 3.5
+    document["pointsLost"] = 0.75
+    document["activepvp"]["kills"]["count"] = 9.5
+    document["topLists"][0]["values"][0]["isk"] = 1.2345678
+    document["topLists"][0]["values"][0]["kills"] = 4.5
+    document["info"]["security_status"] = 4  # int 就该保持 int，不许被 float() 改写成 4.0
+
+    recorder = _StatsRecorder(document)
+    virtual_clock, sleeper = _instant()
+    envelope = api.zkb_stats(
+        2117515414, entity_type="character", include=["months"],
+        requester=recorder, clock=virtual_clock, sleeper=sleeper,
+    )
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+
+    style = result["style"]
+    assert style["danger_ratio"] == 12.5, f"danger_ratio 被加工了：{style['danger_ratio']!r}"
+    assert style["gang_ratio"] == 45.5
+    assert style["solo_ratio"] == 3.75
+    assert style["avg_gang_size"] == 2.5
+    assert style["solo_kills"] == 7.5
+    assert style["solo_losses"] == 0.25
+    for key in ("danger_ratio", "gang_ratio", "solo_ratio", "avg_gang_size",
+                "solo_kills", "solo_losses"):
+        assert isinstance(style[key], float), f"{key} 的类型被改了：{type(style[key])}"
+
+    combat = result["combat"]
+    for key, want in (
+        ("ships_destroyed", 100.5), ("ships_lost", 0.5),
+        ("isk_destroyed", 1234.567), ("isk_lost", 0.125),
+        ("points_destroyed", 3.5), ("points_lost", 0.75),
+    ):
+        assert combat[key] == want, f"combat.{key} 被加工了：{combat[key]!r} != {want!r}"
+
+    assert result["activity_7d"]["kills"] == 9.5
+    top_row = result["top"]["characters"][0]
+    assert top_row["isk"] == 1.2345678, f"top.isk 被四舍五入了：{top_row['isk']!r}"
+    assert top_row["count"] == 4.5
+
+    assert result["entity"]["security_status"] == 4
+    assert isinstance(result["entity"]["security_status"], int), (
+        "zkb 给 int 4 就该是 int 4；`float()` 强转是我们改写了类型"
+    )
+    assert result["entity"]["id"] == 2117515414
+
+    months = result["blocks"]["months"]
+    assert months["data"]["202105"]["iskDestroyed"] == 1257701232
+
+
+def test_zkb_stats_efficiency_declares_its_precision(zkb_state: None) -> None:
+    """唯一允许加工的数是**我们派生的** `efficiency`：它必须声明精度，不能"静默 rounded"。
+
+    与上一条的界线：zkb 的数原样透传；我们算的数要带 `kind` / `formula` / `decimals`。
+    """
+    envelope, _recorder = _stats(2117515414, "character", STATS_CHARACTER)
+    efficiency = envelope["result"]["combat"]["efficiency"]
+    assert efficiency["kind"] == "derived"
+    assert efficiency["decimals"] == 4, "派生值可以有精度，但必须写出来"
+    assert efficiency["formula"] == "isk_destroyed / (isk_destroyed + isk_lost)"
+    isk_d = 222758096336
+    isk_l = 45961938028
+    assert efficiency["value"] == round(isk_d / (isk_d + isk_l), efficiency["decimals"])
+
+
+def test_zkb_stats_rejects_bool_as_a_number(zkb_state: None) -> None:
+    """`bool` 不是数值：`True` 若被当成 `1` 会让「有值」与「值为真」混在一起。"""
+    document = _fixture(STATS_CHARACTER)
+    document["dangerRatio"] = True
+    document["shipsDestroyed"] = False
+    recorder = _StatsRecorder(document)
+    virtual_clock, sleeper = _instant()
+    envelope = api.zkb_stats(
+        2117515414, entity_type="character",
+        requester=recorder, clock=virtual_clock, sleeper=sleeper,
+    )
+    assert envelope["ok"] is True, envelope
+    assert envelope["result"]["style"]["danger_ratio"] is None
+    assert envelope["result"]["combat"]["ships_destroyed"] is None
+
+
 def test_zkb_stats_entity_type_is_required_and_validated(zkb_state: None) -> None:
     """`entity_type` 必填且三选一；**不靠 id 猜**（同一串数字在三个命名空间都可能存在）。"""
     recorder = _StatsRecorder(_fixture(STATS_CHARACTER))
