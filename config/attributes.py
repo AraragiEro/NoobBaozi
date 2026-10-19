@@ -114,6 +114,7 @@ ATTR_CHARGE_GROUP_2: int = 605           # chargeGroup2（可装弹药组 2）
 ATTR_AOE_VELOCITY: int = 653             # aoeVelocity（m/s；导弹应用，字段规格 §1 未建模）
 ATTR_AOE_CLOUD_SIZE: int = 654           # aoeCloudSize（m；导弹爆炸半径）
 ATTR_AOE_FALLOFF: int = 655              # aoeFalloff（m；esi 无 unit，推定同 aoeCloudSize）
+ATTR_AOE_DAMAGE_REDUCTION_FACTOR: int = 1353  # aoeDamageReductionFactor（导弹 DRF，伤害应用指数；combat 层用，2026-10-19 登记）
 ATTR_EXPLOSION_DELAY: int = 281          # explosionDelay —— 导弹最大飞行时间（**存储毫秒**；SDE displayName = `Maximum Flight Time`）
 
 # 弹药四系伤害 + 射程乘子（读弹药物件，不读武器）
