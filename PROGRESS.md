@@ -729,3 +729,49 @@ failed to solve: failed to compute cache key: "/__init__.py": not found
 
 - `https://zkillboard.com/kill/139239127/` → **Sarathiel（无畏舰）**：EHP 2,139,472 / DPS 8,040 / 齐射 48,693 / 信号 10,000 m / `feasible: true`；flags：`resist_hole`(装甲最弱爆炸)、`no_propulsion`
 - `https://zkillboard.com/kill/139083433/` → **Sleipnir（指挥舰）**：EHP 33,582 / DPS 529 / 速度 1,699.5 m/s / `feasible: false`（PG 超 40.4）；flags：`resource_overflow`、`cap_sensitive`(关 50MN 就稳)、`repaired_but_unstable`、`drone_bandwidth_idle`
+---
+
+### 2026-10-19 · 员工制上线 + 口径清理轮（1101 passed）
+
+**团队机制**（主人提议：每员工最多 5 单后退场，防上下文漂移）
+
+| 代号 | 任 | 单数 | 关键产出 |
+|---|---|---|---|
+| `dev-engine` | 一任 | 5/5 退场 | 炮位单一出处、`unclassified` 拆分、EFT 装填弹药、fits 增量口径、L2 契约、orphan 源头不变式 |
+| `dev-surface` | 一任 | 5/5 退场 | `zkb_stats`、17 处取整透传、错误映射统一、killmail 冷路径 -36%、detail 顶层 flags、信封 hash |
+| `dev-engine-2` | 二任 | 2/5 在役 | `unattributed` 改名、无人机带宽/架数两条 flag |
+| `dev-surface-2` | 三任 | 1/5 在役 | 文档↔实现一致性抽查 |
+| `evefit-tester` | 常驻 | — | L2 字段级验收（0 缺陷）、无人机 flag 验收、65×43 |
+
+**本轮的硬结论**
+
+1. **`feasible` 不含无人机**（只 CPU/PG/标定三项）—— 主人裁决不改定义，改用两条诊断 flag：
+   `drone_bandwidth_exceeded`（Mbit/s）与 `launched_drones_exceeded`（架数），**互不替代、可同时命中**。
+   合并会产出「带宽超限」且 `over = -75` 的自相矛盾 evidence。
+2. **`drone.bandwidth.used` = 机舱全部放飞所需**，不是已放飞。本产品**无「已放飞」维度**
+   （fit 文本与引擎 `Layout.type` 都只有 `drone_bay`）。
+3. **zkb 的 `/api/killID/` 返回的就是完整 killmail** —— 16/16 逐字段与 ESI 一致。
+   `victim.items` 非空时跳过 ESI 不是「降级数据源」，是**删掉一次重复请求**（冷路径 2.48s → 1.59s）。
+   `items` 必须区分「键缺失」（疑点 → 回落 ESI）与「空数组」（事实，蛋/空船 → 短路）。
+4. **`upgrade_space[].fits` 改为增量口径**：`fits` = 换装无**新增**违规；`blocked_by` = 候选自引；
+   `inherits` = 基础自带（二者互斥）。旧口径让 f7 的 16 个候选全被「配装本来就超带宽」连坐。
+5. **`hardpoints.unclassified` → `unattributed`**（与 `unknown_reasons.unclassified` 撞名）。
+
+**本轮的教训（三条，都关于流程而非代码）**
+
+6. **改名任务里最危险的不是改名，是「发给别人的改名清单」** —— 写清单的人同样会犯同名混淆。
+   PM 发给验收员的清单里把 `field_spec.json` 的炮位字段与 `unknown_reasons` 的兜底原因列成了同一件事，
+   被验收员挡回。**规则：改名清单每一项必须先回读原文确认语义归属，再按行号改。**
+7. **一次性代理新增的文件必须显式移交属主** —— 曾导致 `tests/` 下 10 个文件无主，
+   `dev-engine-2` 做改名时被 9 条红卡住。`TEAM.md` 已补「测试文件属主总表」。
+8. **交接摘要会过期**：`dev-surface` 把「L1 orphan flag 未决」写进交接，但 Lead 已裁决且另一员工已落地。
+   **规则：接任者的简报里，已裁决项必须显式标注「已裁决，不要再提」，否则会重复提被否决的方案。**
+
+**P3（软件设计）现状**
+
+9. 设计定义 P3 = `detail / explain / sensitivity`，验收标准「归因可查；灵敏度可算」。
+   `detail` ✅；`explain` / `sensitivity` ⬜。
+10. **11 项验收依赖 explain**（台账原话「I5 对这些项不适用；要验需走 effect 级 sources（P3 explain 才有）」）。
+11. **验收员对 explain 的验收方法已定**：正向 Σcontributors 与 `value` 比 + **反向去掉某项后必须不再相等**
+    （只验正向会被「多算一项恰好抵消」骗过）。因此契约必须声明 `combine: additive | multiplicative | mixed`
+    与 `sources` 是否为最小集。
