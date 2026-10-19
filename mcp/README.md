@@ -381,11 +381,11 @@ Caldari Navy Scourge Light Missile x1232
   "launcher": {"total": 3, "used": 0, "free": 3},
   "non_hardpoint": 1,
   "non_hardpoint_modules": ["Improved Cloaking Device II"],
-  "unclassified": 0
+  "unattributed": 0
 }
 ```
 
-**高槽里的每一件只会落到四个去处**（`turret` / `launcher` / `non_hardpoint` / `unclassified`）：
+**高槽里的每一件只会落到四个去处**（`turret` / `launcher` / `non_hardpoint` / `unattributed`）：
 
 | 字段 | 含义 | 三态 |
 |---|---|---|
@@ -394,13 +394,17 @@ Caldari Navy Scourge Light Missile x1232
 | `free` | `total - used`，**可以为负** —— 负数 = 非法装配，同时出 `hardpoint_violation` flag | `assumed` |
 | `non_hardpoint` | 高槽里**确定不占硬点**的件数（隐身 / 智能炸弹 / 吸电 / 遥修…）。**一件都不进 `used`** | `assumed` |
 | `non_hardpoint_modules` | 上面那件事的**样例名字**（最多 3 个，人读时不用猜是哪件） | `assumed` |
-| `unclassified` | **分不清**的件数（`Festival Launcher` 一族：看不出是武器还是别的） | `assumed` |
+| `unattributed` | **分不清**归到哪一类的件数（`Festival Launcher` 一族：看不出是武器还是别的） | `assumed` |
 
-> **为什么把 `non_hardpoint` 和 `unclassified` 拆成两个数**：拆之前它们挤在一个
+> **为什么把 `non_hardpoint` 和 `unattributed` 拆成两个数**：拆之前它们挤在一个
 > `unclassified` 里，于是「有一件我们认不出的武器」和「有一件确定不占硬点的隐身」长得
 > 一模一样。实测踩过：一艘船报 `unclassified: 1`，agent 会以为可能藏了一件武器，实际是
-> 那件**隐身**（确定不占硬点）。现在确定的进 `non_hardpoint`（还带样例名字），`unclassified`
+> 那件**隐身**（确定不占硬点）。现在确定的进 `non_hardpoint`（还带样例名字），`unattributed`
 > 只剩真正分不清的 —— 后者是「我们能力不足」，前者是「事实如此」，不能混。
+>
+> **注意字段名**：第四态叫 **`unattributed`**（不是 `unclassified`）。1/5 做过一次改名
+> （`unclassified` → `unattributed`）：它表示的是「**没归因**」，而不是「归类为未分类」——
+> 后者听起来像我们放弃了这个字段。
 
 - 它**和 `slots` 并列出现在 L0**（`resources.slots` 与 `resources.hardpoints`）：
   agent 只看摘要时也能分清「5 个高槽」与「3 个发射器挂点」；
@@ -410,6 +414,35 @@ Caldari Navy Scourge Light Missile x1232
   `发射器超2`）。**`free` 为负绝不会静默通过**。
 - 模块名一律按 **SDE 实名**匹配（`Small Tractor Beam II` 不是 `Tractor Beam II`，
   `Festival Launcher` 不是 `Festival Launcher I`）—— 写用例前先核 SDE。
+
+### 4.6.1 无人机：`bandwidth.used` 是「全部放飞所需」，且两条上限互不替代
+
+**`resources.drone.bandwidth.used` 的口径务必读准**：它是**机舱里全部无人机「全部放飞」
+所需**的带宽（Σ `droneBandwidthUsed × 数量`），**不是当前已放飞的消耗**。
+
+fit 文本与引擎 `Layout` 都**没有「已放飞」这个维度**（只有 `drone_bay`）——所以「已放飞」
+在本产品里**根本不存在**。这不是缺陷，是输入形态决定的上限。
+
+> 正确读法（f7 / Legion 实测）：「**25 架全放需要 175 Mbit/s，而总带宽只有 50**」，
+> **不是**「现在已经放了 175」。
+
+超限由**两条 flag 分别报，互不替代、可同时命中**：
+
+| flag | 量的是 | 单位 |
+|---|---|---|
+| `drone_bandwidth_exceeded` | 带宽够不够放全部无人机 | **Mbit/s** |
+| `launched_drones_exceeded` | 同时放飞的**架数**是否超上限 | **架** |
+
+**一条命中不代表另一条也命中**：带宽够但架数超（放 5 架大船无人机）、或架数够但带宽超
+（放 1 架超宽无人机）都会发生 —— 所以别用一条的结论代替另一条。
+
+**`feasible` 不含无人机**：它只是 `cpu.free >= 0 and powergrid.free >= 0 and
+calibration.free >= 0` 的三项合判（任一为负 → `false`，任一缺失 → `null`）。无人机带宽 /
+架数**不在那三个数里**（主人裁决：不改 `feasible` 的定义）。
+
+> 因此会遇到「**`feasible: true` 但无人机放不下**」。这时看
+> `resources.upgrade_space[].blocked_by` —— 它可能是 `["drone_bandwidth"]` 或
+> `["launched_drones"]` 这种**不在三项里的资源维度**（实测 f7 有 4 例「资源够却装不下」）。
 
 ### 4.7 `zkb_stats` 的调用注意（2026-10-19 实测）
 
