@@ -1,4 +1,4 @@
-"""P6-B2 测试：交战数学（`project/combat.py`）。
+﻿"""P6-B2 测试：交战数学（`project/combat.py`）。
 
 三条守卫来自 P6-B1 取证时**真实踩到**的坑，每条都做成「改坏就必须红」的断言：
 
@@ -666,3 +666,234 @@ def test_p1_reverse_leg_has_no_weapons(p1_defender, p1_attacker) -> None:
     result = combat.engagement(p1_defender, p1_attacker, range_m=3000.0)
     assert result["totals"]["effective_dps"] == 0.0
     assert any(flag.startswith("no_weapons") for flag in result["flags"])
+
+# =============================================================================
+# 10. P6-B4：编队聚合（同型 × 数量，只做量级校验）
+# =============================================================================
+
+FAKE_ATTACKERS_BY_GROUP: dict = {
+    "count": 9,
+    "damaging_count": 8,
+    "by_ship_group": [
+        {"group": "Battleship", "count": 8, "damage": 11360, "damage_pct": 0.904387},
+        {"group": "Logistics", "count": 1, "damage": 1201, "damage_pct": 0.095613},
+    ],
+}
+"""`fit_killmail(...)["attackers"]` 的**结构**（数字取自战报 139280812 的真实聚合）。"""
+
+
+def test_fleet_from_killmail_uses_killmail_counts(missile_ctx) -> None:
+    """数量必须来自战报 `by_ship_group`：Cruiser × 8（假数据里没有 Cruiser，这里换成真结构）。"""
+    attackers = {
+        "by_ship_group": [
+            {"group": "Cruiser", "count": 3, "damage": 900, "damage_pct": 0.9},
+            {"group": "Frigate", "count": 5, "damage": 100, "damage_pct": 0.1},
+        ]
+    }
+    derived = combat.fleet_from_killmail(attackers, missile_ctx)  # Caracal = Cruiser
+    assert derived["group"] == "Cruiser"
+    assert derived["count"] == 3
+    assert derived["source"] == "killmail.attackers.by_ship_group"
+    assert derived["damage_pct"] == pytest.approx(0.9, rel=1e-6)
+
+
+def test_fleet_from_killmail_rejects_unknown_group(p1_defender) -> None:
+    """模板是 Interdictor，战报里只有 Battleship/Logistics → 必须报错，不许编数量。"""
+    with pytest.raises(ValueError, match="Interdictor"):
+        combat.fleet_from_killmail(FAKE_ATTACKERS_BY_GROUP, p1_defender)
+
+
+def test_fleet_from_killmail_rejects_missing_aggregate(p1_attacker) -> None:
+    with pytest.raises(ValueError, match="by_ship_group"):
+        combat.fleet_from_killmail({}, p1_attacker)
+
+
+def test_fleet_engagement_marks_assumption_and_scales(p1_attacker, p1_defender) -> None:
+    single = combat.engagement(p1_attacker, p1_defender, range_m=0.0, target_velocity=224.0)
+    fleet = combat.fleet_engagement(
+        p1_attacker, p1_defender, count=4, range_m=0.0, target_velocity=224.0,
+        window_s=9.0, observed_hp=4158.0,
+    )
+    assert fleet["fleet_assumption"] is True
+    assert "非个体配装" in fleet["fleet_note"]
+    assert fleet["count"] == 4
+    assert fleet["totals"]["fleet_effective_dps"] == pytest.approx(
+        single["totals"]["effective_dps"] * 4, rel=1e-6
+    )
+    assert fleet["defender_survival"]["time_to_kill_s"]["fleet_assumption"] is True
+    assert "fleet_assumption" in fleet["flags"]
+    assert "order_of_magnitude_only" in fleet["flags"]
+    assert fleet["window"]["magnitude"]["verdict"] in {
+        "same_order", "predicted_high_x", "predicted_low_x"
+    } or fleet["window"]["magnitude"]["verdict"].startswith("predicted_")
+
+
+def test_fleet_count_is_not_hardcoded(p1_attacker, p1_defender) -> None:
+    """非永真：两个不同数量必须给出不同结果（写死 count 的实现在这里会红）。"""
+    three = combat.fleet_engagement(p1_attacker, p1_defender, count=3,
+                                    range_m=0.0, target_velocity=224.0)
+    eight = combat.fleet_engagement(p1_attacker, p1_defender, count=8,
+                                    range_m=0.0, target_velocity=224.0)
+    assert eight["totals"]["fleet_effective_dps"] > three["totals"]["fleet_effective_dps"]
+    assert eight["defender_survival"]["time_to_kill_s"]["value"] < (
+        three["defender_survival"]["time_to_kill_s"]["value"]
+    )
+
+
+def test_fleet_engagement_takes_count_from_killmail(p1_attacker) -> None:
+    """直接传 attackers 时，数量取战报聚合（Cruiser × 2）。"""
+    attackers = {"by_ship_group": [{"group": "Cruiser", "count": 2, "damage_pct": 1.0}]}
+    result = combat.fleet_engagement(
+        p1_attacker, p1_attacker, killmail_attackers=attackers, range_m=0.0,
+    )
+    assert result["count"] == 2
+    assert result["count_source"]["source"] == "killmail.attackers.by_ship_group"
+
+
+def test_fleet_engagement_requires_exactly_one_count_source(p1_attacker, p1_defender) -> None:
+    with pytest.raises(ValueError, match="count"):
+        combat.fleet_engagement(p1_attacker, p1_defender, range_m=0.0)
+    with pytest.raises(ValueError, match="count"):
+        combat.fleet_engagement(p1_attacker, p1_defender, count=2,
+                                killmail_attackers=FAKE_ATTACKERS_BY_GROUP, range_m=0.0)
+
+
+def test_magnitude_check_is_order_of_magnitude_only() -> None:
+    same = combat.magnitude_check(12561.0 * 0.5, 12561.0)
+    assert same["verdict"] == "same_order"
+    high = combat.magnitude_check(12561.0 * 50.0, 12561.0)
+    assert high["verdict"].startswith("predicted_high_x")
+    low = combat.magnitude_check(12561.0 / 50.0, 12561.0)
+    assert low["verdict"].startswith("predicted_low_x")
+    assert "不做精确对拍" in same["note"]
+
+
+def test_fleet_size_for_damage_gives_an_interval(p1_attacker, p1_defender) -> None:
+    """反向用法：4158 点血 / 9 秒 → 需要几条同型 Exequror？给区间不是单点。"""
+    result = combat.fleet_size_for_damage(
+        p1_attacker, p1_defender, observed_hp=4158.0, window_s=9.0,
+        ranges_m=ANCHOR_RANGES, angulars=ANCHOR_ANGLES, target_velocity=224.0,
+    )
+    low, high = result["count_range"]
+    assert result["fleet_assumption"] is True
+    assert low >= 2, "单船 9 秒打不出 4158（P6-B3 已证），所以至少 2 条"
+    assert high > low, "几何未知 → 必须是区间，不能是单点"
+    assert result["best_case"]["needed_count"] == low
+    assert result["worst_case"]["needed_count"] == high
+
+
+def test_fleet_size_for_damage_rejects_zero_damage(p1_defender, p1_attacker) -> None:
+    """守方当攻方（Flycatcher 没对敌武器）→ 无法反推，必须给原因而不是一个假数。"""
+    result = combat.fleet_size_for_damage(
+        p1_defender, p1_attacker, observed_hp=12561.0, window_s=9.0,
+        ranges_m=ANCHOR_RANGES, angulars=ANCHOR_ANGLES,
+    )
+    assert result["count_range"] is None
+    assert result["reasons"]
+
+# ---- 真实反向腿：8×Apocalypse（模板来自战报 139129161，同军团 Cosmic-Wanderers）----
+
+P1_APOCALYPSE = """[Apocalypse, Killmail 139129161]
+
+1600mm Steel Plates II
+1600mm Steel Plates II
+Reactive Armor Hardener
+Multispectrum Coating II
+Multispectrum Coating II
+Heat Sink II
+Damage Control II
+
+500MN Y-T8 Compact Microwarpdrive
+Heavy F-RX Compact Capacitor Booster, Navy Cap Booster 800
+Tracking Computer II, Optimal Range Script
+Large Micro Jump Drive
+
+Mega Pulse Laser II, Imperial Navy Radio L
+Mega Pulse Laser II, Imperial Navy Radio L
+Mega Pulse Laser II, Imperial Navy Radio L
+Mega Pulse Laser II, Imperial Navy Radio L
+Mega Pulse Laser II, Imperial Navy Radio L
+Mega Pulse Laser II, Imperial Navy Radio L
+Mega Pulse Laser II, Imperial Navy Radio L
+Mega Pulse Laser II, Imperial Navy Radio L
+
+Large Trimark Armor Pump I
+Large Trimark Armor Pump I
+Large Trimark Armor Pump I
+
+Warrior I x5
+Valkyrie I x5
+"""
+"""P1 反向腿的攻方模板：战报 139129161（Cosmic-Wanderers 的 Apocalypse 阵亡配装）。"""
+
+P1_ATTACKERS_REAL = {
+    "count": 10,
+    "damaging_count": 9,
+    "by_ship_group": [
+        {"group": "Battleship", "count": 8, "damage": 11360, "damage_pct": 0.904387},
+        {"group": "Logistics", "count": 1, "damage": 1201, "damage_pct": 0.095613},
+        {"group": "Interceptor", "count": 1, "damage": 0, "damage_pct": 0.0},
+    ],
+}
+"""战报 139280812 的 `attackers.by_ship_group` 原样（8×Battleship 是**战报事实**）。"""
+
+
+@pytest.fixture(scope="module")
+def p1_apocalypse(engine, index) -> ViewContext:
+    return _ctx(engine, index, P1_APOCALYPSE)
+
+
+def test_p1_reverse_fleet_count_comes_from_the_killmail(p1_apocalypse) -> None:
+    derived = combat.fleet_from_killmail(P1_ATTACKERS_REAL, p1_apocalypse)
+    assert derived["group"] == "Battleship"
+    assert derived["count"] == 8
+    assert derived["source"] == "killmail.attackers.by_ship_group"
+
+
+def test_p1_reverse_fleet_magnitude_is_same_order(p1_apocalypse, p1_attacker) -> None:
+    """8×Apocalypse 打 Exequror：9 秒窗口量级 vs 战报 12561 —— 只验「同数量级」。"""
+    result = combat.fleet_engagement(
+        p1_apocalypse, p1_attacker, killmail_attackers=P1_ATTACKERS_REAL, range_m=20000.0,
+        angular_vel=0.0, window_s=9.0, observed_hp=12561.0,
+    )
+    assert result["count"] == 8
+    assert result["fleet_assumption"] is True
+    assert "非个体配装" in result["fleet_note"]
+    magnitude = result["window"]["magnitude"]
+    assert magnitude["verdict"] == "same_order", magnitude
+    assert 0.1 <= magnitude["ratio"] <= 10.0
+    # 覆盖率 < 1 是事实：Apocalypse 带 10 架无人机，无人机应用本层不建模
+    assert result["totals"]["coverage"] < 1.0
+
+
+def test_p1_reverse_fleet_count_changes_result(p1_apocalypse, p1_attacker) -> None:
+    """非永真：把战报数量改成 3，结果必须跟着变（写死 8 的实现在这里红）。"""
+    fewer = dict(P1_ATTACKERS_REAL)
+    fewer["by_ship_group"] = [
+        {"group": "Battleship", "count": 3, "damage": 3000, "damage_pct": 1.0},
+    ]
+    three = combat.fleet_engagement(p1_apocalypse, p1_attacker, killmail_attackers=fewer,
+                                    range_m=20000.0)
+    eight = combat.fleet_engagement(p1_apocalypse, p1_attacker, killmail_attackers=P1_ATTACKERS_REAL,
+                                    range_m=20000.0)
+    assert three["count"] == 3
+    assert eight["count"] == 8
+    assert eight["totals"]["fleet_effective_dps"] > three["totals"]["fleet_effective_dps"]
+
+
+def test_fleet_size_has_practical_range_and_degenerate_flag(p1_apocalypse, p1_attacker) -> None:
+    result = combat.fleet_size_for_damage(
+        p1_apocalypse, p1_attacker, observed_hp=12561.0, window_s=9.0,
+        ranges_m=[0.0, 5000.0, 20000.0, 60000.0, 120000.0],
+        angulars=[0.0, 0.1, 0.3],
+    )
+    low, high = result["count_range"]
+    practical_low, practical_high = result["count_range_practical"]
+    assert low == practical_low
+    assert 1 <= low <= practical_high <= high
+    assert result["degenerate_upper"] is True
+    assert "count_range_practical" in result["assumptions"]["degenerate_upper_note"]
+
+
+
+

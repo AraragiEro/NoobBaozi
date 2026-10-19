@@ -83,6 +83,8 @@ from noobbaozi.project import units
 from noobbaozi.project.views import shared
 
 __all__ = [
+    "FLEET_NOTE",
+    "MAGNITUDE_TOLERANCE",
     "PERFECT_APPLICATION",
     "TOLERANCE_REL",
     "TURRET_SIGNATURE_RESOLUTION",
@@ -90,6 +92,10 @@ __all__ = [
     "engagement",
     "exchange",
     "explain_anchor",
+    "fleet_engagement",
+    "fleet_from_killmail",
+    "fleet_size_for_damage",
+    "magnitude_check",
     "missile_application_factor",
     "sweep",
     "timeline",
@@ -262,6 +268,7 @@ def _ship_block(ctx) -> dict:
     return {
         "type_id": int(type_id) if isinstance(type_id, int) else None,
         "name": (row or {}).get("name"),
+        "group": (row or {}).get("group_name"),
     }
 
 
@@ -848,7 +855,9 @@ def _default_ranges(attacker_ctx) -> list[float]:
             optimal = float(inputs.get("optimal_m") or 0.0)
             falloff = float(inputs.get("falloff_m") or 0.0)
             if optimal > 0.0:
-                grid = [0.5 * optimal, optimal]
+                # optimal 内距离不惩罚（命中率只受 tracking 影响），所以近距几档必须采样，
+                # 否则长射程弹（如 Radio L，optimal ~94 km）会把「典型几何」全部拉到远距。
+                grid = [0.0, 0.25 * optimal, 0.5 * optimal, optimal]
                 for step in (0.5, 1.0, 2.0, 3.0):
                     grid.append(optimal + step * falloff)
                 return [units.fmt(max(0.0, value)) for value in grid]
@@ -1115,4 +1124,272 @@ def explain_anchor(
             "伤害构成取引擎 uniform 剖面之外的**实际武器四系占比**；"
             "若攻方有 unsupported 武器，覆盖率会 < 1",
         ],
+    }
+
+
+# =============================================================================
+# 编队聚合（P6-B4）：同型 fit × 数量 —— 只做量级估计，不做精确对拍
+# =============================================================================
+
+FLEET_NOTE: str = (
+    "same_fit_x_count：同型 fit × 数量，**非个体配装**。真实编队里 8 条船不可能完全同型；"
+    "本结果是量级估计（order-of-magnitude），**不可用于精确对拍**。"
+)
+"""编队口径的强制声明（每个 `fleet_*` 响应都会带 `fleet_assumption: true` + 这段文字）。"""
+
+MAGNITUDE_TOLERANCE: float = 10.0
+"""「同数量级」判据：预测/观察 落在 [1/10, 10] 内。这只是量级校验，不是对拍。"""
+
+
+def fleet_from_killmail(attackers: Mapping, template_ctx) -> dict:
+    """从战报 `attackers.by_ship_group` 里取「与模板同 group」的舰船数量。
+
+    **数量只能来自战报事实**——不手填、不猜。模板（`template_ctx`）是「从另一条战报借来
+    的同型配装」，本函数只负责把 KM 的编队计数与它的 ship group 对上。
+
+    Args:
+        attackers: `fit_killmail(...)["attackers"]` 原样传入。
+        template_ctx: 代表该型舰的 `ViewContext`（必须与战报里的 group 同名）。
+
+    Raises:
+        ValueError: 战报里没有该 group（或计数为 0）——宁可炸，也不编一个数。
+    """
+    group = _ship_block(template_ctx).get("group")
+    if not group:
+        raise ValueError("模板配装没有 ship group（索引库缺失？），无法与战报编队对齐")
+    groups = attackers.get("by_ship_group") if isinstance(attackers, Mapping) else None
+    if not groups:
+        raise ValueError("attackers 里没有 by_ship_group（ESI 规格变了？），不能猜数量")
+
+    matches = [entry for entry in groups if entry.get("group") == group]
+    if not matches:
+        raise ValueError(
+            f"战报里没有 {group!r} 这个 ship group（实际：{[g.get('group') for g in groups]}）"
+        )
+    count = sum(int(entry.get("count") or 0) for entry in matches)
+    if count <= 0:
+        raise ValueError(f"{group!r} 的编队计数为 {count}，不能作为数量")
+
+    return {
+        "group": group,
+        "count": count,
+        "damage_pct": units.fmt(sum(float(entry.get("damage_pct") or 0.0) for entry in matches), 6),
+        "source": "killmail.attackers.by_ship_group",
+        "matched_groups": [entry.get("group") for entry in matches],
+    }
+
+
+def fleet_engagement(
+    attacker_ctx,
+    defender_ctx,
+    *,
+    count: int | None = None,
+    killmail_attackers: Mapping | None = None,
+    range_m: float,
+    angular_vel: float = 0.0,
+    target_velocity: float = 0.0,
+    window_s: float | None = None,
+    observed_hp: float | None = None,
+    include_wrecking: bool = True,
+) -> dict:
+    """编队聚合：`count` 条**同型**船一起打同一个目标。
+
+    数量来源二选一（必须给且只给一个）：
+    - `count`：调用方给（例如已用 `fleet_from_killmail` 取过）；
+    - `killmail_attackers`：直接传 `fit_killmail(...)["attackers"]`，内部按模板 group 取计数。
+
+    线性叠加：编队有效 DPS = 单船有效 DPS × count（同型、同距离、同角速度、无 ewar 叠加）。
+    这条假设和「同型」一样是**量级级**的，响应里有 `fleet_assumption: true`。
+    """
+    if (count is None) == (killmail_attackers is None):
+        raise ValueError("必须且只能给 count / killmail_attackers 其中一个（数量不得编造）")
+    if killmail_attackers is not None:
+        derived = fleet_from_killmail(killmail_attackers, attacker_ctx)
+        count = derived["count"]
+        count_source = derived
+    else:
+        count = int(count)
+        if count <= 0:
+            raise ValueError(f"count 必须是正整数，收到 {count!r}")
+        count_source = {"source": "caller", "count": count}
+
+    single = engagement(
+        attacker_ctx, defender_ctx, range_m=range_m, angular_vel=angular_vel,
+        target_velocity=target_velocity, include_wrecking=include_wrecking,
+    )
+    single_dps = single["totals"]["effective_dps"]
+    fleet_dps = single_dps * count
+    survival = single["defender_survival"]
+    ehp = survival["ehp"]["value"]
+    ttk = units.fmt(ehp / fleet_dps) if (ehp and fleet_dps > 0) else None
+
+    window_block = None
+    if window_s is not None:
+        weights = _damage_weights(single["totals"]["damage_split"])
+        layers = _defender_layers(defender_ctx)
+        removed, detail = _apply_damage(fleet_dps * window_s, weights, layers)
+        window_block = {
+            "window_s": units.fmt(window_s),
+            "hp_removed": units.fmt(removed),
+            "raw_damage": units.fmt(fleet_dps * window_s),
+            "layers": detail,
+        }
+        if observed_hp is not None:
+            window_block["magnitude"] = magnitude_check(removed, observed_hp)
+
+    return {
+        "kind": "fleet_engagement",
+        "fleet_assumption": True,
+        "fleet_note": FLEET_NOTE,
+        "count": count,
+        "count_source": count_source,
+        "attacker": {"label": _ship_label(attacker_ctx), "ship": _ship_block(attacker_ctx)},
+        "defender": {"label": _ship_label(defender_ctx), "ship": _ship_block(defender_ctx)},
+        "inputs": {
+            "range_m": units.fmt(range_m),
+            "angular_vel": units.fmt(angular_vel, 6),
+            "target_velocity": units.fmt(target_velocity),
+            "include_wrecking": bool(include_wrecking),
+        },
+        "single": {
+            "effective_dps": single_dps,
+            "nominal_dps": single["totals"]["nominal_dps"],
+            "coverage": single["totals"]["coverage"],
+            "weighted_chance_to_hit": single["totals"]["weighted_chance_to_hit"],
+            "damage_split": single["totals"]["damage_split"],
+        },
+        "totals": {
+            "fleet_nominal_dps": units.fmt(single["totals"]["nominal_dps"] * count),
+            "fleet_effective_dps": units.fmt(fleet_dps),
+            "coverage": single["totals"]["coverage"],
+        },
+        "defender_survival": {
+            "hp_pool": survival["hp_pool"],
+            "ehp": survival["ehp"],
+            "time_to_kill_s": {
+                "value": ttk,
+                "method": "ehp / (单船有效 DPS × count)",
+                "fleet_assumption": True,
+            },
+        },
+        "window": window_block,
+        "flags": list(single["flags"]) + ["fleet_assumption", "order_of_magnitude_only"],
+    }
+
+
+def magnitude_check(predicted_hp: float, observed_hp: float,
+                    *, tolerance: float = MAGNITUDE_TOLERANCE) -> dict:
+    """量级校验（**不是**对拍）：预测/观察是否落在同一个数量级。
+
+    编队结果是「同型 × 数量」的量级估计，拿去和战报做精确对拍是错的用法；
+    这里只回答「同量级 / 差几个数量级」。
+    """
+    if observed_hp is None or observed_hp <= 0:
+        return {"verdict": "invalid", "reason": "observed_hp 必须为正数"}
+    ratio = float(predicted_hp) / float(observed_hp)
+    if 1.0 / tolerance <= ratio <= tolerance:
+        verdict = "same_order"
+    elif ratio > tolerance:
+        verdict = f"predicted_high_x{ratio:.1f}"
+    else:
+        verdict = f"predicted_low_x{(1.0 / ratio) if ratio > 0 else float('inf'):.1f}"
+    return {
+        "predicted_hp": units.fmt(predicted_hp),
+        "observed_hp": units.fmt(observed_hp),
+        "ratio": units.fmt(ratio),
+        "tolerance": tolerance,
+        "verdict": verdict,
+        "note": "量级校验：编队是「同型 × 数量」的估计，不做精确对拍",
+    }
+
+
+def fleet_size_for_damage(
+    attacker_ctx,
+    defender_ctx,
+    *,
+    observed_hp: float,
+    window_s: float,
+    ranges_m: list[float] | tuple[float, ...] | None = None,
+    angulars: list[float] | tuple[float, ...] | None = None,
+    target_velocity: float = 0.0,
+    include_wrecking: bool = True,
+) -> dict:
+    """**反向用法**：已知「实际打了 X 点血、用了 Y 秒」，反推需要几条同型船。
+
+    给的是**区间**不是单点：交战几何（距离/角速度）未知，所以取
+    「最有利几何」→ 最少条数、「最不利几何」→ 最多条数。两端都带各自的几何参数，
+    调用方自己判断哪端更可信。
+
+    Returns:
+        `count_range` / `best_case` / `worst_case` / `assumptions`。
+    """
+    ranges = list(ranges_m) if ranges_m is not None else _default_ranges(attacker_ctx)
+    angles = list(angulars) if angulars is not None else list(DEFAULT_ANGLES)
+    layers = _defender_layers(defender_ctx)
+
+    cells: list[dict] = []
+    for range_m in ranges:
+        for angular_vel in angles:
+            single = engagement(
+                attacker_ctx, defender_ctx, range_m=range_m, angular_vel=angular_vel,
+                target_velocity=target_velocity, include_wrecking=include_wrecking,
+            )
+            raw_dps = single["totals"]["effective_dps"]
+            weights = _damage_weights(single["totals"]["damage_split"])
+            hp_dps = _apply_damage(raw_dps, weights, layers)[0]
+            cells.append({
+                "range_m": units.fmt(range_m),
+                "angular_vel": units.fmt(angular_vel, 6),
+                "single_hp_dps": units.fmt(hp_dps),
+            })
+
+    feasible = [cell for cell in cells if cell["single_hp_dps"] > 0.0]
+    if not feasible:
+        return {
+            "kind": "fleet_size_for_damage",
+            "observed_hp": units.fmt(observed_hp),
+            "window_s": units.fmt(window_s),
+            "count_range": None,
+            "reasons": ["所有几何下单船扣血速率都是 0（无武器 / 超出射程）"],
+        }
+
+    ordered = sorted(feasible, key=lambda cell: cell["single_hp_dps"], reverse=True)
+    best = ordered[0]
+    worst = ordered[-1]
+    median = ordered[len(ordered) // 2]
+
+    def needed(cell: dict) -> int:
+        capacity = cell["single_hp_dps"] * window_s
+        return max(1, math.ceil(observed_hp / capacity)) if capacity > 0 else 0
+
+    n_min = needed(best)
+    n_median = needed(median)
+    n_max = needed(worst)
+    # 最不利几何常常是「几乎打不中」的远距/高角速度格，条数会被拉到几万——
+    # 那不是有用信息。这里显式标出来，并多给一档「典型几何（中位数）」。
+    degenerate_upper = n_max > 10 * max(n_min, 1)
+
+    return {
+        "kind": "fleet_size_for_damage",
+        "fleet_assumption": True,
+        "fleet_note": FLEET_NOTE,
+        "observed_hp": units.fmt(observed_hp),
+        "window_s": units.fmt(window_s),
+        "count_range": [n_min, n_max],
+        "count_range_practical": [n_min, n_median],
+        "degenerate_upper": degenerate_upper,
+        "best_case": {**best, "needed_count": n_min},
+        "median_case": {**median, "needed_count": n_median},
+        "worst_case": {**worst, "needed_count": n_max},
+        "cell_count": len(cells),
+        "assumptions": {
+            "same_fit": "同型 × 数量，非个体配装",
+            "geometry": "距离/角速度未知 → 用最有利/中位/最不利三档给区间",
+            "linear": "编队 DPS 线性叠加，无 ewar/后勤",
+            "target_velocity": units.fmt(target_velocity),
+            "degenerate_upper_note": (
+                "最不利几何下几乎打不中，上界会被放大；实务请优先看 count_range_practical"
+                if degenerate_upper else None
+            ),
+        },
     }
