@@ -129,3 +129,27 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 | 节点时一坨红，分不清谁的责任 | 节点报告里先跑一次 `pytest -q --tb=no` 拿失败清单，再按文件属主分组 |
 | 员工自测「只跑自己的」漏了共享 fixture | 共享 fixture 变更必须广播（`tests/fixtures/**` 归 Lead） |
 
+## 六、禁用 SFTP 工具（2026-10-20，主人指示）
+
+**禁止使用任何 `sftp_*` 工具**（`sftp_upload_dir` / `sftp_download_dir` / `sftp_list` /
+`sftp_read` / `sftp_write` / `sftp_mkdir` / `sftp_rename` / `sftp_delete`）。
+
+**原因**：在 NAS（UGREEN DXP4800P + 大文件 + 链路抖动）上反复卡死，表现为**调用不返回**
+（不是报错）。已发生至少三次，每次都白等数分钟并打乱并行节奏。
+
+### 替代方案（按优先级）
+
+| 需求 | 用这个 |
+|---|---|
+| 把代码送到 NAS | **GitHub 中转**：本地 push → NAS `git fetch/reset`（`docker/redeploy.sh` 已内置） |
+| 把单个文件送到 NAS | 传 GitHub Release 资产 → NAS `curl -L` 下载（索引库 14 MB 就是这么过去的） |
+| 看 NAS 上的文件 | `ssh_exec` 里 `cat` / `sed -n` / `head` / `grep` |
+| 改 NAS 上的文件 | `ssh_exec` 里 `sed -i` / 重定向；大改用 Git 中转 |
+| 大文件在 NAS 内部搬 | `ssh_exec` 里的 `cp` / `mv` / `rsync`（本地局域网内的 shell 命令，不走 SFTP 协议） |
+
+### 判定
+
+- 调用**超时/无返回** → 立刻换方案，**不要重试第二次**
+- 不确定要传什么 → 先 `git status` + `git diff --stat` 看清楚，多数情况根本不用传文件
+
+
