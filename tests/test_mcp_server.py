@@ -1832,3 +1832,80 @@ def test_zkb_related_cannot_be_injected() -> None:
     spec = _tool_spec("zkb_related")["inputSchema"]
     for name in ("requester", "clock", "sleeper"):
         assert name not in spec["properties"], f"{name} 不该出现在协议表面"
+
+
+# -----------------------------------------------------------------------------
+# 「任意域名的 related 链接都能吃，但数据源始终是 zkillboard」
+#
+# 主人实测 `https://br.evetools.org/related/30004614/202609091400` 直接可用，裁定
+# **不加数据源、不改代码**，只把这个事实写进说明。代码本就是「只解析路径」，所以这里
+# 钉的是**说明**与**行为**两件事，缺一不可（说明漏了，agent 会以为只认 zkillboard 域名；
+# 行为变了，说明就成了假话）。
+# -----------------------------------------------------------------------------
+
+
+def test_zkb_related_description_allows_any_domain_but_zkillboard_source() -> None:
+    """description 必须同时说清两件事：**域名不限** 与 **数据源始终是 zkillboard**。"""
+    description = _tool_spec("zkb_related")["description"]
+    assert "任意域名" in description, (
+        "必须写明域名不限，否则 agent 会以为只吃 zkillboard.com 的链接"
+    )
+    assert "数据源始终是 zkillboard" in description, (
+        "必须写明数据源仍是 zkillboard —— 否则会被读成「从 evetools 取数」"
+    )
+    assert "不是那个域名的数据" in description, "反面也要写清：返回的不是那个域名的数据"
+    # 三个真实域名举例，以及「12 位」这个硬格式
+    for token in ("zkillboard", "br.evetools", "kb.evetools"):
+        assert token in description, f"description 里应举到 {token}"
+    assert "12 位" in description and "YYYYMMDDHHMM" in description
+
+
+def test_zkb_related_any_domain_guard_is_not_vacuous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**配对证明**：把那两句从 description 里删掉，上一条必须不成立。
+
+    打桩在 `_TOOL_DESCRIPTIONS` 上并清掉 `_SPECS_CACHE` —— 同一份代码、同一个取值路径，
+    只少了两句话，所以它证明的是「断言真的依赖这两句」，不是「恰好命中了」。
+    """
+    title, description = mcp_server._TOOL_DESCRIPTIONS["zkb_related"]
+    stripped = description.replace("任意域名", "").replace("数据源始终是 zkillboard", "")
+    assert stripped != description, "打桩没起作用：这两句压根不在 description 里"
+    monkeypatch.setitem(mcp_server._TOOL_DESCRIPTIONS, "zkb_related", (title, stripped))
+    monkeypatch.setattr(mcp_server, "_SPECS_CACHE", None)
+
+    degraded = _tool_spec("zkb_related")["description"]
+    assert "任意域名" not in degraded
+    assert "数据源始终是 zkillboard" not in degraded
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://br.evetools.org/related/30004614/202609091400",
+        "https://kb.evetools.org/related/30004614/202609091400/",
+        "https://zkillboard.com/related/30004614/202609091400/?page=1",
+    ),
+)
+def test_zkb_related_accepts_third_party_hosts_but_calls_zkillboard(
+    related_offline: list[str], url: str
+) -> None:
+    """第三方域名的 related 链接**直接可用**，且请求永远发到 zkillboard（行为侧的非永真）。"""
+    call_result = _call("zkb_related", {"url": url})
+    assert call_result.get("isError") is not True, call_result
+    assert _envelope(call_result)["ok"] is True
+    assert related_offline == [
+        "https://zkillboard.com/api/related/30004614/202609091400/"
+    ], f"第三方域名不该改变请求目标，实际请求了 {related_offline}"
+
+
+def test_zkb_related_rejects_a_foreign_path(related_offline: list[str]) -> None:
+    """「域名随便」**不等于**「路径随便」：第三方域名 + 非 related 路径仍要 `invalid_argument`。"""
+    call_result = _call(
+        "zkb_related", {"url": "https://br.evetools.org/kill/139275237/"}
+    )
+    assert call_result.get("isError") is True
+    envelope = _envelope(call_result)
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["field"] == "url"
+    assert related_offline == [], "路径不对不该发请求"

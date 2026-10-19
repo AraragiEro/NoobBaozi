@@ -979,12 +979,30 @@ duration_s=None, points=6)`。**`distance_m` 必填** —— 距离与角速度�
 
 | 给法 | 例子 |
 |---|---|
-| `url`（首选） | `https://zkillboard.com/related/30004614/202609091400/`（也认 `/api/related/…`；查询串会被忽略） |
+| `url`（首选） | `https://zkillboard.com/related/30004614/202609091400/`（**域名不限**，见下节；查询串会被忽略） |
 | `system` + `time` | `system="AV-VB6"`（名字或 id）+ `time="202609091400"` |
 
 > `time` **只认 12 位** `YYYYMMDDHHMM`。`2026-09-09 14:00` / 10 位 / 13 位一律
 > `invalid_argument`（`field: "time"`）—— **不做宽松解析**：把「我猜你是 14 点」当成
 > 用户意图，比直接报错危险得多。
+
+#### 接受的链接形态（**域名不限**）
+
+工具只从**路径**里取两个参数：`/related/<systemID>/<12 位时间戳>`。**host 是什么不影响结果**，
+所以第三方战报站（evetools 系）的 related 链接可以**直接**贴进来。
+
+| 输入 | 结果 |
+|---|---|
+| `https://zkillboard.com/related/30004614/202609091400/` | ✅ |
+| `https://br.evetools.org/related/30004614/202609091400` | ✅（无尾斜杠也认） |
+| `https://kb.evetools.org/related/31001152/202010250400/` | ✅ |
+| `…/related/30004614/202609091400/?page=1`（带查询串） | ✅ 查询串被**忽略** |
+| 非 `/related/<id>/<12 位>` 形态（如 `/kill/139275237/`） | ❌ `invalid_argument`（`field: "url"`） |
+
+> **数据源始终是 zkillboard；第三方站点的域名只用于提供 `systemID` + 时间戳。**
+> 换句话说：`br.evetools.org/related/…` 只是「换了个地方贴同一组参数」，返回的战况
+> **不是**从那个域名取的。（实测：任意 host 都会被接受，包括 `localhost` —— 因为我们
+> 根本不读 host；请求永远发到 `zkillboard.com/api/related/<systemID>/<时间戳>/`。）
 
 **返回是摘要，不是原响应的转储**。原始响应实测 **212 KB**（AV-VB6 / Fountain，23v23），
 摘要约 **4–5 KB**：

@@ -880,7 +880,10 @@ _TOOL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
         "kills 明细）与 **killmail_ids**（每边给全，可直接丢给 fit_killmail 深挖）。"
         "**这是唯一能查任意历史窗口的入口**：列表接口的 startTime/endTime 已被 zkb 停用，"
         "而 related 把时间放在路径里。"
-        "限制：time 固定 12 位 YYYYMMDDHHMM（202609091400），不做宽松解析；"
+        "url 认**任意域名**的 /related/<systemID>/<12 位时间戳>（zkillboard / br.evetools / "
+        "kb.evetools 都行，无尾斜杠也认）：只取路径两个参数，"
+        "**数据源始终是 zkillboard**（不是那个域名的数据）。"
+        "限制：时间戳固定 12 位 YYYYMMDDHHMM（202609091400），不做宽松解析；"
         "exHours 是**窗口半径**、窗口不对称、不等于整场战斗；complete 只是 zkb 的判断；"
         "相邻星系不包含；逐 kill 明细按 limit 截断（killmail_ids 不受它限制）。",
     ),
