@@ -86,9 +86,13 @@ __all__ = [
     "PERFECT_APPLICATION",
     "TOLERANCE_REL",
     "TURRET_SIGNATURE_RESOLUTION",
+    "damage_window",
     "engagement",
     "exchange",
+    "explain_anchor",
     "missile_application_factor",
+    "sweep",
+    "timeline",
     "turret_chance_to_hit",
     "turret_damage_multiplier",
 ]
@@ -112,12 +116,11 @@ TOLERANCE_REL: float = 1e-6
 """与 pyfa 对拍的相对容差（实测公式层差 < 1e-15，留 1e-6 给浮点与版本差异）。"""
 
 ATTR_AOE_DAMAGE_REDUCTION_FACTOR_NAME: str = "aoeDamageReductionFactor"
-"""导弹 DRF 的 **SDE 属性名**。
+"""导弹 DRF 的 **SDE 属性名**（只用于文档与交叉核对；取值走常量表
+`A.ATTR_AOE_DAMAGE_REDUCTION_FACTOR`）。
 
-为什么不写死 ID：项目红线 N12 要求属性 ID 只出现在 `config/attributes.py`，而
-`aoeDamageReductionFactor`（SDE 里是 1353）**尚未登记**进那张表，本模块的写入范围
-也不包含它。所以运行时按名字在 SDE 里反查（读的是同一份索引库，不是猜），
-等 Lead 把常量补进 `config/attributes.py` 后再改成 import。
+P6-B2 时该常量还没登记，本模块曾按名字在 SDE 里反查；Lead 已在
+`config/attributes.py` 登记 1353，现在直接 import 常量（见 `_fill_missile`）。
 """
 
 SWEEP = "sweep"
@@ -411,9 +414,7 @@ def _fill_missile(ctx, entry: dict, raw_attrs: dict[int, float],
     entry["inputs"] = {
         "explosion_radius_m": _raw_attr(charge_attrs, A.ATTR_AOE_CLOUD_SIZE),
         "explosion_velocity_mps": _raw_attr(charge_attrs, A.ATTR_AOE_VELOCITY),
-        "damage_reduction_factor": _attr_value_by_name(
-            ctx, charge_attrs, ATTR_AOE_DAMAGE_REDUCTION_FACTOR_NAME
-        ),
+        "damage_reduction_factor": _raw_attr(charge_attrs, A.ATTR_AOE_DAMAGE_REDUCTION_FACTOR),
         "missile_range_m": _missile_range_m(raw_attrs, charge_attrs),
     }
     entry["_profile"] = (
@@ -422,22 +423,6 @@ def _fill_missile(ctx, entry: dict, raw_attrs: dict[int, float],
         entry["inputs"]["damage_reduction_factor"],
         entry["inputs"]["missile_range_m"],
     )
-
-
-def _attr_value_by_name(ctx, attrs: Mapping[int, float], name: str) -> float | None:
-    """按 **SDE 属性名**在给定属性字典里找一个值（不写死 ID，见常量注释）。
-
-    只用来取 `aoeDamageReductionFactor` 这种「SDE 有、但常量表还没登记」的属性；
-    一个弹匣只有十几个属性，逐个 `Index.attribute()` 查名字的成本可忽略（且有索引缓存）。
-    """
-    index = getattr(ctx, "index", None)
-    if index is None:
-        return None
-    for attribute_id, value in attrs.items():
-        row = index.attribute(int(attribute_id))
-        if row is not None and row.get("name") == name:
-            return float(value)
-    return None
 
 
 def _missile_range_m(raw_attrs: dict[int, float], charge_attrs: dict[int, float]) -> float | None:
@@ -732,7 +717,402 @@ def exchange(
             "faster": (
                 None if ratio is None else ("a" if ratio < 1.0 else "b" if ratio > 1.0 else "even")
             ),
+            "first_to_die": _first_to_die(a_ttk, b_ttk),
             "note": "ratio = A 击穿 B 所需时间 ÷ B 击穿 A 所需时间；<1 表示 A 先打穿。"
-                    "这是纯 DPS 竞速，不含电容/距离控制/后勤。",
+                    "first_to_die 由「谁的时间更短」决定（不含电容/距离控制/后勤）。",
         },
+    }
+
+
+def _first_to_die(a_ttk: float | None, b_ttk: float | None) -> str | None:
+    """谁先死：`a_time_to_kill_s` 是 A 打死 B 的时间（B 先死），反之亦然。"""
+    if a_ttk is None or b_ttk is None:
+        return None
+    if a_ttk < b_ttk:
+        return "b"
+    if b_ttk < a_ttk:
+        return "a"
+    return "even"
+
+
+# =============================================================================
+# 场景扫描 / 时间线 / 战报锚点（P6-B3）
+# =============================================================================
+
+DEFAULT_ANGLES: tuple[float, ...] = (0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3)
+"""默认角速度采样（rad/s）。0 是乐观上界；0.3 是「近距高速绕圈」的极端。"""
+
+LAYER_RESONANCES: tuple[tuple[str, int, tuple[int, int, int, int]], ...] = (
+    ("shield", A.ATTR_SHIELD_CAPACITY,
+     (A.ATTR_SHIELD_EM_RESONANCE, A.ATTR_SHIELD_EXPLOSIVE_RESONANCE,
+      A.ATTR_SHIELD_KINETIC_RESONANCE, A.ATTR_SHIELD_THERMAL_RESONANCE)),
+    ("armor", A.ATTR_ARMOR_HP,
+     (A.ATTR_ARMOR_EM_RESONANCE, A.ATTR_ARMOR_EXPLOSIVE_RESONANCE,
+      A.ATTR_ARMOR_KINETIC_RESONANCE, A.ATTR_ARMOR_THERMAL_RESONANCE)),
+    ("hull", A.ATTR_HULL_HP,
+     (A.ATTR_HULL_EM_RESONANCE, A.ATTR_HULL_EXPLOSIVE_RESONANCE,
+      A.ATTR_HULL_KINETIC_RESONANCE, A.ATTR_HULL_THERMAL_RESONANCE)),
+)
+"""三层 HP 与四系共振率（顺序与 `shared.DAMAGE_TYPES` 一致：em/explosive/kinetic/thermal）。
+
+**共振率是「承伤系数」不是「抗性百分比」**（0.875 = 承受 87.5%）。所以
+「打掉 H 点该层血」需要的**原始伤害** = H ÷ 加权共振率。
+这条是 P6-B1 锚点核算的同一个模型（damage_taken 是扣掉的血）。
+"""
+
+
+def _damage_weights(split: Mapping[str, float] | None) -> tuple[float, ...]:
+    """伤害占比 → 四元组（顺序同 DAMAGE_TYPES）；缺省按均匀剖面。"""
+    names = [name for name, _attribute_id in shared.DAMAGE_TYPES]
+    if not split:
+        return (0.25, 0.25, 0.25, 0.25)
+    total = sum(split.get(name, 0.0) for name in names)
+    if total <= 0.0:
+        return (0.25, 0.25, 0.25, 0.25)
+    return tuple(split.get(name, 0.0) / total for name in names)
+
+
+def _weighted_resonance(resonances: tuple[float, ...], weights: tuple[float, ...]) -> float:
+    """该层对当前伤害构成的**等效承伤系数** Σ(wᵢ × rᵢ)。"""
+    return sum(weight * resonance for weight, resonance in zip(weights, resonances))
+
+
+def _defender_layers(ctx) -> list[dict]:
+    """守方三层：`{name, hp, resonances}`（缺层跳过，不补 0）。"""
+    ship = _raw_ship_attrs(ctx)
+    layers: list[dict] = []
+    for name, hp_attribute, resonance_attributes in LAYER_RESONANCES:
+        hp = ship.get(hp_attribute) or 0.0
+        if hp <= 0.0:
+            continue
+        layers.append({
+            "name": name,
+            "hp": float(hp),
+            "resonances": tuple(ship.get(attribute_id, 1.0) for attribute_id in resonance_attributes),
+        })
+    return layers
+
+
+def _apply_damage(raw_damage: float, weights: tuple[float, ...],
+                  layers: list[dict]) -> tuple[float, list[dict]]:
+    """把一段**原始伤害**按层灌进去，返回（实际扣血, 分层明细）。
+
+    顺序：护盾 → 装甲 → 结构；每层「打掉 H 点血」消耗 `H ÷ 等效承伤系数` 的原始伤害。
+    这是「战报 damage_taken」的同量纲模型（不含护盾被动回充/遥修/电容）。
+    """
+    remaining_raw = max(0.0, float(raw_damage))
+    removed_hp = 0.0
+    detail: list[dict] = []
+    for layer in layers:
+        resonance = _weighted_resonance(layer["resonances"], weights)
+        if resonance <= 0.0:
+            detail.append({"layer": layer["name"], "hp_before": layer["hp"],
+                           "hp_removed": 0.0, "note": "resonance<=0: 该伤害构成打不动这一层"})
+            continue
+        raw_for_layer = layer["hp"] / resonance
+        used = min(remaining_raw, raw_for_layer)
+        removed = used * resonance
+        remaining_raw -= used
+        removed_hp += removed
+        detail.append({"layer": layer["name"], "hp_before": layer["hp"],
+                       "hp_removed": removed, "raw_used": used})
+        if remaining_raw <= 0.0:
+            break
+    return removed_hp, detail
+
+
+def _raw_needed_for_hp(target_hp: float, weights: tuple[float, ...],
+                       layers: list[dict]) -> float | None:
+    """打掉 `target_hp` 点血需要多少**原始伤害**；血池不够返回 `None`。"""
+    remaining = float(target_hp)
+    raw = 0.0
+    for layer in layers:
+        resonance = _weighted_resonance(layer["resonances"], weights)
+        if resonance <= 0.0:
+            return None
+        take = min(remaining, layer["hp"])
+        raw += take / resonance
+        remaining -= take
+        if remaining <= 1e-12:
+            return raw
+    return None
+
+
+def _default_ranges(attacker_ctx) -> list[float]:
+    """按攻方主武器的射程参数生成默认采样距离。"""
+    for entry in _weapon_entries(attacker_ctx):
+        if entry["status"] == "unsupported":
+            continue
+        inputs = entry.get("inputs") or {}
+        if entry["family"] in TURRET_FAMILIES:
+            optimal = float(inputs.get("optimal_m") or 0.0)
+            falloff = float(inputs.get("falloff_m") or 0.0)
+            if optimal > 0.0:
+                grid = [0.5 * optimal, optimal]
+                for step in (0.5, 1.0, 2.0, 3.0):
+                    grid.append(optimal + step * falloff)
+                return [units.fmt(max(0.0, value)) for value in grid]
+        elif entry["family"] == "missile":
+            reach = float(inputs.get("missile_range_m") or 0.0)
+            if reach > 0.0:
+                return [units.fmt(reach * fraction) for fraction in (0.05, 0.25, 0.5, 0.75, 0.9, 1.0)]
+    return [1000.0, 5000.0, 10000.0, 20000.0, 50000.0]
+
+
+def sweep(
+    attacker_ctx,
+    defender_ctx,
+    *,
+    ranges_m: list[float] | tuple[float, ...] | None = None,
+    angulars: list[float] | tuple[float, ...] | None = None,
+    target_velocity: float = 0.0,
+    include_wrecking: bool = True,
+) -> dict:
+    """距离 × 角速度二维扫描（采样曲面）。
+
+    每格只回**四个数**（命中率 / 有效 DPS / 击穿时间 / 覆盖率），不重复整份
+    `engagement` 响应——否则 63 格会变成几千行 JSON，没人看得动。
+    """
+    ranges = list(ranges_m) if ranges_m is not None else _default_ranges(attacker_ctx)
+    angles = list(angulars) if angulars is not None else list(DEFAULT_ANGLES)
+
+    cells: list[dict] = []
+    for range_m in ranges:
+        for angular_vel in angles:
+            result = engagement(
+                attacker_ctx, defender_ctx, range_m=range_m, angular_vel=angular_vel,
+                target_velocity=target_velocity, include_wrecking=include_wrecking,
+            )
+            cells.append({
+                "range_m": units.fmt(range_m),
+                "angular_vel": units.fmt(angular_vel, 6),
+                "chance_to_hit": result["totals"]["weighted_chance_to_hit"],
+                "effective_dps": result["totals"]["effective_dps"],
+                "ttk_s": result["defender_survival"]["time_to_kill_s"]["value"],
+                "coverage": result["totals"]["coverage"],
+            })
+
+    best = max(cells, key=lambda cell: cell["effective_dps"]) if cells else None
+    return {
+        "kind": "sweep",
+        "ranges_m": [units.fmt(value) for value in ranges],
+        "angulars": [units.fmt(value, 6) for value in angles],
+        "shape": [len(ranges), len(angles)],
+        "cells": cells,
+        "best": best,
+        "assumptions": {
+            "sampled": True,
+            "target_velocity": units.fmt(target_velocity),
+            "wrecking": "included" if include_wrecking else "normalized_to_paper",
+        },
+    }
+
+
+def timeline(
+    a_ctx,
+    b_ctx,
+    *,
+    range_m: float,
+    angular_vel: float = 0.0,
+    duration_s: float | None = None,
+    points: int = 6,
+    include_wrecking: bool = True,
+) -> dict:
+    """一次战斗的简化时间线：双方同时开火、无外部干扰、按有效 DPS 线性扣血。
+
+    「剩余血」用 **EHP 口径**（与击穿时间一致：原始伤害 / 原始承伤能力）；
+    同时给 `hp_fraction` 与等效 `hp_pool` 剩余量，方便与战报 `damage_taken` 对照。
+    """
+    if points < 2:
+        raise ValueError(f"points 至少 2，收到 {points!r}")
+
+    battle = exchange(a_ctx, b_ctx, range_m=range_m, angular_vel=angular_vel,
+                      include_wrecking=include_wrecking)
+    a_dps = battle["a_on_b"]["totals"]["effective_dps"]
+    b_dps = battle["b_on_a"]["totals"]["effective_dps"]
+    b_survival = battle["a_on_b"]["defender_survival"]
+    a_survival = battle["b_on_a"]["defender_survival"]
+    a_ehp = a_survival["ehp"]["value"] or 0.0
+    b_ehp = b_survival["ehp"]["value"] or 0.0
+    # 死亡时刻用「EHP ÷ 有效 DPS」的**全精度**值（`time_to_kill_s` 是 3 位小数，
+    # 直接拿它当时间线终点会在最后一格留下 0.05 点残血，看着像 bug）。
+    b_ttk = units.fmt(b_ehp / a_dps) if (a_dps > 0.0 and b_ehp > 0.0) else None  # A 打死 B
+    a_ttk = units.fmt(a_ehp / b_dps) if (b_dps > 0.0 and a_ehp > 0.0) else None  # B 打死 A
+    b_death = b_ehp / a_dps if (a_dps > 0.0 and b_ehp > 0.0) else None
+    a_death = a_ehp / b_dps if (b_dps > 0.0 and a_ehp > 0.0) else None
+
+    candidates = [value for value in (a_death, b_death) if value is not None]
+    horizon = duration_s if duration_s is not None else (max(candidates) if candidates else 60.0)
+    horizon = max(float(horizon), 1e-9)
+
+    samples: list[dict] = []
+    for index in range(points):
+        t = horizon * index / (points - 1)
+        b_remaining = max(0.0, b_ehp - a_dps * t)
+        a_remaining = max(0.0, a_ehp - b_dps * t)
+        samples.append({
+            "t_s": units.fmt(t),
+            "a_remaining_ehp": units.fmt(a_remaining),
+            "b_remaining_ehp": units.fmt(b_remaining),
+            "a_hp_fraction": units.fmt(a_remaining / a_ehp, 6) if a_ehp else None,
+            "b_hp_fraction": units.fmt(b_remaining / b_ehp, 6) if b_ehp else None,
+            "a_hp_pool_remaining": units.fmt(a_remaining / a_ehp * (a_survival["hp_pool"]["value"] or 0.0))
+            if a_ehp else None,
+            "b_hp_pool_remaining": units.fmt(b_remaining / b_ehp * (b_survival["hp_pool"]["value"] or 0.0))
+            if b_ehp else None,
+        })
+
+    return {
+        "kind": "timeline",
+        "inputs": {
+            "range_m": units.fmt(range_m),
+            "angular_vel": units.fmt(angular_vel, 6),
+            "horizon_s": units.fmt(horizon),
+            "include_wrecking": bool(include_wrecking),
+        },
+        "rates": {
+            "a_dps_on_b": a_dps,
+            "b_dps_on_a": b_dps,
+        },
+        "endpoints": {
+            "a_dies_at_s": a_ttk,
+            "b_dies_at_s": b_ttk,
+            "first_to_die": _first_to_die(b_ttk, a_ttk),
+        },
+        "samples": samples,
+        "assumptions": {
+            "model": "linear_depletion（双方同时开火、无遥修/无电容/无跑位）",
+            "ehp_profile": "uniform（引擎 -43）",
+            "hp_pool_equivalent": "按 EHP 比例折算到 raw HP 池，仅用于和战报对拍",
+        },
+    }
+
+
+def damage_window(
+    attacker_ctx,
+    defender_ctx,
+    *,
+    window_s: float,
+    range_m: float,
+    angular_vel: float = 0.0,
+    target_velocity: float = 0.0,
+    include_wrecking: bool = True,
+) -> dict:
+    """在 `window_s` 秒里能打掉守方多少**血**（战报 `damage_taken` 同量纲）。
+
+    先用 `engagement` 拿原始有效 DPS 与伤害构成，再按层「原始伤害 ÷ 等效承伤系数」
+    换成实际扣血——这一步就是 P6-B1 锚点核算用的同一个模型。
+    """
+    result = engagement(
+        attacker_ctx, defender_ctx, range_m=range_m, angular_vel=angular_vel,
+        target_velocity=target_velocity, include_wrecking=include_wrecking,
+    )
+    raw_dps = result["totals"]["effective_dps"]
+    weights = _damage_weights(result["totals"]["damage_split"])
+    layers = _defender_layers(defender_ctx)
+    raw_total = raw_dps * window_s
+    removed, detail = _apply_damage(raw_total, weights, layers)
+    return {
+        "kind": "damage_window",
+        "window_s": units.fmt(window_s),
+        "range_m": units.fmt(range_m),
+        "angular_vel": units.fmt(angular_vel, 6),
+        "raw_dps": raw_dps,
+        "raw_damage": units.fmt(raw_total),
+        "hp_removed": units.fmt(removed),
+        "hp_dps": units.fmt(removed / window_s) if window_s > 0 else None,
+        "damage_split": result["totals"]["damage_split"],
+        "layers": detail,
+        "coverage": result["totals"]["coverage"],
+    }
+
+
+def explain_anchor(
+    attacker_ctx,
+    defender_ctx,
+    *,
+    observed_hp: float,
+    window_s: float,
+    ranges_m: list[float] | tuple[float, ...] | None = None,
+    angulars: list[float] | tuple[float, ...] | None = None,
+    target_velocity: float = 0.0,
+    include_wrecking: bool = True,
+) -> dict:
+    """战报锚点：模型能否在 `window_s` 内打出 `observed_hp` 点血？在哪些距离/角速度？
+
+    **不做任何拟合**：`range_m` / `angular_vel` 是**扫描变量**，不是用来凑数的参数；
+    结论只回答「存在 / 不存在这样的几何区间」，不存在就如实说不存在并给出最短所需时间。
+
+    Returns:
+        `explainable` / `region`（满足窗口的格子）/ `best`（最短时间的那一格）/
+        `required_hp_dps` / `reasons`（不可解释时的原因）/ `caveats`（永远存在的限制）。
+    """
+    ranges = list(ranges_m) if ranges_m is not None else _default_ranges(attacker_ctx)
+    angles = list(angulars) if angulars is not None else list(DEFAULT_ANGLES)
+    layers = _defender_layers(defender_ctx)
+
+    cells: list[dict] = []
+    for range_m in ranges:
+        for angular_vel in angles:
+            result = engagement(
+                attacker_ctx, defender_ctx, range_m=range_m, angular_vel=angular_vel,
+                target_velocity=target_velocity, include_wrecking=include_wrecking,
+            )
+            raw_dps = result["totals"]["effective_dps"]
+            weights = _damage_weights(result["totals"]["damage_split"])
+            raw_needed = _raw_needed_for_hp(observed_hp, weights, layers)
+            window_needed = None
+            if raw_needed is not None and raw_dps > 0.0:
+                window_needed = raw_needed / raw_dps
+            removed_in_window = _apply_damage(raw_dps * window_s, weights, layers)[0]
+            cells.append({
+                "range_m": units.fmt(range_m),
+                "angular_vel": units.fmt(angular_vel, 6),
+                "raw_dps": raw_dps,
+                "hp_removed_in_window": units.fmt(removed_in_window),
+                "window_needed_s": None if window_needed is None else units.fmt(window_needed),
+                "coverage": result["totals"]["coverage"],
+            })
+
+    region = [cell for cell in cells
+              if cell["window_needed_s"] is not None and cell["window_needed_s"] <= window_s]
+    feasible = [cell for cell in cells if cell["window_needed_s"] is not None]
+    best = min(feasible, key=lambda cell: cell["window_needed_s"]) if feasible else None
+    max_in_window = max((cell["hp_removed_in_window"] for cell in cells), default=0.0)
+
+    reasons: list[str] = []
+    if not region:
+        if best is None:
+            reasons.append("没有可用的有效 DPS（攻方无已建模武器或全部超出射程）")
+        else:
+            reasons.append(
+                f"窗口 {window_s:g}s 内最多只能打掉 {max_in_window:.0f} 点血"
+                f"（需要 {observed_hp:.0f}）；最短需要 {best['window_needed_s']:.1f}s"
+                f"（range={best['range_m']:g} m, angular={best['angular_vel']:g} rad/s）"
+            )
+        reasons.append("本层未建模：护盾被动回充、遥修/后勤、电容、跑位与目标选择")
+        reasons.append("战报的「9 秒」是两次死亡的**间隔**，不一定是交战时长；"
+                       "实际开打时刻不可知")
+
+    return {
+        "kind": "anchor_check",
+        "observed_hp": units.fmt(observed_hp),
+        "window_s": units.fmt(window_s),
+        "required_hp_dps": units.fmt(observed_hp / window_s) if window_s > 0 else None,
+        "explainable": bool(region),
+        "region_count": len(region),
+        "region": region,
+        "best": best,
+        "max_hp_removed_in_window": units.fmt(max_in_window),
+        "grid": {"ranges_m": [units.fmt(v) for v in ranges],
+                 "angulars": [units.fmt(v, 6) for v in angles]},
+        "reasons": reasons,
+        "caveats": [
+            "参数是扫描变量，不是拟合变量：没有为了让锚点对上而调过任何数",
+            "血量口径 = 战报 damage_taken（扣掉的血），不是 EHP",
+            "护盾被动回充与遥修未建模 → 真实战斗里能承受的伤害会更多",
+            "技能档按 all4+min_required 假设（战报不记录技能）",
+            "伤害构成取引擎 uniform 剖面之外的**实际武器四系占比**；"
+            "若攻方有 unsupported 武器，覆盖率会 < 1",
+        ],
     }

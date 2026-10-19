@@ -373,12 +373,15 @@ def test_missile_application_uses_target_speed(missile_ctx, turret_ctx) -> None:
     assert fast_factor >= 0.0
 
 
-def test_missile_drf_is_read_from_sde_by_name(missile_ctx, turret_ctx) -> None:
-    """DRF 不在常量表里，靠 SDE 属性名反查（`aoeDamageReductionFactor`）。
+def test_missile_drf_comes_from_registered_constant(missile_ctx, turret_ctx) -> None:
+    """DRF 走常量表（Lead 已登记 1353），取值必须是弹药上的 0.604。
 
-    Scourge Light Missile 的 DRF = 0.604（EVE Uni DRF 表）。若按名字反查失败，
+    Scourge Light Missile 的 DRF = 0.604（EVE Uni DRF 表）。若常量没登记/读错，
     这里会拿到 None（应用系数退化成 1.0 的「完美」口径），必须红。
     """
+    from noobbaozi.config import attributes as A  # noqa: PLC0415
+
+    assert A.ATTR_AOE_DAMAGE_REDUCTION_FACTOR == 1353
     result = combat.engagement(missile_ctx, turret_ctx, range_m=3000.0, target_velocity=2000.0)
     weapon = result["weapons"][0]
     assert weapon["inputs"]["damage_reduction_factor"] == pytest.approx(0.604, rel=1e-6)
@@ -504,3 +507,162 @@ def test_units_fmt_rejects_nan() -> None:
         from noobbaozi.project import units  # noqa: PLC0415
 
         units.fmt(math.nan)
+
+
+# =============================================================================
+# 9. P6-B3：场景扫描 / 时间线 / 战报锚点（P1 那对真实互杀）
+# =============================================================================
+
+P1_EXEQUROR = (
+    "[Exequror Navy Issue, P1]\n"
+    "Damage Control II\n1600mm Steel Plates II\n"
+    "Magnetic Field Stabilizer II\nMagnetic Field Stabilizer II\nMagnetic Field Stabilizer II\n"
+    "Multispectrum Coating II\n\n"
+    "50MN Y-T8 Compact Microwarpdrive\nWarp Scrambler II\n\n"
+    "Heavy Neutron Blaster II, Void M\nHeavy Neutron Blaster II, Void M\n"
+    "Heavy Neutron Blaster II, Void M\nHeavy Neutron Blaster II, Void M\n"
+)
+"""P1 的攻击方：来自战报 139280812（行为 139280805 的 solo 击杀者）。"""
+
+P1_FLYCATCHER = (
+    "[Flycatcher, P1]\n"
+    "Damage Control II\n\n"
+    "Medium Shield Extender II\nMultispectrum Shield Hardener II\n"
+    "5MN Y-T8 Compact Microwarpdrive\nMedium Shield Extender II\nWarp Scrambler II\n\n"
+    "Interdiction Sphere Launcher I, Warp Disrupt Probe\nSmall Energy Nosferatu II\n\n"
+    "Small Core Defense Field Extender I\nSmall EM Shield Reinforcer II\n"
+)
+"""P1 的守方：来自战报 139280805（damage_taken = 4158，solo 击杀）。"""
+
+P1_DAMAGE_TAKEN = 4158.0
+P1_WINDOW_S = 9.0
+"""两条战报相隔 9 秒（13:36:04 → 13:36:13）。注意：这是**死亡间隔**，不是交战时长。"""
+
+
+@pytest.fixture(scope="module")
+def p1_attacker(engine, index) -> ViewContext:
+    return _ctx(engine, index, P1_EXEQUROR)
+
+
+@pytest.fixture(scope="module")
+def p1_defender(engine, index) -> ViewContext:
+    return _ctx(engine, index, P1_FLYCATCHER)
+
+
+ANCHOR_RANGES = [0.0, 1500.0, 3000.0, 4500.0, 6000.0, 9000.0, 15000.0]
+ANCHOR_ANGLES = [0.0, 0.01, 0.02, 0.05, 0.1, 0.2]
+
+
+def test_sweep_shape_and_angular_monotonicity(p1_attacker, p1_defender) -> None:
+    result = combat.sweep(p1_attacker, p1_defender, ranges_m=ANCHOR_RANGES,
+                          angulars=ANCHOR_ANGLES, target_velocity=224.0)
+    assert result["shape"] == [len(ANCHOR_RANGES), len(ANCHOR_ANGLES)]
+    assert len(result["cells"]) == len(ANCHOR_RANGES) * len(ANCHOR_ANGLES)
+    assert result["best"] is not None
+
+    by_key = {(cell["range_m"], cell["angular_vel"]): cell for cell in result["cells"]}
+    for range_m in ANCHOR_RANGES:
+        still = by_key[(round(range_m, 3), 0.0)]["effective_dps"]
+        fast = by_key[(round(range_m, 3), 0.2)]["effective_dps"]
+        assert still >= fast, f"角速度变大时有效 DPS 不应上升（range={range_m}）"
+
+
+def test_sweep_best_cell_matches_engagement(p1_attacker, p1_defender) -> None:
+    result = combat.sweep(p1_attacker, p1_defender, ranges_m=ANCHOR_RANGES[:4],
+                          angulars=ANCHOR_ANGLES[:4], target_velocity=224.0)
+    best = result["best"]
+    direct = combat.engagement(p1_attacker, p1_defender, range_m=best["range_m"],
+                               angular_vel=best["angular_vel"], target_velocity=224.0)
+    assert best["effective_dps"] == pytest.approx(
+        direct["totals"]["effective_dps"], rel=1e-9
+    )
+
+
+def test_timeline_is_linear_and_consistent(p1_attacker, p1_defender) -> None:
+    result = combat.timeline(p1_attacker, p1_defender, range_m=3000.0,
+                             angular_vel=0.05, points=5)
+    first = result["samples"][0]
+    assert first["t_s"] == 0.0
+    assert first["a_hp_fraction"] == pytest.approx(1.0)
+    assert first["b_hp_fraction"] == pytest.approx(1.0)
+
+    # Flycatcher 没有对敌武器 → 它一定先死，A 不会死
+    assert result["rates"]["b_dps_on_a"] == 0.0
+    assert result["endpoints"]["a_dies_at_s"] is None
+    assert result["endpoints"]["b_dies_at_s"] > 0
+    assert result["endpoints"]["first_to_die"] is None  # 有一方永不死亡
+
+    # 线性扣血：最后一点必须打空守方 EHP
+    last = result["samples"][-1]
+    assert last["b_remaining_ehp"] == pytest.approx(0.0, abs=1e-3)
+    assert last["b_hp_fraction"] == pytest.approx(0.0, abs=1e-6)
+
+    # 单调不增
+    values = [sample["b_remaining_ehp"] for sample in result["samples"]]
+    assert values == sorted(values, reverse=True)
+
+
+def test_damage_window_converts_raw_to_hp(p1_attacker, p1_defender) -> None:
+    window = combat.damage_window(p1_attacker, p1_defender, window_s=P1_WINDOW_S,
+                                  range_m=0.0, angular_vel=0.0, target_velocity=224.0)
+    assert window["raw_damage"] > window["hp_removed"] > 0.0, "抗性/共振率必须让扣血 < 原始伤害"
+    longer = combat.damage_window(p1_attacker, p1_defender, window_s=30.0,
+                                  range_m=0.0, angular_vel=0.0, target_velocity=224.0)
+    assert longer["hp_removed"] > window["hp_removed"]
+    # 扣血不能超过总血池（层模型会在血池耗尽时停手）
+    survival = combat.engagement(p1_attacker, p1_defender, range_m=0.0,
+                                 target_velocity=224.0)["defender_survival"]
+    assert longer["hp_removed"] <= survival["hp_pool"]["value"] + 1e-6
+
+
+def test_p1_anchor_strict_9s_is_not_explainable(p1_attacker, p1_defender) -> None:
+    """硬要求：9 秒内能不能打出 4158 点血？—— **不能**，并给出最短所需时间。
+
+    这不是「模型坏了」：9 秒是两次死亡的间隔，不是交战时长；模型给出的是
+    「若只靠 Exequror 一条船、从零距离静止开打，至少需要 25 秒」。
+    """
+    result = combat.explain_anchor(
+        p1_attacker, p1_defender, observed_hp=P1_DAMAGE_TAKEN, window_s=P1_WINDOW_S,
+        ranges_m=ANCHOR_RANGES, angulars=ANCHOR_ANGLES, target_velocity=224.0,
+    )
+    assert result["explainable"] is False
+    assert result["region_count"] == 0
+    assert result["max_hp_removed_in_window"] < P1_DAMAGE_TAKEN
+    assert result["best"]["window_needed_s"] > P1_WINDOW_S
+    assert result["reasons"], "不可解释时必须给出原因"
+
+    # 最短所需时间 ~25s：与「1500 点/9 秒 → 4158 点需要 ~25 秒」自洽
+    assert 20.0 < result["best"]["window_needed_s"] < 40.0
+    assert result["required_hp_dps"] == pytest.approx(P1_DAMAGE_TAKEN / P1_WINDOW_S, rel=1e-6)
+
+
+def test_p1_anchor_becomes_explainable_with_enough_time(p1_attacker, p1_defender) -> None:
+    """把窗口放宽到 60 秒必须可解释 —— 证明上面的「不可解释」是**时长问题**，
+    不是公式坏了（否则这条会一起红）。"""
+    result = combat.explain_anchor(
+        p1_attacker, p1_defender, observed_hp=P1_DAMAGE_TAKEN, window_s=60.0,
+        ranges_m=ANCHOR_RANGES, angulars=ANCHOR_ANGLES, target_velocity=224.0,
+    )
+    assert result["explainable"] is True
+    assert result["region_count"] > 0
+    assert result["region_count"] <= len(ANCHOR_RANGES) * len(ANCHOR_ANGLES)
+    assert result["max_hp_removed_in_window"] >= P1_DAMAGE_TAKEN
+
+
+def test_p1_anchor_best_is_a_grid_cell_not_a_fitted_parameter(p1_attacker, p1_defender) -> None:
+    """禁止拟合：`best` 必须是网格里的格子，range/angular 只能是采样值。"""
+    result = combat.explain_anchor(
+        p1_attacker, p1_defender, observed_hp=P1_DAMAGE_TAKEN, window_s=60.0,
+        ranges_m=ANCHOR_RANGES, angulars=ANCHOR_ANGLES, target_velocity=224.0,
+    )
+    best = result["best"]
+    assert best["range_m"] in [round(value, 3) for value in ANCHOR_RANGES]
+    assert best["angular_vel"] in [round(value, 6) for value in ANCHOR_ANGLES]
+
+
+def test_p1_reverse_leg_has_no_weapons(p1_defender, p1_attacker) -> None:
+    """P1 的反向腿：Flycatcher 只有拦截弹/nos，打出 0 伤害 —— ESI 不给攻击方配装，
+    12561 的反向锚点无法用「Flycatcher 打 Exequror」来复现（这是事实，不是缺陷）。"""
+    result = combat.engagement(p1_defender, p1_attacker, range_m=3000.0)
+    assert result["totals"]["effective_dps"] == 0.0
+    assert any(flag.startswith("no_weapons") for flag in result["flags"])
