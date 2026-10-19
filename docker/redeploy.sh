@@ -37,8 +37,13 @@ for legacy in evefit-mcp noobbaozi-mcp; do
   fi
 done
 
-say "2/5 拉取最新代码"
-run git -c core.hooksPath=/dev/null pull --ff-only
+say "2/5 同步到远端最新（部署快照仓库是单向镜像）"
+# 为什么不是 `git pull`：部署快照仓库每次都是重新 `git init` 后强制推送的，
+# 历史每次都不相关 → `pull` 必然 "Not possible to fast-forward"。
+# 这个仓库在 NAS 上**没有任何本地改动**（纯部署用），所以正确的语义是「对齐远端」而不是「合并」。
+run git -c core.hooksPath=/dev/null fetch --all --prune
+BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
+run git reset --hard "origin/$BRANCH"
 say "    HEAD = $(git rev-parse --short HEAD)"
 
 say "3/5 重建镜像（可能几分钟）"
