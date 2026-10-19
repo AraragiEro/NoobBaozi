@@ -221,3 +221,87 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 | `pytest`（我自己跑） | **1,042 passed** |
 | 构建 | `dfdaa7a`（仓库根 `evefit/`） |
 
+## 15. L2 `fit_detail` 字段级验收（本轮新增，独立重算）
+
+工具：`acceptance/check_detail.py`（可一键重跑）｜产物：`out/detail-check.json`
+样本 **10 个**：f1（炮）、f7（T3C）、f11（炮/导弹混装）、f12（后勤）、f15（导弹 BB）、
+f25（电容敏感，nos/neut）、f26（航母）、f33（货舱）、f48（Gnosis）、f67（双推进）。
+**结论：0 缺陷**；四类全部独立重算通过。
+
+### 15.1 覆盖与抽样数量
+
+| 类 | 抽样 | 说明 |
+|---|---|---|
+| `cap_by_module` | **51 个模块条目**（10 样本全量） | 每样本都有 |
+| `cap_sensitivity` | **29 条**（每样本最多 3 条） | 17 条摘掉后真的稳定，12 条不翻转 |
+| `upgrade_space` | **32 个候选**（每样本最多 4 个） | f12 / f67 无候选（空清单，如实计 0） |
+| `skill_tier` | **10 样本 × 512 条 = 5,120 条** | 逐条查等级域 + 跨层一致性 + hash 确定性 |
+
+### 15.2 独立重算方法与结论
+
+**① `cap_by_module`**：源头是**装备级 `-4`（capPeakLoad 贡献）**，我逐模块从引擎原始属性聚合，
+再与 `cap_by_module` 逐条对比（含 `count`）：
+
+- 51/51 条目**逐值吻合**（容差 max(0.02, 0.5%)）；
+- **公式复核**：对 `attr6 > 0` 的消费者，`装备级 -4 == 6 / cycle` 全部成立
+  （f1：SAR 40/4.8=8.333、Warp Disruptor 24/5=4.8、web 4/5=0.8×2、MWD 36/10=3.6、
+  blaster 1.4161/1.9359=0.7315×5=3.657）；
+- **负消耗覆盖**：f7 `Medium Energy Nosferatu II = -10.08`、`Medium Capacitor Booster II = -33.333`，
+  符号与量级都与我按 `-4` 的独立聚合一致；
+- **恒等式**：10/10 样本 `peak_load == Σ cap_by_module`（含负数）全部成立
+  （f25：66.515 == 66.515）。
+
+**② `cap_sensitivity`**：把该模块**摘掉一件**后用引擎重算 `-72`/`-7`，与报告值比对：
+
+- 29/29 的 `stable_pct` 与我的独立重算一致（±0.6）；
+- `depletes_in_s` 在“摘后仍不稳定”时也一致（f1：38.4 → 80.0 等）；
+- `module` 全部存在于已装配列表；
+- **口径差异（需你裁）**：你说「断言 `stable_pct_before <= 0` 且 `after > 0`」，
+  但该字段的语义是「摘掉后的状态」，**不是**「摘掉就变稳定」：
+  29 条里 **17 条才真的翻转**，12 条摘掉后仍不稳定（f1/f12/f25 这类本来就超载的配装）。
+  我没有把“不翻转”判成缺陷（那是语义误解），但建议文档写明，或加 `becomes_stable: bool`。
+
+**③ `upgrade_space`**：把候选件真的换上去重算资源余量：
+
+- 32/32 的 `cpu_free` / `power_free` / `calibration_free` 与我的重算一致（±0.06）；
+- **单向强断言**：`fits == true` 时资源必须真的够 —— 0 例违反；
+- `fits` 的含义是「换上去后**没有资源类硬规则**违反」（读 `resources.py:790` 确认），
+  所以 `fits=false` 但资源够是可能的：f7 有 **4 例**（候选 21484/521/19023/11215），
+  由**非资源类硬规则**触发，但 detail **没有给出原因字段** → 记为**建议**：
+  加 `blocked_by`（否则 agent 看到“资源够却说装不上”会困惑）。
+
+**④ `skill_tier`**：detail 给 512 条逐技能；L0 给 `{name,count,hash}`：
+
+- 10/10 样本 `count == 512`；等级全部 ∈ {4,5}（T3C/资本模块要求 5，f7 有 11 项 5 级，合理）；
+- **hash 确定性**：同一 ctx 二次渲染 `hash` 相同（`ac3d2941c96a` 等）；
+- **跨层一致**：L0 `count/name` 与 detail 的 512 条/`skill_tier_name` 一致；
+- **L1 没有 meta**（`render_view` 返回里无 `meta` 键）→ 不是缺陷，但三层“同名不同层”的取名
+  容易让 agent 误以为 L1 也有 skill_tier，建议文档注明 L1 不含 meta。
+
+### 15.3 变异证明（不是「写了断言就算」）
+
+| 类 | 变异 | 是否被抓 |
+|---|---|---|
+| `cap_by_module` | 10.0 → 10.5 | ✅ |
+| `cap_sensitivity` | stable_pct 0.0 → 12.0 | ✅ |
+| `upgrade_space` | fits=true 但 free=-5 | ✅ |
+| `skill_tier` | 等级 4 → 3 | ✅ |
+
+另有**实测证据**：开发过程中我自己的两处断言写错（公式符号、取整排序）各产生
+40+ / 1 条红 —— 证明这些比较是**活的**，不是永真。
+
+### 15.4 未验（不默认通过）
+
+| 项 | 原因 |
+|---|---|
+| `upgrade_space` 的**非资源类硬规则**（哪些规则让它 false） | 需要产品暴露 `blocked_by` / 规则类型，当前无法独立复算 |
+| `cap_sensitivity` 与 `candidates_checked` 的对应 | 产品**没有** `candidates_checked` 字段（上限是 `MAX_CAP_SENSITIVITY=5`），无法按“查了 N 个”抽样 |
+| nos / 电容注射器的**精确产出量** | `attr6 == 0`，其 `-4` 由效果脚本决定；我只能验证符号、量级与 `Σ == peak_load`，无法从属性表独立复算 50.4 / 200 |
+
+### 15.5 一个过程事实（非缺陷）
+
+验收期间 `noobbaozi/project/render.py`（junction 到 `evefit/`）出现一次
+`NameError: name 're' is not defined` —— 是**未提交改动写盘中途**被读到（`import re` 在 166 行、
+用它的正则在 270 行），几分钟后自行消失。**不是稳定缺陷**，但提醒：验收跑在“编辑中的树”上时，
+瞬时红可能是假信号，**必须复跑确认**。
+
