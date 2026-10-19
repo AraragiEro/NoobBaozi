@@ -1741,3 +1741,94 @@ def test_fit_engagement_missing_sides_is_invalid_params() -> None:
         response = _rpc("tools/call", {"name": "fit_engagement", "arguments": arguments})
         assert response["error"]["code"] == mcp_server.INVALID_PARAMS
         assert response["error"]["data"]["field"] in ("attacker", "defender")
+
+
+# =============================================================================
+# 七、`zkb_related`（T-1/5 新一轮）在 MCP 表面的契约
+# =============================================================================
+
+RELATED_FIXTURE = ZKB_FIXTURES / "related-30004614-202609091400.json"
+RELATED_URL = "https://zkillboard.com/related/30004614/202609091400/"
+
+
+@pytest.fixture()
+def related_offline(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """把**生产请求器**换成 related fixture（不联网），清掉限流时间戳。
+
+    只拦 GET：`--url` 形态不需要 ESI 名字解析。真发了 POST 直接判失败 ——
+    那说明 MCP 层把参数递错了。
+    """
+    document = json.loads(RELATED_FIXTURE.read_text(encoding="utf-8-sig"))
+    seen: list[str] = []
+
+    def fake(url: str, body: object | None = None) -> object:
+        seen.append(url)
+        if body is not None:
+            raise AssertionError(f"zkb_related 用 url 时不该发 POST：{url}")
+        return document
+
+    api._reset_zkb_state()
+    api.clear_caches()
+    monkeypatch.setattr(api, "_zkb_default_requester", fake)
+    yield seen
+    api._reset_zkb_state()
+
+
+def test_zkb_related_schema_has_no_fit() -> None:
+    """`zkb_related`：**没有 `fit`**；四个参数；`required` 为空（由 api 判「至少给一套」）。"""
+    spec = _tool_spec("zkb_related")
+    assert "交火" in spec["title"]
+    schema = spec["inputSchema"]
+    assert "fit" not in schema["properties"], "zkb_related 不是配装工具"
+    assert set(schema["properties"]) == {"url", "system", "time", "limit"}
+    assert schema["required"] == [], (
+        "「url 或 system+time 二选一」讲不清 JSON Schema —— 留给 api 报错更准确"
+    )
+    assert schema["properties"]["time"]["type"] == "string"
+    assert schema["properties"]["limit"]["default"] == api.ZKB_RELATED_KILL_LIMIT
+
+
+def test_zkb_related_description_pins_the_four_traps() -> None:
+    """description 必须点名四个真会踩的坑（agent 只读这里）。"""
+    description = _tool_spec("zkb_related")["description"]
+    assert "12 位" in description and "YYYYMMDDHHMM" in description, "时间戳格式"
+    assert "窗口半径" in description and "不等于整场战斗" in description, "exHours 的语义"
+    assert "killmail_ids" in description, "必须告诉 agent 拿到 id 之后能干什么"
+    assert "唯一能查任意历史窗口" in description, "这是它相对列表接口的核心价值"
+    assert "complete" in description, "complete 只是 zkb 的判断"
+    assert "相邻星系" in description, "相邻星系不包含"
+
+
+def test_zkb_related_call_round_trip(related_offline: list[str]) -> None:
+    """`tools/call zkb_related` → MCP → api → 请求器整条链路（只有最后一跳是假的）。"""
+    call_result = _call("zkb_related", {"url": RELATED_URL})
+    assert call_result.get("isError") is not True, call_result
+    envelope = _envelope(call_result)
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    assert result["system"] == {"id": 30004614, "name": "AV-VB6"}
+    assert result["region"] == "Fountain"
+    assert len(result["killmail_ids"]["teamA"]) == 10
+    assert len(result["killmail_ids"]["teamB"]) == 9
+    assert related_offline == [
+        "https://zkillboard.com/api/related/30004614/202609091400/"
+    ], f"URL 拼错：{related_offline}"
+
+
+def test_zkb_related_bad_time_is_a_business_error(related_offline: list[str]) -> None:
+    """坏时间戳 → 业务错误（`isError`），**不是** JSON-RPC 协议错误。"""
+    call_result = _call(
+        "zkb_related", {"system": 30004614, "time": "2026-09-09 14:00"}
+    )
+    assert call_result.get("isError") is True
+    envelope = _envelope(call_result)
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["field"] == "time"
+    assert related_offline == [], "参数错误不该发任何请求"
+
+
+def test_zkb_related_cannot_be_injected() -> None:
+    """客户端**不能**塞 `requester` / `clock` / `sleeper`（那三个是测试注入点）。"""
+    spec = _tool_spec("zkb_related")["inputSchema"]
+    for name in ("requester", "clock", "sleeper"):
+        assert name not in spec["properties"], f"{name} 不该出现在协议表面"

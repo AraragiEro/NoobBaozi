@@ -1,0 +1,1124 @@
+{
+ "adjacentSystems": {
+  "30004616": "7BX-6F",
+  "30004613": "XJP-Y7"
+ },
+ "complete": true,
+ "endTime": "2026-09-09 16:00",
+ "exHours": 1,
+ "options": "{\"A\":[],\"B\":[],\"excluded\":[]}",
+ "regionName": "Fountain",
+ "relatedTime": 202609091400,
+ "selectedSystems": {
+  "30004614": "AV-VB6"
+ },
+ "solarSystemID": 30004614,
+ "startTime": "2026-09-09 13:00",
+ "summary": {
+  "teamA": {
+   "list": [
+    {
+     "shipTypeID": 73793,
+     "characterID": 2121193847,
+     "corporationID": 98423954,
+     "allianceID": 1900696668,
+     "groupID": 485,
+     "isVictim": false,
+     "shipName": "Phoenix Navy Issue",
+     "groupName": "Dreadnought",
+     "characterName": "Arishi Kautsuo",
+     "corporationName": "Worthless Carebears",
+     "allianceName": "The Initiative."
+    },
+    {
+     "shipTypeID": 92822,
+     "characterID": 2121063815,
+     "corporationID": 98423954,
+     "allianceID": 1900696668,
+     "groupID": 5120,
+     "isVictim": false,
+     "shipName": "Salvation",
+     "groupName": "Command Carrier",
+     "characterName": "Priest 2-1",
+     "corporationName": "Worthless Carebears",
+     "allianceName": "The Initiative.",
+     "finalBlow": true
+    },
+    {
+     "shipTypeID": 92825,
+     "characterID": 95448180,
+     "corporationID": 98423954,
+     "allianceID": 1900696668,
+     "groupID": 5120,
+     "isVictim": false,
+     "shipName": "Ymir",
+     "groupName": "Command Carrier",
+     "characterName": "Sergey Rubtsov",
+     "corporationName": "Worthless Carebears",
+     "allianceName": "The Initiative."
+    },
+    {
+     "shipTypeID": 23911,
+     "characterID": 91113617,
+     "corporationID": 98423954,
+     "allianceID": 1900696668,
+     "groupID": 547,
+     "isVictim": false,
+     "shipName": "Thanatos",
+     "groupName": "Carrier",
+     "characterName": "Tear Junkie",
+     "corporationName": "Worthless Carebears",
+     "allianceName": "The Initiative."
+    },
+    {
+     "shipTypeID": 44996,
+     "characterID": 90101389,
+     "corporationID": 98423954,
+     "allianceID": 1900696668,
+     "groupID": 898,
+     "isVictim": false,
+     "shipName": "Marshal",
+     "groupName": "Black Ops",
+     "characterName": "SomeoneStrange",
+     "corporationName": "Worthless Carebears",
+     "allianceName": "The Initiative."
+    },
+    {
+     "shipTypeID": 645,
+     "characterID": 173548171,
+     "corporationID": 98799729,
+     "allianceID": 1900696668,
+     "groupID": 27,
+     "isVictim": true,
+     "shipName": "Dominix",
+     "groupName": "Battleship",
+     "characterName": "Stalkin",
+     "corporationName": "Splash Inc.",
+     "allianceName": "The Initiative.",
+     "killID": 138324520,
+     "destroyed": 138324520
+    },
+    {
+     "shipTypeID": 645,
+     "characterID": 2123997320,
+     "corporationID": 98799729,
+     "allianceID": 1900696668,
+     "groupID": 27,
+     "isVictim": true,
+     "shipName": "Dominix",
+     "groupName": "Battleship",
+     "characterName": "Krios Vonerik",
+     "corporationName": "Splash Inc.",
+     "allianceName": "The Initiative.",
+     "killID": 138324507,
+     "destroyed": 138324507
+    },
+    {
+     "shipTypeID": 645,
+     "characterID": 315300358,
+     "corporationID": 98799729,
+     "allianceID": 1900696668,
+     "groupID": 27,
+     "isVictim": true,
+     "shipName": "Dominix",
+     "groupName": "Battleship",
+     "characterName": "Crestmoor",
+     "corporationName": "Splash Inc.",
+     "allianceName": "The Initiative.",
+     "killID": 138324516,
+     "destroyed": 138324516
+    },
+    {
+     "shipTypeID": 645,
+     "characterID": 398087760,
+     "corporationID": 98799729,
+     "allianceID": 1900696668,
+     "groupID": 27,
+     "isVictim": true,
+     "shipName": "Dominix",
+     "groupName": "Battleship",
+     "characterName": "Galthorn",
+     "corporationName": "Splash Inc.",
+     "allianceName": "The Initiative.",
+     "killID": 138324492,
+     "destroyed": 138324492
+    },
+    {
+     "shipTypeID": 645,
+     "characterID": 2123997396,
+     "corporationID": 98799729,
+     "allianceID": 1900696668,
+     "groupID": 27,
+     "isVictim": true,
+     "shipName": "Dominix",
+     "groupName": "Battleship",
+     "characterName": "Aleria Vonerik",
+     "corporationName": "Splash Inc.",
+     "allianceName": "The Initiative.",
+     "killID": 138324482,
+     "destroyed": 138324482
+    },
+    {
+     "shipTypeID": 47466,
+     "characterID": 2122137345,
+     "corporationID": 98210135,
+     "allianceID": 1900696668,
+     "groupID": 27,
+     "isVictim": true,
+     "shipName": "Praxis",
+     "groupName": "Battleship",
+     "characterName": "JEANNE D ARC-343",
+     "corporationName": "Infinite Point",
+     "allianceName": "The Initiative.",
+     "killID": 138324165,
+     "destroyed": 138324165
+    },
+    {
+     "shipTypeID": 12017,
+     "characterID": 95067473,
+     "corporationID": 98423954,
+     "allianceID": 1900696668,
+     "groupID": 894,
+     "isVictim": false,
+     "shipName": "Devoter",
+     "groupName": "Heavy Interdiction Cruiser",
+     "characterName": "miner orca",
+     "corporationName": "Worthless Carebears",
+     "allianceName": "The Initiative."
+    },
+    {
+     "shipTypeID": 12017,
+     "characterID": 826711106,
+     "corporationID": 98423954,
+     "allianceID": 1900696668,
+     "groupID": 894,
+     "isVictim": false,
+     "shipName": "Devoter",
+     "groupName": "Heavy Interdiction Cruiser",
+     "characterName": "Nusak",
+     "corporationName": "Worthless Carebears",
+     "allianceName": "The Initiative."
+    },
+    {
+     "shipTypeID": 33157,
+     "characterID": 1084590424,
+     "corporationID": 98019139,
+     "allianceID": 1900696668,
+     "groupID": 419,
+     "isVictim": false,
+     "shipName": "Hurricane Fleet Issue",
+     "groupName": "Combat Battlecruiser",
+     "characterName": "knigit",
+     "corporationName": "Resilience.",
+     "allianceName": "The Initiative."
+    },
+    {
+     "shipTypeID": 33157,
+     "characterID": 1268179242,
+     "corporationID": 98571108,
+     "allianceID": 1900696668,
+     "groupID": 419,
+     "isVictim": true,
+     "shipName": "Hurricane Fleet Issue",
+     "groupName": "Combat Battlecruiser",
+     "characterName": "Kra3eN",
+     "corporationName": "Siromanci",
+     "allianceName": "The Initiative.",
+     "killID": 138324134,
+     "destroyed": 138324134
+    },
+    {
+     "shipTypeID": 78369,
+     "characterID": 90117368,
+     "corporationID": 98754582,
+     "allianceID": 1900696668,
+     "groupID": 419,
+     "isVictim": false,
+     "shipName": "Khizriel",
+     "groupName": "Combat Battlecruiser",
+     "characterName": "Evezer",
+     "corporationName": "Baba Yagas",
+     "allianceName": "The Initiative."
+    },
+    {
+     "shipTypeID": 22456,
+     "characterID": 1856452099,
+     "corporationID": 773499566,
+     "allianceID": 1900696668,
+     "groupID": 541,
+     "isVictim": false,
+     "shipName": "Sabre",
+     "groupName": "Interdictor",
+     "characterName": "McNab DK1977",
+     "corporationName": "The Graduates",
+     "allianceName": "The Initiative."
+    },
+    {
+     "shipTypeID": 22456,
+     "characterID": 1410547529,
+     "corporationID": 773499566,
+     "allianceID": 1900696668,
+     "groupID": 541,
+     "isVictim": true,
+     "shipName": "Sabre",
+     "groupName": "Interdictor",
+     "characterName": "Koetsu",
+     "corporationName": "The Graduates",
+     "allianceName": "The Initiative.",
+     "killID": 138324303,
+     "destroyed": 138324303
+    },
+    {
+     "shipTypeID": 11371,
+     "characterID": 1457562807,
+     "corporationID": 98558506,
+     "allianceID": 1900696668,
+     "groupID": 324,
+     "isVictim": false,
+     "shipName": "Wolf",
+     "groupName": "Assault Frigate",
+     "characterName": "umine",
+     "corporationName": "A Blessed Bean",
+     "allianceName": "The Initiative."
+    },
+    {
+     "shipTypeID": 11379,
+     "characterID": 1267006933,
+     "corporationID": 98474028,
+     "allianceID": 1900696668,
+     "groupID": 324,
+     "isVictim": false,
+     "shipName": "Hawk",
+     "groupName": "Assault Frigate",
+     "characterName": "Faceoff84",
+     "corporationName": "Veni Vidi Vici Inc",
+     "allianceName": "The Initiative."
+    },
+    {
+     "shipTypeID": 670,
+     "characterID": 1268179242,
+     "corporationID": 98571108,
+     "allianceID": 1900696668,
+     "groupID": 29,
+     "isVictim": false,
+     "shipName": "Capsule",
+     "groupName": "Capsule",
+     "characterName": "Kra3eN",
+     "corporationName": "Siromanci",
+     "allianceName": "The Initiative."
+    },
+    {
+     "characterID": 293907879,
+     "corporationID": 98480050,
+     "allianceID": 1900696668,
+     "isVictim": false,
+     "shipName": null,
+     "characterName": "Rikeka",
+     "corporationName": "Fancypants Inc",
+     "allianceName": "The Initiative."
+    },
+    {
+     "characterID": 1410547529,
+     "corporationID": 773499566,
+     "allianceID": 1900696668,
+     "isVictim": false,
+     "shipName": null,
+     "characterName": "Koetsu",
+     "corporationName": "The Graduates",
+     "allianceName": "The Initiative."
+    }
+   ],
+   "totals": {
+    "pilotCount": 23,
+    "totalShips": 10,
+    "total_points": 38,
+    "total_price": 1585949032.3000002,
+    "total_dropped": 160714327.64,
+    "groupIDs": {
+     "29": {
+      "groupID": 29,
+      "groupName": "Capsule",
+      "count": 2,
+      "isk": 117946979.07,
+      "points": 2
+     },
+     "27": {
+      "groupID": 27,
+      "groupName": "Battleship",
+      "count": 6,
+      "isk": 1201370660.99,
+      "points": 32
+     },
+     "541": {
+      "groupID": 541,
+      "groupName": "Interdictor",
+      "count": 1,
+      "isk": 71621973.87,
+      "points": 1
+     },
+     "419": {
+      "groupID": 419,
+      "groupName": "Combat Battlecruiser",
+      "count": 1,
+      "isk": 195009418.37,
+      "points": 3
+     }
+    }
+   },
+   "kills": {
+    "138324530": {
+     "killID": 138324530,
+     "attackerCount": 4,
+     "damage_taken": 450,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1788963082000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:ru",
+      "cat:6",
+      "#:2+",
+      "pvp",
+      "loc:nullsec",
+      "isk:under1b"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "138324520": {
+     "killID": 138324520,
+     "attackerCount": 10,
+     "damage_taken": 46427,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1788963057000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:ru",
+      "cat:6",
+      "#:10+",
+      "pvp",
+      "loc:nullsec",
+      "isk:under1b"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "138324516": {
+     "killID": 138324516,
+     "attackerCount": 9,
+     "damage_taken": 40997,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1788963033000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:ru",
+      "cat:6",
+      "#:5+",
+      "pvp",
+      "loc:nullsec",
+      "isk:under1b"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "138324507": {
+     "killID": 138324507,
+     "attackerCount": 6,
+     "damage_taken": 39316,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1788963006000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:ru",
+      "cat:6",
+      "#:5+",
+      "pvp",
+      "loc:nullsec",
+      "isk:under1b"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "138324492": {
+     "killID": 138324492,
+     "attackerCount": 8,
+     "damage_taken": 37652,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1788962977000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:ru",
+      "cat:6",
+      "#:5+",
+      "pvp",
+      "loc:nullsec",
+      "isk:under1b"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "138324482": {
+     "killID": 138324482,
+     "attackerCount": 9,
+     "damage_taken": 43386,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1788962947000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:ru",
+      "cat:6",
+      "#:5+",
+      "pvp",
+      "loc:nullsec",
+      "isk:under1b"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "138324356": {
+     "killID": 138324356,
+     "attackerCount": 1,
+     "damage_taken": 467,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1788962581000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:ru",
+      "cat:6",
+      "#:1",
+      "pvp",
+      "loc:nullsec",
+      "isk:under1b"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "138324303": {
+     "killID": 138324303,
+     "attackerCount": 4,
+     "damage_taken": 5164,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1788962441000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:ru",
+      "cat:6",
+      "#:2+",
+      "pvp",
+      "loc:nullsec",
+      "isk:under1b"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "138324165": {
+     "killID": 138324165,
+     "attackerCount": 7,
+     "damage_taken": 57461,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1788962102000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:au",
+      "cat:6",
+      "#:5+",
+      "pvp",
+      "loc:nullsec",
+      "isk:under1b"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "138324134": {
+     "killID": 138324134,
+     "attackerCount": 6,
+     "damage_taken": 32641,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1788962000000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:au",
+      "cat:6",
+      "#:5+",
+      "pvp",
+      "loc:nullsec",
+      "isk:under1b"
+     ],
+     "solo": false,
+     "npc": false
+    }
+   }
+  },
+  "teamB": {
+   "list": [
+    {
+     "shipTypeID": 24688,
+     "characterID": 2124219477,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "groupID": 27,
+     "isVictim": false,
+     "shipName": "Rokh",
+     "groupName": "Battleship",
+     "characterName": "Riut Aakiwa",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores"
+    },
+    {
+     "shipTypeID": 24688,
+     "characterID": 2124235173,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "groupID": 27,
+     "isVictim": false,
+     "shipName": "Rokh",
+     "groupName": "Battleship",
+     "characterName": "Ranorension",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores"
+    },
+    {
+     "shipTypeID": 24690,
+     "characterID": 2115381887,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "groupID": 27,
+     "isVictim": true,
+     "shipName": "Hyperion",
+     "groupName": "Battleship",
+     "characterName": "ghost shark Zhao",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores",
+     "killID": 138325032,
+     "destroyed": 138325032
+    },
+    {
+     "shipTypeID": 29990,
+     "characterID": 2114044639,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "groupID": 963,
+     "isVictim": true,
+     "shipName": "Loki",
+     "groupName": "Strategic Cruiser",
+     "characterName": "Tica Here",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores",
+     "killID": 138324156,
+     "destroyed": 138324156
+    },
+    {
+     "shipTypeID": 22470,
+     "characterID": 2114044639,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "groupID": 540,
+     "isVictim": false,
+     "shipName": "Nighthawk",
+     "groupName": "Command Ship",
+     "characterName": "Tica Here",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores",
+     "finalBlow": true
+    },
+    {
+     "shipTypeID": 22470,
+     "characterID": 2115181118,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "groupID": 540,
+     "isVictim": false,
+     "shipName": "Nighthawk",
+     "groupName": "Command Ship",
+     "characterName": "FanFan Hu",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores",
+     "finalBlow": true
+    },
+    {
+     "shipTypeID": 22470,
+     "characterID": 2117724652,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "groupID": 540,
+     "isVictim": false,
+     "shipName": "Nighthawk",
+     "groupName": "Command Ship",
+     "characterName": "iki mtu",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores"
+    },
+    {
+     "shipTypeID": 22470,
+     "characterID": 2114573136,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "groupID": 540,
+     "isVictim": true,
+     "shipName": "Nighthawk",
+     "groupName": "Command Ship",
+     "characterName": "Fantasy Minayin",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores",
+     "killID": 138325024,
+     "destroyed": 138325024
+    },
+    {
+     "shipTypeID": 22470,
+     "characterID": 2116040110,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "groupID": 540,
+     "isVictim": false,
+     "shipName": "Nighthawk",
+     "groupName": "Command Ship",
+     "characterName": "RayCM",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores"
+    },
+    {
+     "shipTypeID": 22468,
+     "characterID": 2121688638,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "groupID": 540,
+     "isVictim": true,
+     "shipName": "Claymore",
+     "groupName": "Command Ship",
+     "characterName": "no perplexity",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores",
+     "killID": 138325010,
+     "destroyed": 138325010
+    },
+    {
+     "shipTypeID": 11978,
+     "characterID": 2118991436,
+     "corporationID": 98671149,
+     "allianceID": 99000285,
+     "groupID": 832,
+     "isVictim": false,
+     "shipName": "Scimitar",
+     "groupName": "Logistics",
+     "characterName": "guangtoudan3",
+     "corporationName": "FeedingMachine",
+     "allianceName": "Good Sax"
+    },
+    {
+     "shipTypeID": 17634,
+     "characterID": 2115181118,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "groupID": 26,
+     "isVictim": false,
+     "shipName": "Caracal Navy Issue",
+     "groupName": "Cruiser",
+     "characterName": "FanFan Hu",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores"
+    },
+    {
+     "shipTypeID": 17634,
+     "characterID": 2116040110,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "groupID": 26,
+     "isVictim": false,
+     "shipName": "Caracal Navy Issue",
+     "groupName": "Cruiser",
+     "characterName": "RayCM",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores"
+    },
+    {
+     "shipTypeID": 17634,
+     "characterID": 2121688638,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "groupID": 26,
+     "isVictim": false,
+     "shipName": "Caracal Navy Issue",
+     "groupName": "Cruiser",
+     "characterName": "no perplexity",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores",
+     "finalBlow": true
+    },
+    {
+     "shipTypeID": 17634,
+     "characterID": 2116921386,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "groupID": 26,
+     "isVictim": false,
+     "shipName": "Caracal Navy Issue",
+     "groupName": "Cruiser",
+     "characterName": "BK MBG",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores"
+    },
+    {
+     "shipTypeID": 22464,
+     "characterID": 2122075292,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "groupID": 541,
+     "isVictim": true,
+     "shipName": "Flycatcher",
+     "groupName": "Interdictor",
+     "characterName": "Koishi Eto",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores",
+     "killID": 138324483,
+     "destroyed": 138324483
+    },
+    {
+     "characterID": 2122075292,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "isVictim": false,
+     "shipName": null,
+     "characterName": "Koishi Eto",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores"
+    },
+    {
+     "characterID": 2124235173,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "isVictim": false,
+     "shipName": null,
+     "characterName": "Ranorension",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores"
+    },
+    {
+     "characterID": 2116040110,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "isVictim": false,
+     "shipName": null,
+     "characterName": "RayCM",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores"
+    },
+    {
+     "characterID": 2118991436,
+     "corporationID": 98671149,
+     "allianceID": 99000285,
+     "isVictim": false,
+     "shipName": null,
+     "characterName": "guangtoudan3",
+     "corporationName": "FeedingMachine",
+     "allianceName": "Good Sax"
+    },
+    {
+     "characterID": 2114044639,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "isVictim": false,
+     "shipName": null,
+     "characterName": "Tica Here",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores"
+    },
+    {
+     "characterID": 2116921386,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "isVictim": false,
+     "shipName": null,
+     "characterName": "BK MBG",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores"
+    },
+    {
+     "characterID": 2117724652,
+     "corporationID": 98604904,
+     "allianceID": 99014738,
+     "isVictim": false,
+     "shipName": null,
+     "characterName": "iki mtu",
+     "corporationName": "The Shadow Proclamation Association",
+     "allianceName": "The Black Shores"
+    }
+   ],
+   "totals": {
+    "pilotCount": 23,
+    "totalShips": 9,
+    "total_points": 17,
+    "total_price": 2386300071.83,
+    "total_dropped": 498783852.97999996,
+    "groupIDs": {
+     "29": {
+      "groupID": 29,
+      "groupName": "Capsule",
+      "count": 3,
+      "isk": 41864991.93,
+      "points": 3
+     },
+     "27": {
+      "groupID": 27,
+      "groupName": "Battleship",
+      "count": 1,
+      "isk": 362616813.22,
+      "points": 9
+     },
+     "540": {
+      "groupID": 540,
+      "groupName": "Command Ship",
+      "count": 2,
+      "isk": 1049242928.47,
+      "points": 2
+     },
+     "541": {
+      "groupID": 541,
+      "groupName": "Interdictor",
+      "count": 2,
+      "isk": 190691699.68,
+      "points": 2
+     },
+     "963": {
+      "groupID": 963,
+      "groupName": "Strategic Cruiser",
+      "count": 1,
+      "isk": 741883638.53,
+      "points": 1
+     }
+    }
+   },
+   "kills": {
+    "138325072": {
+     "killID": 138325072,
+     "attackerCount": 1,
+     "damage_taken": 474,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1788964801000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:ru",
+      "cat:6",
+      "#:1",
+      "pvp",
+      "loc:nullsec",
+      "isk:under1b",
+      "capinv"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "138325071": {
+     "killID": 138325071,
+     "attackerCount": 1,
+     "damage_taken": 461,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1788964801000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:ru",
+      "cat:6",
+      "#:1",
+      "pvp",
+      "loc:nullsec",
+      "isk:under1b",
+      "capinv"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "138325052": {
+     "killID": 138325052,
+     "attackerCount": 2,
+     "damage_taken": 474,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1788964745000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:ru",
+      "cat:6",
+      "#:2+",
+      "pvp",
+      "loc:nullsec",
+      "isk:under1b",
+      "capinv"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "138325032": {
+     "killID": 138325032,
+     "attackerCount": 4,
+     "damage_taken": 64872,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1788964697000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:ru",
+      "cat:6",
+      "#:2+",
+      "pvp",
+      "loc:nullsec",
+      "isk:under1b",
+      "capinv"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "138325024": {
+     "killID": 138325024,
+     "attackerCount": 7,
+     "damage_taken": 17412,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1788964672000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:ru",
+      "cat:6",
+      "#:5+",
+      "pvp",
+      "loc:nullsec",
+      "isk:under1b",
+      "capinv"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "138325015": {
+     "killID": 138325015,
+     "attackerCount": 4,
+     "damage_taken": 8533,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1788964638000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:ru",
+      "cat:6",
+      "#:2+",
+      "pvp",
+      "loc:nullsec",
+      "isk:under1b",
+      "capinv"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "138325010": {
+     "killID": 138325010,
+     "attackerCount": 7,
+     "damage_taken": 35584,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1788964626000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:ru",
+      "cat:6",
+      "#:5+",
+      "pvp",
+      "loc:nullsec",
+      "isk:under1b",
+      "capinv"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "138324483": {
+     "killID": 138324483,
+     "attackerCount": 4,
+     "damage_taken": 12948,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1788962948000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:ru",
+      "cat:6",
+      "#:2+",
+      "pvp",
+      "loc:nullsec",
+      "isk:under1b"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "138324156": {
+     "killID": 138324156,
+     "attackerCount": 9,
+     "damage_taken": 38241,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1788962085000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:au",
+      "cat:6",
+      "#:5+",
+      "pvp",
+      "loc:nullsec",
+      "isk:under1b"
+     ],
+     "solo": false,
+     "npc": false
+    }
+   }
+  },
+  "excluded": []
+ },
+ "systemID": 30004614,
+ "systemName": "AV-VB6",
+ "time": "2026-09-09 14:00",
+ "unixtime": 1788962400
+}

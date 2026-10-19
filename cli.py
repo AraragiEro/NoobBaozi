@@ -245,6 +245,9 @@ _BUCKET_ROWS: int = 8
 _PILOT_ROWS: int = 3
 """`killmail` 人话摘要里「伤害 Top」铺几行（完整前 10 名在 `--json` 的 by_pilot 里）。"""
 
+_RELATED_SHIP_ROWS: int = 6
+"""`related` 人话摘要里每边舰船构成铺几行（完整清单在 `--json` 的 `sides.*.ships` 里）。"""
+
 
 def _entity_name(entry: object) -> str:
     """身份块 → 名字；名字查不到时给 `id:N`（**绝不编一个名字**）。"""
@@ -1059,6 +1062,71 @@ def _human_engagement_fleet(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _human_related(result: dict, meta: dict) -> str:
+    """`related` 的人话摘要：星系 / 时间窗 → 双方人数·舰船构成·ISK·kill 数 → killmail id。
+
+    两处**必须带说明**，否则一定被误读：
+    - `exHours` 是**窗口半径**且窗口**不对称**（实测 `startTime=time−exHours`、
+      `endTime=time+2×exHours`），**不等于整场战斗的时长**；
+    - `killmail_ids` 是**全的**，而逐 kill 明细按 `limit` 截断 —— 两个数要分开写，
+      否则人会以为「一共就这几条」。
+    """
+    system = result.get("system") if isinstance(result.get("system"), dict) else {}
+    window = result.get("window") if isinstance(result.get("window"), dict) else {}
+    sides = result.get("sides") if isinstance(result.get("sides"), dict) else {}
+    ids = result.get("killmail_ids") if isinstance(result.get("killmail_ids"), dict) else {}
+    truncated = result.get("truncated") if isinstance(result.get("truncated"), dict) else {}
+
+    lines = [
+        f"related · {system.get('name') or '?'} ({system.get('id')}) · {result.get('region')}",
+        f"{_INDENT}窗口: {window.get('startTime')} .. {window.get('endTime')} · "
+        f"exHours={window.get('exHours')} · complete={window.get('complete')}",
+        f"{_INDENT}注意: exHours 是**窗口半径**且窗口不对称 —— 不等于整场战斗的时长",
+    ]
+    for side_name in ("teamA", "teamB"):
+        side = sides.get(side_name) if isinstance(sides.get(side_name), dict) else {}
+        side_ids = ids.get(side_name) if isinstance(ids.get(side_name), list) else []
+        lines.append(
+            f"{_INDENT}{side_name}: {side.get('pilots')} 人 · {side.get('corporations')} 公司 · "
+            f"{side.get('alliances')} 联盟 · ISK {_num(side.get('isk'))} · "
+            f"{side.get('kills_total')} kill"
+        )
+        ships = side.get("ships") if isinstance(side.get("ships"), list) else []
+        if ships:
+            listing = "、".join(
+                f"{row.get('ship')}×{row.get('count')}"
+                for row in ships[:_RELATED_SHIP_ROWS]
+                if isinstance(row, dict)
+            )
+            if len(ships) > _RELATED_SHIP_ROWS:
+                listing += " …"
+            lines.append(f"{_INDENT * 2}舰船: {listing}")
+        kills = side.get("kills") if isinstance(side.get("kills"), list) else []
+        if kills and isinstance(kills[0], dict):
+            first = kills[0]
+            lines.append(
+                f"{_INDENT * 2}最新一条: {first.get('killmail_id')} · "
+                f"{first.get('time')} · 伤害 {_num(first.get('damage_taken'))} · "
+                f"{first.get('attacker_count')} 攻击者"
+            )
+        lines.append(
+            f"{_INDENT * 2}killmail_ids: {len(side_ids)} 条（**全的**）"
+            + (
+                f"，明细展示 {len(kills)} 条（--limit 截断）"
+                if side.get("kills_truncated")
+                else ""
+            )
+        )
+    omitted = truncated.get("omitted") if isinstance(truncated.get("omitted"), dict) else {}
+    if any(omitted.values()):
+        lines.append(f"{_INDENT}截断: limit={truncated.get('limit')} · {omitted}")
+    for note in result.get("notes") or []:
+        lines.append(f"{_INDENT}note: {note}")
+    if isinstance(meta, dict) and meta.get("urls"):
+        lines.append(f"{_INDENT}urls: {_block_line(meta.get('urls'), 200)}")
+    return "\n".join(lines)
+
+
 _HUMAN: dict[str, Callable[[dict, dict], str]] = {
     "parse": lambda result, _meta: _human_parse(result),
     "killmail": lambda result, _meta: _human_killmail(result, _meta),
@@ -1072,6 +1140,7 @@ _HUMAN: dict[str, Callable[[dict, dict], str]] = {
     "engagement": _human_engagement,
     "search": _human_search,
     "stats": _human_stats,
+    "related": _human_related,
 }
 
 
@@ -1453,6 +1522,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="输出机器可读 JSON（api 返回值原样）"
     )
 
+    related_cmd = subparsers.add_parser(
+        "related", help="星系交火总览（双方阵营 / 舰船构成 / ISK / killmail 清单）"
+    )
+    related_cmd.add_argument(
+        "--url",
+        metavar="URL",
+        help=(
+            "首选：https://zkillboard.com/related/<systemID>/<YYYYMMDDHHMM>/ "
+            "（也认 /api/related/...）。给了它就别再给 --system / --time"
+        ),
+    )
+    related_cmd.add_argument("--system", metavar="NAME", help="星系（名字或整数 id）")
+    related_cmd.add_argument(
+        "--time",
+        metavar="STAMP",
+        help="时间戳，固定 12 位 YYYYMMDDHHMM（如 202609091400）；不做宽松解析",
+    )
+    related_cmd.add_argument(
+        "--limit",
+        type=int,
+        default=api.ZKB_RELATED_KILL_LIMIT,
+        metavar="N",
+        help=(
+            f"每边最多几条逐 kill 明细（默认 {api.ZKB_RELATED_KILL_LIMIT}）；"
+            "killmail_ids 不受它限制"
+        ),
+    )
+    related_cmd.add_argument(
+        "--json", action="store_true", help="输出机器可读 JSON（api 返回值原样）"
+    )
+
     return parser
 
 
@@ -1594,6 +1694,20 @@ def _dispatch_search(args: argparse.Namespace) -> dict:
     )
 
 
+def _dispatch_related(args: argparse.Namespace) -> dict:
+    """`related` → 一次 `api.zkb_related()`（**本文件不做任何逻辑**）。
+
+    `url` 与 `system`/`time` 的**互斥**、时间戳 12 位校验、星系名字解析 —— 全在 `api` 层判
+    （CLI 与 MCP 必须共用同一套判断，否则同一个查询两个出口不同结果）。
+    """
+    return api.zkb_related(
+        url=args.url,
+        system=args.system,
+        time=args.time,
+        limit=args.limit,
+    )
+
+
 def _pick_stats(args: argparse.Namespace) -> tuple[dict | None, str | None]:
     """从 `--character` / `--corporation` / `--alliance` 里挑**恰好一个**。
 
@@ -1675,6 +1789,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"参数错误：{problem}", file=sys.stderr)
             return EXIT_USAGE
         return _report(args, api.zkb_stats(**params))
+
+    if args.command == "related":
+        # 同理：`related` 的输入是「星系 + 时间窗」或一条 related 链接
+        return _report(args, _dispatch_related(args))
 
     fit, problem = _pick_fit(args)
     if problem is not None:

@@ -277,6 +277,7 @@ python -c "from noobbaozi import mcp_server as m; print(m.INSTRUCTIONS); [print(
 | `fit_engagement` | 交战数学：A 打得动 B 吗（命中 / 有效 DPS / 击穿时间 / **编队量级**，见 §4.13） |
 | `zkb_search` | 战报列表检索（先筛 killmail_id，再对那条调 `fit_killmail`）；**每行带受害者驾驶员 / 军团 / 联盟名字** |
 | `zkb_stats` | 实体画像（角色 / 公司 / 联盟）：战斗总量 + zkb 风格指标 + 7 天活动 + 6 类榜单；**公式未公开的指标只转述，不给威胁判词** |
+| `zkb_related` | 星系交火总览：一个星系 + 一个时间点 → 双方阵营 / 舰船构成 / ISK / **killmail 清单**；**唯一能查任意历史窗口的入口**（见 §4.14） |
 
 每个工具的「何时用 / 返回什么 / 限制」、每个参数的含义与默认值，都写在它的
 `description` / `inputSchema` 里 —— **别在这份 README 里补第二份**（复制就会漂移；
@@ -964,6 +965,70 @@ duration_s=None, points=6)`。**`distance_m` 必填** —— 距离与角速度�
 
 > **不做**：电容 / 距离控制 / 后勤 / 跑位几何 / 有效 DPS 之外的命中率场景；不判「该不该
 > 打」（那是人的决定，本层只给数）。
+
+### 4.14 `zkb_related`：星系交火总览（**唯一能查任意历史窗口的入口**）
+
+`zkb_related(url=None, system=None, time=None, *, limit=20)`。
+
+**为什么需要它**：zkb 的列表接口（`zkb_search`）已经**停用** `startTime` / `endTime`
+（`because of abuse`），只能 `pastSeconds` + `page` 往回翻 —— 等于**查不了任意历史窗口**。
+而 `/api/related/<systemID>/<YYYYMMDDHHMM>/` 把时间放在**路径里**，所以任意历史窗口都能查。
+它还额外给两样别处拿不到的东西：**阵营划分**（`teamA` / `teamB`）与每条 kill 的完整明细块。
+
+**两种给法（二选一，同时给会 `invalid_argument`）**：
+
+| 给法 | 例子 |
+|---|---|
+| `url`（首选） | `https://zkillboard.com/related/30004614/202609091400/`（也认 `/api/related/…`；查询串会被忽略） |
+| `system` + `time` | `system="AV-VB6"`（名字或 id）+ `time="202609091400"` |
+
+> `time` **只认 12 位** `YYYYMMDDHHMM`。`2026-09-09 14:00` / 10 位 / 13 位一律
+> `invalid_argument`（`field: "time"`）—— **不做宽松解析**：把「我猜你是 14 点」当成
+> 用户意图，比直接报错危险得多。
+
+**返回是摘要，不是原响应的转储**。原始响应实测 **212 KB**（AV-VB6 / Fountain，23v23），
+摘要约 **4–5 KB**：
+
+```jsonc
+{"system": {"id": 30004614, "name": "AV-VB6"}, "region": "Fountain",
+ "window": {"startTime": "2026-09-09 13:00", "endTime": "2026-09-09 16:00",
+            "exHours": 1, "complete": true},
+ "sides": {"teamA": {"pilots": 21, "corporations": 10, "alliances": 1,
+                     "ships": [{"ship": "Dominix", "group": "Battleship", "count": 5}],
+                     "isk": 1585949032.3,
+                     "kills": [{"killmail_id": 138324530, "damage_taken": 450,
+                                "attacker_count": 4, "time": "2026-09-09T14:11:22Z"}],
+                     "kills_total": 10, "kills_truncated": false},
+           "teamB": {"…": "同上"}},
+ "killmail_ids": {"teamA": [138324530, "…"], "teamB": ["…"]},
+ "notes": ["exHours 是窗口半径…"],
+ "truncated": {"kills": false, "limit": 20, "omitted": {"teamA": 0, "teamB": 0}}}
+```
+
+**四个必须知道的口径**（也在返回的 `notes` 里）：
+
+1. **`exHours` 是窗口半径，且窗口不对称**：实测 `startTime = time − exHours`、
+   `endTime = time + 2×exHours`（`time=14:00` / `exHours=1` → `13:00..16:00`，**3 小时**）。
+   它说的是「这个时间点附近有多热闹」，**不等于整场战斗的时长** —— 别拿窗口宽度当战斗长度。
+2. **`complete` 只是 zkb 自己的判断**：`true` 不代表没有遗漏（它不解释判据）。
+3. **相邻星系没有被统计**：`adjacentSystems` 只给名字，`summary` 只含 `systemID` 这**一个**
+   星系；要邻星系得各自再查一次（本工具不会替你递归）。
+4. **`limit` 只截逐 kill 明细**：`sides.*.kills` 是前 `limit` 条（新的在前），被截时
+   `kills_truncated: true` + `truncated.omitted` 给出每边省略几条；
+   **`killmail_ids` 永远给全**（按时间倒序）—— 下一步就是拿它们喂 `fit_killmail`。
+
+**命名约定（故意混排，但有规则）**：回显 zkb 原生字段的地方保持它的拼写
+（`window.startTime` / `exHours` / `complete`），**我们派生的字段一律 snake_case**
+（`killmail_id` / `damage_taken` / `attacker_count`）。
+
+**两种时间格式并存**：`window.startTime` / `endTime` 是 **zkb 原文的字符串**
+（`YYYY-MM-DD HH:MM`）；`kills[].time` 是本层转成的 **ISO 8601 UTC**
+（与 `fit_killmail` 的 `killmail_time` 同格式）。
+
+**错误归属**：`url` 形态不对 / 时间戳不合法 / 两套来源同时给 → `invalid_argument`（带 `field`）；
+星系名认不出 → `unknown_entity`；`{"error": …}` 的归类走**共用**的 `_zkb_error_kind()`
+（`Invalid type or id` → `unknown_entity`；限流词 → `rate_limited`；其余 → `network_failed`）。
+**判成败只能看正文** —— zkb 的错误体也是 HTTP 200。
 
 ## 5. 返回契约
 

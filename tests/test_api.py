@@ -4177,7 +4177,10 @@ _ENTRY_GLOSSARY_EXPECTED = {
     "explain": {"damage_profile", "state_policy", "provenance", "combine", "minimality"},
     "sensitivity": {"damage_profile", "state_policy", "provenance", "combine"},
     "project": {"damage_profile", "state_policy"},
-    "engagement": {"damage_profile", "state_policy"},
+    # `fit_engagement` 的 `defender_survival.repair.assumes` 是本轮新增的载体
+    # （值 `unlimited_charges` / `cap_fed`）—— 交战结果里的回复速率同样带前提，
+    # 不给解释就等于让 agent 把「按充能无限算」当成实测值。
+    "engagement": {"damage_profile", "state_policy", "assumes"},
     "killmail": {"damage_profile", "state_policy"},
 }
 """每个入口在**这份固定样本**上应当带哪几条术语（枚举式断言，不是「有 glossary 就行」）。
@@ -4410,9 +4413,295 @@ def test_per_entry_glossary_stays_within_its_allowance(
         "explain": 470,  # 实测 415
         "sensitivity": 380,  # 实测 335
         "project": 130,  # 实测 112
-        "engagement": 130,  # 实测 112
+        # `fit_engagement` 现在多了 `defender_survival.repair.assumes`
+        # （值 `unlimited_charges` / `cap_fed`）→ 四条术语。实测 246，留 ~18% 余量。
+        "engagement": 290,  # 实测 246（原 112：三条 → 四条）
         "killmail": 130,  # 实测 112
     }
     for name, envelope in _entry_envelopes(eft_text, killmail_text).items():
         size = len(json.dumps(envelope["meta"]["glossary"], ensure_ascii=False))
         assert size <= allowance[name], f"{name} 的术语表 {size} 字符，超过 {allowance[name]}"
+
+
+# =============================================================================
+# 六、相关战报（T-1/5 新一轮）：`zkb_related`
+# =============================================================================
+
+RELATED_BIG = ZKB_FIXTURES / "related-30004614-202609091400.json"
+RELATED_SMALL = ZKB_FIXTURES / "related-30000142-202610191200.json"
+RELATED_URL = "https://zkillboard.com/related/30004614/202609091400/"
+"""主 fixture：AV-VB6 / Fountain，23v23、10+9 kill（真实响应裁剪，见该目录 README）。"""
+
+
+class _RelatedRecorder:
+    """假请求器：GET 回 related 文档，POST 回可选的 `ids` 响应（名字解析用）。"""
+
+    def __init__(self, payload: object, *, ids: object = None) -> None:
+        self.payload = payload
+        self.ids = ids
+        self.urls: list[str] = []
+        self.posts: list[object] = []
+
+    def __call__(self, url: str, body: object | None = None) -> object:
+        self.urls.append(url)
+        if body is not None:
+            self.posts.append(body)
+            return {} if self.ids is None else self.ids
+        return self.payload
+
+
+def _related_fixture(name: Path = RELATED_BIG) -> object:
+    return json.loads(name.read_text(encoding="utf-8-sig"))
+
+
+def _related(url: str = RELATED_URL, payload: object = None, **kwargs: object) -> tuple[dict, list[str]]:
+    recorder = _RelatedRecorder(_related_fixture() if payload is None else payload)
+    envelope = api.zkb_related(url=url, requester=recorder, **kwargs)
+    return envelope, recorder.urls
+
+
+def _related_size(result: object) -> int:
+    return len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def test_zkb_related_summarizes_the_window() -> None:
+    """摘要：system / region / window / 两边阵营 / killmail_ids —— 且**不含**大头明细。
+
+    原始响应 212 KB，原样返回会炸 context。这里同时钉住「摘要是摘要」：`involved` /
+    `victim` / `zkb` 这些逐 kill 明细块**一个都不许出现在输出里**。
+    """
+    envelope, urls = _related()
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    assert urls == [api.zkb_related_url(30004614, "202609091400")], urls
+
+    assert result["system"] == {"id": 30004614, "name": "AV-VB6"}
+    assert result["region"] == "Fountain"
+    assert result["window"] == {
+        "startTime": "2026-09-09 13:00",
+        "endTime": "2026-09-09 16:00",
+        "exHours": 1,
+        "complete": True,
+    }
+    for side in ("teamA", "teamB"):
+        block = result["sides"][side]
+        assert set(block) == {
+            "pilots", "corporations", "alliances", "ships", "isk",
+            "kills", "kills_total", "kills_truncated",
+        }, f"{side} 的字段集合不是固定形状：{sorted(block)}"
+        assert block["pilots"] > 0
+        assert block["kills_total"] == len(result["killmail_ids"][side]), (
+            "killmail_ids 与 kills_total 不一致 —— 那说明 ids 被截了"
+        )
+    # 两边互不相交（实测），否则「每边给全的 id 清单」就没有意义
+    assert not set(result["killmail_ids"]["teamA"]) & set(result["killmail_ids"]["teamB"])
+
+    # 摘要是摘要：逐 kill 的明细块不许漏进输出
+    blob = json.dumps(result, ensure_ascii=False)
+    for forbidden in ("involved", "finalBlow", "padhash", "victim", "attackerCount"):
+        assert forbidden not in blob, f"输出里混进了原始明细字段 {forbidden}"
+    size = _related_size(result)
+    assert size <= 16_000, f"摘要 {size} B 太大了（原始 212 KB，摘要该在 10 KB 量级）"
+
+
+def test_zkb_related_killmail_ids_are_complete_while_details_truncate() -> None:
+    """`limit` 只截**逐 kill 明细**，`killmail_ids` 必须给全 —— 两件事分开钉。"""
+    envelope, _urls = _related(limit=3)
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    for side in ("teamA", "teamB"):
+        block = result["sides"][side]
+        assert len(block["kills"]) == 3, f"{side} 应只展示 3 条明细"
+        assert block["kills_truncated"] is True
+        assert len(result["killmail_ids"][side]) == block["kills_total"] > 3, (
+            f"{side} 的 killmail_ids 被 limit 连带截断了"
+        )
+    assert result["truncated"]["kills"] is True
+    assert result["truncated"]["limit"] == 3
+    assert result["truncated"]["omitted"]["teamA"] == 10 - 3
+    assert result["truncated"]["omitted"]["teamB"] == 9 - 3
+    assert any("limit" in note for note in result["notes"]), (
+        f"被截断必须写进 notes，实际 {result['notes']}"
+    )
+
+    # 默认 limit=20 装得下这两个样本 → 不截断、omitted 全 0
+    full, _ = _related()
+    assert full["result"]["truncated"]["kills"] is False
+    assert set(full["result"]["truncated"]["omitted"].values()) == {0}
+
+
+def test_zkb_related_notes_pin_the_three_traps() -> None:
+    """`notes` 至少三条，且三条**口径**都在（exHours 半径 / complete 只是判断 / 相邻星系不统计）。"""
+    envelope, _urls = _related()
+    notes = envelope["result"]["notes"]
+    assert len(notes) >= 3, f"notes 至少要三条，实际 {notes}"
+    joined = "\n".join(notes)
+    assert "exHours" in joined and "窗口半径" in joined, "缺「exHours 是窗口半径、不等于整场战斗」"
+    assert "complete" in joined, "缺「complete 只是 zkb 的判断」"
+    assert "相邻星系" in joined, "缺「相邻星系没有被统计」"
+    # 窗口不对称是实测出来的事实，必须说出来（否则会按对称 ±exHours 去理解）
+    assert "不对称" in joined and "2×exHours" in joined, (
+        f"缺「窗口不对称（endTime = time + 2×exHours）」这条实测口径：{joined}"
+    )
+
+
+def test_zkb_related_notes_assertion_is_not_vacuous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**配对证明**：把 notes 清空，上一条必须不成立。"""
+    monkeypatch.setattr(api, "_related_notes", lambda *args, **kwargs: [])
+    envelope, _urls = _related()
+    assert envelope["result"]["notes"] == []
+    assert "窗口半径" not in "\n".join(envelope["result"]["notes"])
+
+
+def test_zkb_related_teamB_kills_are_present() -> None:
+    """两边都要有 kills（丢掉 teamB 就等于只报了半场）。"""
+    envelope, _urls = _related()
+    team_b = envelope["result"]["sides"]["teamB"]
+    assert team_b["kills_total"] == 9
+    assert len(team_b["kills"]) == 9
+    assert all(
+        set(row) == {"killmail_id", "damage_taken", "attacker_count", "time"}
+        for row in team_b["kills"]
+    )
+
+
+def test_zkb_related_teamB_kills_assertion_is_not_vacuous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**配对证明**：把 teamB 的 kills 丢掉，上一条必须不成立。"""
+    original = api._related_side
+
+    def drop_team_b_kills(block: object, limit: int):
+        summary, ids, omitted = original(block, limit)
+        summary["kills"] = []
+        return summary, ids, omitted
+
+    monkeypatch.setattr(api, "_related_side", drop_team_b_kills)
+    envelope, _urls = _related()
+    assert envelope["result"]["sides"]["teamB"]["kills"] == []
+
+
+def test_zkb_related_accepts_both_url_forms() -> None:
+    """网页链接 / `/api/related/` / 带查询串 / 无尾斜杠 —— 都认，且都请求 api 形态。"""
+    forms = (
+        "https://zkillboard.com/related/30004614/202609091400/",
+        "https://zkillboard.com/api/related/30004614/202609091400/",
+        "https://zkillboard.com/related/30004614/202609091400/?page=1",
+        "https://zkillboard.com/related/30004614/202609091400",
+    )
+    expected = api.zkb_related_url(30004614, "202609091400")
+    for form in forms:
+        envelope, urls = _related(url=form)
+        assert envelope["ok"] is True, (form, envelope.get("error"))
+        assert urls == [expected], (form, urls)
+
+
+def test_zkb_related_rejects_bad_url_and_conflicting_sources() -> None:
+    """非 related 链接 / url 与 system+time 同时给 → `invalid_argument`，且**不发请求**。"""
+    for label, kwargs in (
+        ("非 related 链接", {"url": "https://zkillboard.com/kill/139275237/"}),
+        ("url 与 system 互斥", {"url": RELATED_URL, "system": 30004614}),
+        ("url 与 time 互斥", {"url": RELATED_URL, "time": "202609091400"}),
+    ):
+        recorder = _RelatedRecorder(_related_fixture())
+        envelope = api.zkb_related(requester=recorder, **kwargs)
+        assert envelope["ok"] is False, label
+        error = envelope["error"]
+        assert error["kind"] == "invalid_argument", (label, error)
+        assert error["field"] == "url", (label, error)
+        assert recorder.urls == [], f"{label}：参数错误不该发请求"
+
+
+def test_zkb_related_time_stamp_is_strictly_twelve_digits() -> None:
+    """时间戳**只认 12 位**：`202609091400` 通过，其它一律 `invalid_argument`（不宽松解析）。"""
+    ok = api.zkb_related(
+        system=30004614, time="202609091400", requester=_RelatedRecorder(_related_fixture())
+    )
+    assert ok["ok"] is True, ok.get("error")
+
+    for bad in ("2026-09-09 14:00", "2026090914", "2026090914000", "abcdefghijkl", ""):
+        recorder = _RelatedRecorder(_related_fixture())
+        envelope = api.zkb_related(system=30004614, time=bad, requester=recorder)
+        assert envelope["ok"] is False, bad
+        error = envelope["error"]
+        assert error["kind"] == "invalid_argument", (bad, error)
+        assert error["field"] == "time", (bad, error)
+        assert recorder.urls == [], f"{bad!r} 不该发请求"
+
+
+def test_zkb_related_requires_a_target() -> None:
+    """什么都不给 / 只给 system 不给 time → `invalid_argument` + 可用的两种给法。"""
+    recorder = _RelatedRecorder(_related_fixture())
+    missing_all = api.zkb_related(requester=recorder)
+    assert missing_all["ok"] is False
+    assert missing_all["error"]["field"] == "system"
+    assert "example" in missing_all["error"]["hint"]
+
+    only_system = api.zkb_related(system=30004614, requester=recorder)
+    assert only_system["ok"] is False
+    assert only_system["error"]["kind"] == "invalid_argument"
+    assert only_system["error"]["field"] == "time"
+    assert recorder.urls == []
+
+
+def test_zkb_related_resolves_a_system_name_through_esi() -> None:
+    """`system` 给名字 → 先 ESI `/universe/ids/`（与 zkb_search 同一套解析），再查 related。"""
+    recorder = _RelatedRecorder(
+        _related_fixture(RELATED_SMALL),
+        ids={"systems": [{"id": 30000142, "name": "Jita"}]},
+    )
+    virtual_clock, sleeper = _instant()
+    envelope = api.zkb_related(
+        system="Jita", time="202610191200",
+        requester=recorder, clock=virtual_clock, sleeper=sleeper,
+    )
+    assert envelope["ok"] is True, envelope
+    assert recorder.urls == [
+        api.ESI_UNIVERSE_IDS_API,
+        api.zkb_related_url(30000142, "202610191200"),
+    ], recorder.urls
+    assert recorder.posts[0] == ["Jita"], "名字解析的请求体就是名字数组"
+    assert envelope["result"]["system"] == {"id": 30000142, "name": "Jita"}
+
+
+def test_zkb_related_error_bodies_use_the_shared_kind() -> None:
+    """`{"error": ...}` 的归类走**共用**的 `_zkb_error_kind()`（不另写一套）。"""
+    for body, expected in (
+        ({"error": "Invalid type or id"}, "unknown_entity"),
+        ({"error": "Too many requests"}, "rate_limited"),
+        ({"error": "something odd"}, "network_failed"),
+    ):
+        envelope, _urls = _related(payload=body)
+        assert envelope["ok"] is False
+        assert envelope["error"]["kind"] == expected, (body, envelope["error"])
+
+
+def test_zkb_related_missing_summary_is_network_failed() -> None:
+    """响应里没有 `summary` 块（空窗口）→ `network_failed`，**不编一份空战况**。"""
+    envelope, _urls = _related(payload={"systemID": 30004614, "systemName": "AV-VB6"})
+    assert envelope["ok"] is False
+    assert envelope["error"]["kind"] == "network_failed"
+    assert "summary" in envelope["error"]["message"]
+
+
+def test_zkb_related_passes_numbers_through() -> None:
+    """数值**原样透传**（与 `zkb_stats` 同一条纪律）：不取整、不四舍五入。"""
+    document = _related_fixture()
+    document["exHours"] = 1.5
+    document["summary"]["teamA"]["totals"]["total_price"] = 1234.5678
+    first_key = next(iter(document["summary"]["teamA"]["kills"]))
+    document["summary"]["teamA"]["kills"][first_key]["damage_taken"] = 0.5
+    document["summary"]["teamA"]["kills"][first_key]["attackerCount"] = 2.5
+
+    envelope, _urls = _related(payload=document)
+    result = envelope["result"]
+    assert result["window"]["exHours"] == 1.5
+    assert result["sides"]["teamA"]["isk"] == 1234.5678
+    row = next(
+        item for item in result["sides"]["teamA"]["kills"]
+        if item["killmail_id"] == int(first_key)
+    )
+    assert row["damage_taken"] == 0.5
+    assert row["attacker_count"] == 2.5

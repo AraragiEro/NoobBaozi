@@ -247,7 +247,8 @@ GLOSSARY_TERMS: dict[str, str] = {
     "budget": "chars=正文长度（不含 budget 块）；degraded=true 表示超出字符预算，只上报不裁剪",
     "assumes": (
         "某数值所依赖的前提：unlimited_charges=回复速率（repair_total_hp_s）按「充能无限」算；"
-        "charge_limited=true 时那只是峰值，实际受充能/装填限制"
+        "charge_limited=true 时那只是峰值，实际受充能/装填限制；"
+        "cap_fed=靠电容维持，电容耗尽即中断"
     ),
     "damage_profile": "uniform=四系伤害均分 25/25/25/25；真实战况取决于对手",
     "state_policy": "engine_default=模块状态按引擎默认推定（不是实测状态）",
@@ -5211,6 +5212,463 @@ def zkb_stats(
         )
 
 
+# =============================================================================
+# 十五、相关战报（T-1/5）：`zkb_related` —— 一个星系在某个时间窗内的「双方战况」
+# =============================================================================
+#
+# 为什么要有它
+# ------------
+# zkb 的列表接口**已停用** `startTime` / `endTime`（`because of abuse`），只能
+# `pastSeconds` + `page` 往回翻 —— 等于**查不了任意历史窗口**。而 `/api/related/` 把时间
+# 放在**路径里**：`/api/related/<systemID>/<YYYYMMDDHHMM>/`，于是任意历史窗口都能查。
+#
+# 它还给两样别处拿不到的东西：
+# 1. **阵营划分**（`summary.teamA` / `teamB`）—— 谁和谁在打；
+# 2. 每条 kill 的**完整明细块**（含 `zkb.hash`）—— 所以摘要里给出 `killmail_ids` 之后，
+#    可以直接把它们丢给 `fit_killmail` 深挖。
+#
+# 实测（2026-10-20，python urllib 直连）：
+#
+# | 请求 | 结果 |
+# |---|---|
+# | `/api/related/30004614/202609091400/` | 200，**212,286 B**（AV-VB6 / Fountain；23v23，10+9 kill） |
+# | `/api/related/30000142/202610191200/` | 200，38,778 B（Jita / The Forge；4v3，4+1 kill） |
+#
+# **原样返回会炸 context**（212 KB），所以本层只给摘要；`killmail_ids` 给全，
+# 逐 kill 的明细只给前 `limit` 条并显式 `truncated`。
+#
+# 两条实测出来的「容易读错」的点（写进返回的 `notes`）：
+# - **窗口不对称**：`exHours=1` 时实测 `startTime = time − 1h`、`endTime = time + 2h`
+#   （`14:00` → `13:00..16:00`），**不是**对称的 ±exHours；
+# - 相邻星系**没有**被统计：`adjacentSystems` 只给名字，`summary` 只含 `systemID` 一个星系。
+
+ZKILL_RELATED_API: str = "https://zkillboard.com/api/related/{system_id}/{stamp}/"
+"""相关战报接口模板。**时间在路径里**（`stamp` 固定 12 位 `YYYYMMDDHHMM`）。"""
+
+ZKB_RELATED_PATH_RE: re.Pattern[str] = re.compile(
+    r"/related/(?P<system>\d+)/(?P<stamp>\d{12})/?(?:\?.*)?$"
+)
+r"""认 `https://zkillboard.com/related/<sys>/<stamp>/` 与 `.../api/related/...` 两种链接。
+
+`(?:\?.*)?` 吃掉查询串：主人贴的网页链接常带 `?page=1` 之类，那不该让整条解析失败。
+"""
+
+ZKB_RELATED_STAMP_RE: re.Pattern[str] = re.compile(r"^\d{12}$")
+"""`time` 参数只认 12 位纯数字（`202609091400`）。
+
+`2026-09-09 14:00` / `2026090914` / 13 位都要判 `invalid_argument` —— **不做宽松解析**：
+把「我猜你是 14 点」当成用户意图，比直接报错危险得多。
+"""
+
+ZKB_RELATED_KILL_LIMIT: int = 20
+"""每边最多给几条逐 kill 明细（`limit` 的默认值）。**`killmail_ids` 不受它限制**。"""
+
+ZKB_RELATED_SIDES: tuple[str, ...] = ("teamA", "teamB")
+"""阵营键名（zkb 原样）。"""
+
+
+def zkb_related_url(system_id: int, stamp: str) -> str:
+    """拼一条相关战报 URL（**纯函数**，可离线断言）。"""
+    return ZKILL_RELATED_API.format(system_id=int(system_id), stamp=stamp)
+
+
+def _related_stamp(value: object) -> str:
+    """校验时间戳：只接受 12 位纯数字。"""
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise _ApiFailure(
+            "invalid_argument",
+            f"time 必须是 12 位数字串（YYYYMMDDHHMM），收到 {type(value).__name__}",
+            field="time",
+            hint={"format": "YYYYMMDDHHMM", "example": "202609091400"},
+        )
+    text = str(value).strip()
+    if not ZKB_RELATED_STAMP_RE.match(text):
+        raise _ApiFailure(
+            "invalid_argument",
+            f"time 必须是 12 位数字（YYYYMMDDHHMM），收到 {text!r}"
+            f"（{len(text)} 位）",
+            field="time",
+            hint={"format": "YYYYMMDDHHMM", "example": "202609091400"},
+        )
+    return text
+
+
+def _related_int(value: object) -> int | None:
+    """zbk 的 id / 时间戳**有时是 `int`、有时是字符串**（JSON 对象的 key、`$numberLong`）。
+
+    `_as_int()` 只收 `int`，直接拿它去读 `$numberLong`（`"1788963082000"`）或
+    `kills` 的 key（`"138324530"`）会**静默得到 `None`** —— 那两个字段就永远丢了。
+    这个助手把「整数或纯数字串」都收下，其它一律 `None`（不猜）。
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
+            return int(text)
+    return None
+
+
+def _related_target(
+    url: object,
+    system: object,
+    time: object,
+    *,
+    requester: ZkbRequester | None = None,
+    clock: Callable[[], float] | None = None,
+    sleeper: Callable[[float], None] | None = None,
+) -> tuple[int, str, dict]:
+    """`(url | system + time)` → `(system_id, stamp, resolved)`。
+
+    规则（**不静默取一个**）：
+
+    - 给了 `url` → 只认 `url`；**同时**给 `system` / `time` → `invalid_argument`
+      （两套来源打架时猜一个，等于悄悄忽略另一个）；
+    - 没给 `url` → 必须给 `system`（名字或 id，走 `_zkb_resolve_entity`）+ `time`。
+
+    Returns:
+        `(星系 id, 12 位时间戳, 回显用的 resolved 块)`。`url` 形态下 resolved 是
+        `{"url": ..., "system_id": ..., "time": ...}`。
+
+    Raises:
+        _ApiFailure: `invalid_argument` / `unknown_entity`。
+    """
+    if url is not None:
+        if system is not None or time is not None:
+            raise _ApiFailure(
+                "invalid_argument",
+                "url 与 system/time 是两套来源，只能给一套（给 url 时不要再给 system/time）",
+                field="url",
+                hint={"either": ["url"], "or": ["system", "time"]},
+            )
+        if not isinstance(url, str) or not url.strip():
+            raise _ApiFailure(
+                "invalid_argument",
+                f"url 必须是非空字符串，收到 {type(url).__name__}",
+                field="url",
+            )
+        matched = ZKB_RELATED_PATH_RE.search(url.strip())
+        if matched is None:
+            raise _ApiFailure(
+                "invalid_argument",
+                f"这不是一条 related 链接：{url!r}；要 "
+                "https://zkillboard.com/related/<systemID>/<YYYYMMDDHHMM>/ "
+                "或 .../api/related/... 形态",
+                field="url",
+                hint={
+                    "pattern": "/related/<systemID>/<YYYYMMDDHHMM>/",
+                    "example": "https://zkillboard.com/related/30004614/202609091400/",
+                },
+            )
+        system_id = int(matched.group("system"))
+        stamp = matched.group("stamp")
+        return system_id, stamp, {"url": url.strip(), "system_id": system_id, "time": stamp}
+
+    if system is None:
+        raise _ApiFailure(
+            "invalid_argument",
+            "要么给 url，要么给 system + time",
+            field="system",
+            hint={
+                "example": {"system": "AV-VB6", "time": "202609091400"},
+                "url_example": "https://zkillboard.com/related/30004614/202609091400/",
+            },
+        )
+    entry = _zkb_resolve_entity(
+        "solar_system", system, requester, clock=clock, sleeper=sleeper
+    )
+    stamp = _related_stamp(time)
+    return int(entry["id"]), stamp, {"solar_system": entry, "time": stamp}
+
+
+def _related_time(value: object) -> str | None:
+    """`kills[*].dttm` = `{"$date": {"$numberLong": "<ms>"}}` → ISO 8601（UTC）。
+
+    与 `fit_killmail` 的 `killmail_time` 同格式（`2026-09-09T14:00:00Z`），调用方不必
+    为两处准备两种时间写法。解析不出来给 `None`（**不猜**）。
+    """
+    if not isinstance(value, dict):
+        return None
+    date = value.get("$date")
+    if not isinstance(date, dict):
+        return None
+    milliseconds = _related_int(date.get("$numberLong"))
+    if milliseconds is None:
+        return None
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(milliseconds / 1000.0))
+
+
+def _related_side(block: object, limit: int) -> tuple[dict, list[int], int]:
+    """一边（`summary.teamA` / `teamB`）→ `(摘要, killmail_id 列表, 被省略条数)`。
+
+    人数 / 公司 / 联盟都是**去重计数**（同一个驾驶员可能出现在名单里多次：他有多条 kill）。
+    `ships` 按「船名 + 舰级」聚合。
+    """
+    data = block if isinstance(block, dict) else {}
+    roster = [entry for entry in (data.get("list") or []) if isinstance(entry, dict)]
+
+    pilots: set[int] = set()
+    corporations: set[int] = set()
+    alliances: set[int] = set()
+    ships: dict[tuple[str, str], int] = {}
+    for entry in roster:
+        pilot = _as_int(entry.get("characterID"))
+        if pilot is not None:
+            pilots.add(pilot)
+        corporation = _as_int(entry.get("corporationID"))
+        if corporation is not None:
+            corporations.add(corporation)
+        alliance = _as_int(entry.get("allianceID"))
+        if alliance is not None and alliance != 0:  # 0 = 无联盟，不算一个「联盟」
+            alliances.add(alliance)
+        ship_name = entry.get("shipName")
+        group_name = entry.get("groupName")
+        if isinstance(ship_name, str) and ship_name:
+            key = (ship_name, group_name if isinstance(group_name, str) else "")
+            ships[key] = ships.get(key, 0) + 1
+
+    ship_rows = [
+        {"ship": ship, "group": group or None, "count": count}
+        for (ship, group), count in sorted(
+            ships.items(), key=lambda item: (-item[1], item[0][0])
+        )
+    ]
+
+    totals = data.get("totals") if isinstance(data.get("totals"), dict) else {}
+    isk = _stats_number(totals.get("total_price"))
+
+    kills_raw = data.get("kills") if isinstance(data.get("kills"), dict) else {}
+    kills: list[dict] = []
+    for _key, kill in kills_raw.items():
+        if not isinstance(kill, dict):
+            continue
+        kills.append(
+            {
+                # `killID` 缺失时回退到 `kills` 的 key（JSON 对象 key 是字符串）
+                "killmail_id": _related_int(kill.get("killID")) or _related_int(_key),
+                "damage_taken": _stats_number(kill.get("damage_taken")),
+                "attacker_count": _stats_number(kill.get("attackerCount")),
+                "time": _related_time(kill.get("dttm")),
+            }
+        )
+    # 新的在前（与 `zkb_search` 的排序一致）；时间缺失的排最后，用 id 兜底。
+    kills.sort(key=lambda row: (row["time"] or "", row["killmail_id"] or 0), reverse=True)
+    all_ids = [row["killmail_id"] for row in kills if row["killmail_id"] is not None]
+
+    summary = {
+        "pilots": len(pilots),
+        "corporations": len(corporations),
+        "alliances": len(alliances),
+        "ships": ship_rows,
+        "isk": isk,
+        "kills": kills[:limit],
+        "kills_total": len(kills),
+        # 明细被截了要说出来；`killmail_ids` 仍然是全的。
+        "kills_truncated": len(kills) > limit,
+    }
+    return summary, all_ids, max(0, len(kills) - limit)
+
+
+def _related_notes(document: dict, system_id: int,
+                   omitted: dict[str, int], adjacent: dict) -> list[str]:
+    """`notes`：**至少三条**「读之前必须知道」的口径。"""
+    start = document.get("startTime")
+    end = document.get("endTime")
+    moment = document.get("time")
+    ex_hours = _stats_number(document.get("exHours"))
+    notes = [
+        f"exHours={ex_hours} 是**窗口半径**，窗口并不对称：实测 startTime = time − exHours、"
+        f"endTime = time + 2×exHours（time={moment} → {start}..{end}）。"
+        "它是「这个时间点附近有多热闹」，**不等于整场战斗的时长**。",
+        f"complete={document.get('complete')} 只是 zkb 自己的判断，"
+        "`true` 不代表没有遗漏（它不解释判据）。",
+    ]
+    if adjacent:
+        names = "、".join(str(name) for name in list(adjacent.values())[:4])
+        notes.append(
+            f"相邻星系**没有**被统计：adjacentSystems 只给名字（{names}…），"
+            f"summary 只含 systemID={system_id} 这一个星系；要邻星系得各自再查一次。"
+        )
+    else:
+        notes.append("zkb 没给 adjacentSystems：本窗口没有可列出的相邻星系。")
+    if any(omitted.values()):
+        detail = "、".join(f"{side} 省略 {count} 条" for side, count in omitted.items() if count)
+        notes.append(
+            f"逐 kill 明细按 limit 截断（{detail}），但 killmail_ids 是**全的** —— "
+            "要明细就对里面的 id 调 fit_killmail。"
+        )
+    excluded = (
+        document.get("summary", {}).get("excluded")
+        if isinstance(document.get("summary"), dict)
+        else None
+    )
+    if isinstance(excluded, list) and excluded:
+        notes.append(
+            f"zkb 排除了 {len(excluded)} 个实体（summary.excluded），它们**不在**上面两边的统计里。"
+        )
+    return notes
+
+
+def zkb_related(
+    url: object = None,
+    system: object = None,
+    time: object = None,
+    *,
+    limit: object = ZKB_RELATED_KILL_LIMIT,
+    requester: ZkbRequester | None = None,
+    clock: Callable[[], float] | None = None,
+    sleeper: Callable[[float], None] | None = None,
+    **common: object,
+) -> dict:
+    """一个星系在**指定时间窗**内的相关战报：双方阵营、舰船构成、ISK、killmail id 清单。
+
+    为什么需要它：zkb 的列表接口**已停用** `startTime` / `endTime`（abuse 防护），只能
+    `pastSeconds` + `page` 往回翻；而 `/api/related/` 把时间放在**路径里**，所以
+    **任意历史窗口**都能查。它还给阵营划分（`teamA` / `teamB`）—— 那是别处拿不到的。
+
+    Args:
+        url: 首选。`https://zkillboard.com/related/<systemID>/<YYYYMMDDHHMM>/`
+            或 `.../api/related/...`。**给了它就别再给 `system` / `time`**（两套来源打架
+            时猜一个等于悄悄忽略另一个 → `invalid_argument`）。
+        system: 星系（名字或 id）；`url=None` 时必填。名字走 ESI `/universe/ids/`。
+        time: 时间戳，**固定 12 位** `YYYYMMDDHHMM`（如 `202609091400`）。
+            `2026-09-09 14:00` / `2026090914` / 13 位都会被拒 —— **不做宽松解析**。
+        limit: 每边最多给几条逐 kill 明细（1..200，默认 20）。**不影响 `killmail_ids`**。
+        requester / clock / sleeper: 测试注入点（生产不传）。
+
+    Returns:
+        成功时 `result`（原响应 212 KB → 摘要约 5 KB）：
+
+        ```json
+        {"system": {"id": 30004614, "name": "AV-VB6"},
+         "region": "Fountain",
+         "window": {"startTime": "2026-09-09 13:00", "endTime": "2026-09-09 16:00",
+                    "exHours": 1, "complete": true},
+         "sides": {"teamA": {"pilots": 23, "corporations": 12, "alliances": 4,
+                             "ships": [{"ship": "Phoenix Navy Issue",
+                                        "group": "Dreadnought", "count": 3}],
+                             "isk": 1585949032.3,
+                             "kills": [{"killmail_id": 138324530, "damage_taken": 450,
+                                        "attacker_count": 4,
+                                        "time": "2026-09-09T14:11:22Z"}],
+                             "kills_total": 10, "kills_truncated": false},
+                   "teamB": {"...": "同上"}},
+         "killmail_ids": {"teamA": [138324530, "..."], "teamB": ["..."]},
+         "notes": ["exHours 是窗口半径，…"],
+         "truncated": {"kills": false, "limit": 20, "omitted": {"teamA": 0, "teamB": 0}}}
+        ```
+
+        命名约定（**故意混排，有规则**）：**回显 zkb 原生字段的地方保持它的拼写**
+        （`window.startTime` / `exHours` / `complete`），**我们派生的字段一律 snake_case**
+        （`killmail_id` / `damage_taken` / `attacker_count`）。
+
+        `killmail_ids` 每边**给全**（按时间倒序）—— 下一步就是拿它调 `fit_killmail`。
+        `sides.<side>.kills` 只给前 `limit` 条，被截时 `kills_truncated=true` 且
+        `truncated.omitted` 给出每边省略了几条。
+
+        `window.startTime` / `endTime` 是 **zkb 原文的字符串**（`YYYY-MM-DD HH:MM`），
+        而 `kills[].time` 是本层转成的 **ISO 8601 UTC**（与 `fit_killmail` 的
+        `killmail_time` 同格式）。
+
+    失败时 `error.kind` ∈ `invalid_argument`（url 形态 / 时间戳 / 参数互斥）/
+    `unknown_entity`（星系认不出）/ `rate_limited` / `network_failed`
+    （`{"error": ...}` 的归类走**共用**的 `_zkb_error_kind()`）。
+    """
+    try:
+        _zkb_check_common(common)
+        base_limit = _zkb_integer(
+            "limit", limit, default=ZKB_RELATED_KILL_LIMIT, minimum=1, maximum=ZKB_PAGE_SIZE
+        )
+        system_id, stamp, resolved = _related_target(
+            url, system, time, requester=requester, clock=clock, sleeper=sleeper
+        )
+        target_url = zkb_related_url(system_id, stamp)
+        payload = _zkb_request(
+            target_url, requester=requester, clock=clock, sleeper=sleeper
+        )
+        if not isinstance(payload, dict):
+            raise _ApiFailure(
+                "network_failed",
+                f"zkb 返回的不是对象：{type(payload).__name__}",
+                url=target_url,
+            )
+        error = payload.get("error")
+        if error:
+            kind, why = _zkb_error_kind(error)
+            raise _ApiFailure(
+                kind,
+                f"zkb 不认这次 related 查询（{why}）：{error}",
+                url=target_url,
+                raw=str(error),
+            )
+        summary_block = payload.get("summary")
+        if not isinstance(summary_block, dict):
+            raise _ApiFailure(
+                "network_failed",
+                "zkb 的 related 响应里没有 summary 块（可能是这个窗口没有任何战报）",
+                url=target_url,
+                raw=str(sorted(payload))[:200],
+            )
+
+        sides: dict[str, dict] = {}
+        killmail_ids: dict[str, list[int]] = {}
+        omitted: dict[str, int] = {}
+        for side in ZKB_RELATED_SIDES:
+            side_summary, side_ids, side_omitted = _related_side(
+                summary_block.get(side), base_limit
+            )
+            sides[side] = side_summary
+            killmail_ids[side] = side_ids
+            omitted[side] = side_omitted
+
+        adjacent = (
+            payload.get("adjacentSystems")
+            if isinstance(payload.get("adjacentSystems"), dict)
+            else {}
+        )
+        notes = _related_notes(payload, system_id, omitted, adjacent)
+        result = {
+            "system": {"id": system_id, "name": payload.get("systemName")},
+            "region": payload.get("regionName"),
+            "window": {
+                "startTime": payload.get("startTime"),
+                "endTime": payload.get("endTime"),
+                "exHours": _stats_number(payload.get("exHours")),
+                "complete": payload.get("complete"),
+            },
+            "sides": sides,
+            "killmail_ids": killmail_ids,
+            "notes": notes,
+            "truncated": {
+                "kills": any(omitted.values()),
+                "limit": base_limit,
+                "omitted": omitted,
+            },
+        }
+        meta = {
+            "spec_version": SPEC_VERSION,
+            "source": "zkillboard",
+            "min_interval_s": ZKB_MIN_INTERVAL_S,
+            "limit": base_limit,
+            "resolved": resolved,
+            "urls": [target_url],
+            "note": "related 把时间放在路径里，所以能查任意历史窗口（列表接口的 startTime 已被停用）",
+        }
+        return _success(result, meta)
+    except _ApiFailure as exc:
+        return _failure(exc.payload())
+    except Exception as exc:  # noqa: BLE001 - 边界层：任何异常都不得裸抛给 agent
+        return _failure(
+            {
+                "kind": "internal_error",
+                "message": "接口层内部异常，本次没有可用结果",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+        )
+
+
 __all__ = [
     "BY_PILOT_ROWS",
     "CACHE_MAX_ENTRIES",
@@ -5271,6 +5729,10 @@ __all__ = [
     "ZKB_RATE_LIMIT_STATUSES",
     "ZKB_RATE_LIMIT_TOKENS",
     "ZKB_REJECTED_PARAMETERS",
+    "ZKB_RELATED_KILL_LIMIT",
+    "ZKB_RELATED_PATH_RE",
+    "ZKB_RELATED_SIDES",
+    "ZKB_RELATED_STAMP_RE",
     "ZKB_SEARCH_NOTE",
     "ZKB_SIDES",
     "ZKB_SIDE_BOTH",
@@ -5313,6 +5775,8 @@ __all__ = [
     "universe_names",
     "universe_system",
     "weapon_family",
+    "zkb_related",
+    "zkb_related_url",
     "zkb_search",
     "zkb_stats",
     "zkb_stats_url",

@@ -1,0 +1,291 @@
+{
+ "adjacentSystems": {
+  "30000138": "Ikuchi",
+  "30000140": "Maurasi",
+  "30002780": "Muvolailen",
+  "30000145": "New Caldari",
+  "30000143": "Niyabainen",
+  "30000144": "Perimeter",
+  "30001363": "Sobaseki"
+ },
+ "complete": true,
+ "endTime": "2026-10-19 14:00",
+ "exHours": 1,
+ "options": "{\"A\":[],\"B\":[],\"excluded\":[]}",
+ "regionName": "The Forge",
+ "relatedTime": 202610191200,
+ "selectedSystems": {
+  "30000142": "Jita"
+ },
+ "solarSystemID": 30000142,
+ "startTime": "2026-10-19 11:00",
+ "summary": {
+  "teamA": {
+   "list": [
+    {
+     "shipTypeID": 29988,
+     "characterID": 2116492645,
+     "corporationID": 98123507,
+     "allianceID": 1680888152,
+     "groupID": 963,
+     "isVictim": false,
+     "shipName": "Proteus",
+     "groupName": "Strategic Cruiser",
+     "characterName": "King MJ Aldent",
+     "corporationName": "EVE Corporation 987654321-POP",
+     "allianceName": "The Marmite Collective",
+     "finalBlow": true
+    },
+    {
+     "shipTypeID": 29988,
+     "characterID": 94807009,
+     "corporationID": 98123507,
+     "allianceID": 1680888152,
+     "groupID": 963,
+     "isVictim": false,
+     "shipName": "Proteus",
+     "groupName": "Strategic Cruiser",
+     "characterName": "Anima Shy",
+     "corporationName": "EVE Corporation 987654321-POP",
+     "allianceName": "The Marmite Collective"
+    },
+    {
+     "shipTypeID": 11129,
+     "characterID": 2123576569,
+     "corporationID": 1000179,
+     "groupID": 31,
+     "isVictim": true,
+     "shipName": "Gallente Shuttle",
+     "groupName": "Shuttle",
+     "characterName": "Talia Darkstone",
+     "corporationName": "24th Imperial Crusade",
+     "factionID": 500003,
+     "factionName": "Amarr Empire",
+     "killID": 139279749,
+     "destroyed": 139279749
+    },
+    {
+     "shipTypeID": 587,
+     "characterID": 2124791337,
+     "corporationID": 1000182,
+     "groupID": 25,
+     "isVictim": true,
+     "shipName": "Rifter",
+     "groupName": "Frigate",
+     "characterName": "Boob Titskiy",
+     "corporationName": "Tribal Liberation Force",
+     "factionID": 500002,
+     "factionName": "Minmatar Republic",
+     "killID": 139280035,
+     "destroyed": 139280035
+    }
+   ],
+   "totals": {
+    "pilotCount": 4,
+    "totalShips": 4,
+    "total_points": 6,
+    "total_price": 1198595.53,
+    "total_dropped": 295672.01,
+    "groupIDs": {
+     "29": {
+      "groupID": 29,
+      "groupName": "Capsule",
+      "count": 2,
+      "isk": 20000,
+      "points": 2
+     },
+     "25": {
+      "groupID": 25,
+      "groupName": "Frigate",
+      "count": 1,
+      "isk": 1165197.53,
+      "points": 3
+     },
+     "31": {
+      "groupID": 31,
+      "groupName": "Shuttle",
+      "count": 1,
+      "isk": 13398,
+      "points": 1
+     }
+    }
+   },
+   "kills": {
+    "139280049": {
+     "killID": 139280049,
+     "attackerCount": 1,
+     "damage_taken": 418,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1792414549000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:au",
+      "cat:6",
+      "#:1",
+      "pvp",
+      "loc:highsec",
+      "isk:under1b"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "139280035": {
+     "killID": 139280035,
+     "attackerCount": 2,
+     "damage_taken": 1074,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1792414509000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:au",
+      "cat:6",
+      "#:2+",
+      "pvp",
+      "loc:highsec",
+      "isk:under1b"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "139279769": {
+     "killID": 139279769,
+     "attackerCount": 1,
+     "damage_taken": 461,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1792413589000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:au",
+      "cat:6",
+      "#:1",
+      "pvp",
+      "loc:highsec",
+      "isk:under1b"
+     ],
+     "solo": false,
+     "npc": false
+    },
+    "139279749": {
+     "killID": 139279749,
+     "attackerCount": 1,
+     "damage_taken": 557,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1792413532000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:au",
+      "cat:6",
+      "#:1",
+      "pvp",
+      "loc:highsec",
+      "isk:under1b"
+     ],
+     "solo": false,
+     "npc": false
+    }
+   }
+  },
+  "teamB": {
+   "list": [
+    {
+     "shipTypeID": 24702,
+     "characterID": 2124325243,
+     "corporationID": 98000855,
+     "allianceID": 99010877,
+     "groupID": 419,
+     "isVictim": true,
+     "shipName": "Hurricane",
+     "groupName": "Combat Battlecruiser",
+     "characterName": "Bilko78",
+     "corporationName": "Titan Inc.",
+     "allianceName": "Out of the Blue.",
+     "killID": 139279470,
+     "destroyed": 139279470
+    },
+    {
+     "shipTypeID": 52252,
+     "characterID": 2117909280,
+     "corporationID": 98845210,
+     "groupID": 358,
+     "isVictim": false,
+     "shipName": "Ikitursa",
+     "groupName": "Heavy Assault Cruiser",
+     "characterName": "Ben Yo",
+     "corporationName": "Gorging Edge",
+     "factionID": 500011,
+     "factionName": "Angel Cartel",
+     "finalBlow": true
+    },
+    {
+     "shipTypeID": 37456,
+     "characterID": 2122940371,
+     "corporationID": 1000436,
+     "groupID": 25,
+     "isVictim": false,
+     "shipName": "Maulus Navy Issue",
+     "groupName": "Frigate",
+     "characterName": "Haiflosse",
+     "corporationName": "Malakim Zealots",
+     "factionID": 500011,
+     "factionName": "Angel Cartel"
+    }
+   ],
+   "totals": {
+    "pilotCount": 3,
+    "totalShips": 1,
+    "total_points": 25,
+    "total_price": 88819647.36,
+    "total_dropped": 20451630.7,
+    "groupIDs": {
+     "419": {
+      "groupID": 419,
+      "groupName": "Combat Battlecruiser",
+      "count": 1,
+      "isk": 88819647.36,
+      "points": 25
+     }
+    }
+   },
+   "kills": {
+    "139279470": {
+     "killID": 139279470,
+     "attackerCount": 2,
+     "damage_taken": 24282,
+     "dttm": {
+      "$date": {
+       "$numberLong": "1792412645000"
+      }
+     },
+     "awox": false,
+     "labels": [
+      "tz:au",
+      "cat:6",
+      "#:2+",
+      "pvp",
+      "loc:highsec",
+      "isk:under1b"
+     ],
+     "solo": false,
+     "npc": false
+    }
+   }
+  },
+  "excluded": []
+ },
+ "systemID": 30000142,
+ "systemName": "Jita",
+ "time": "2026-10-19 12:00",
+ "unixtime": 1792411200
+}

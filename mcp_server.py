@@ -137,6 +137,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "fit_engagement",
     "zkb_search",
     "zkb_stats",
+    "zkb_related",
 )
 """**工具清单的唯一真源**（单数真理）：`tools/list`、`/health` 的 `tools`、客户端冒烟、
 验收测试全部从这里派生 —— 本文件之外**不许再出现工具名清单或工具条数的字面量**。
@@ -151,7 +152,9 @@ TOOL_NAMES: tuple[str, ...] = (
 6. `fit_project` —— 一艘船**给**另一艘船什么（加成 / 遥修 / 负面），一给一；
 7. `fit_engagement` —— A 打 B 打得动吗（命中 / 有效 DPS / 击穿时间 / 编队量级）；
 8. `zkb_search` —— 先按条件筛出 `killmail_id`，再回头对具体那条用 `fit_killmail`；
-9. `zkb_stats` —— 看一个实体（角色 / 公司 / 联盟）的画像：值不值得往下翻战报。
+9. `zkb_stats` —— 看一个实体（角色 / 公司 / 联盟）的画像：值不值得往下翻战报；
+10. `zkb_related` —— 一个星系 + 一个时间点 → 那场交火的双方阵营与 killmail 清单
+    （**唯一能查任意历史窗口的入口**：列表接口的 `startTime` 已被 zkb 停用）。
 
 加工具的正确姿势：往这个元组里加一个名字、在 `_HANDLERS` 里加实现、在
 `_TOOL_DESCRIPTIONS` 里加文案、(必要时) 在 `_schema_for()` 里加 schema ——
@@ -682,6 +685,20 @@ def _tool_zkb_stats(arguments: dict) -> dict:
     return _api().zkb_stats(**params)
 
 
+def _tool_zkb_related(arguments: dict) -> dict:
+    """`zkb_related` → `api.zkb_related(**arguments)`（**不做任何加工**）。
+
+    同样的纪律：`url` / `system` + `time` 的互斥与时间戳格式全在 api 层判 —— 那里给得出
+    `field` + `hint`。本层只剔掉三个测试注入点。
+    """
+    params = {
+        key: value
+        for key, value in arguments.items()
+        if key not in _ZKB_INJECTION_KEYS
+    }
+    return _api().zkb_related(**params)
+
+
 _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "fit_parse": _tool_fit_parse,
     "fit_killmail": _tool_fit_killmail,
@@ -695,6 +712,7 @@ _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "fit_engagement": _tool_fit_engagement,
     "zkb_search": _tool_zkb_search,
     "zkb_stats": _tool_zkb_stats,
+    "zkb_related": _tool_zkb_related,
 }
 """工具名 → 实现（键集合必须与 `TOOL_NAMES` 一致，`_build_tool_specs()` 会核对）。"""
 
@@ -853,6 +871,18 @@ _TOOL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
         "小行星带 / 星门级、**不是星系**（要看星系用 systems）；默认约 3KB，大块 "
         "（months / rankings / top_all_time / groups）必须显式 include，联盟全要约 120KB；"
         "entity_type 必填、不靠 id 猜。",
+    ),
+    "zkb_related": (
+        "星系交火总览（双方阵营 / 舰船构成 / killmail 清单）",
+        "想知道某个星系在某个时间点「那场仗打成什么样」时用它。"
+        "返回 system / region / window（startTime / endTime / exHours / complete）、"
+        "sides（teamA / teamB 各自的 pilots / corporations / alliances / ships 构成 / isk / "
+        "kills 明细）与 **killmail_ids**（每边给全，可直接丢给 fit_killmail 深挖）。"
+        "**这是唯一能查任意历史窗口的入口**：列表接口的 startTime/endTime 已被 zkb 停用，"
+        "而 related 把时间放在路径里。"
+        "限制：time 固定 12 位 YYYYMMDDHHMM（202609091400），不做宽松解析；"
+        "exHours 是**窗口半径**、窗口不对称、不等于整场战斗；complete 只是 zkb 的判断；"
+        "相邻星系不包含；逐 kill 明细按 limit 截断（killmail_ids 不受它限制）。",
     ),
 }
 
@@ -1047,6 +1077,53 @@ def _stats_input_schema() -> dict:
             },
         },
         "required": ["entity", "entity_type"],
+    }
+
+
+def _related_input_schema() -> dict:
+    """`zkb_related` 的 `inputSchema`（**没有 `fit`**：它不是配装工具）。
+
+    **两套来源二选一**（`url` 或 `system` + `time`）；`url` 与 `system`/`time` 同时给
+    → `invalid_argument`（这个判断留给 api：它能说清「两套来源打架」）。
+    所以 `required` 是空 —— 「至少要给一套」讲不清 JSON Schema，交给 api 报错更好。
+    """
+    api = _api()
+    return {
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": (
+                    "首选：https://zkillboard.com/related/<systemID>/<YYYYMMDDHHMM>/ "
+                    "（也认 /api/related/...；查询串会被忽略）。**给了它就别再给 system / time**。"
+                ),
+            },
+            "system": {
+                "type": ["string", "integer"],
+                "description": (
+                    "星系（名字或整数 id）；不给 url 时必填。"
+                    "名字走 ESI /universe/ids/ 解析（与 zkb_search 同一套，带进程内缓存）。"
+                ),
+            },
+            "time": {
+                "type": "string",
+                "description": (
+                    "时间戳，**固定 12 位** YYYYMMDDHHMM（如 202609091400 = 2026-09-09 14:00 UTC）。"
+                    "不认 2026-09-09 14:00 / 10 位 / 13 位 —— 不做宽松解析，直接 invalid_argument。"
+                ),
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": api.ZKB_PAGE_SIZE,
+                "default": api.ZKB_RELATED_KILL_LIMIT,
+                "description": (
+                    "每边最多几条逐 kill 明细（默认 20）。"
+                    "**不影响 killmail_ids** —— 那个永远给全（按时间倒序）。"
+                ),
+            },
+        },
+        "required": [],
     }
 
 
@@ -1328,11 +1405,13 @@ def _engagement_input_schema() -> dict:
 
 
 def _schema_for(name: str) -> dict:
-    """工具 → `inputSchema`（`zkb_search` / `zkb_stats` 不是配装工具，各走自己那一套）。"""
+    """工具 → `inputSchema`（`zkb_*` 不是配装工具，各走自己那一套）。"""
     if name == "zkb_search":
         return _zkb_input_schema()
     if name == "zkb_stats":
         return _stats_input_schema()
+    if name == "zkb_related":
+        return _related_input_schema()
     if name == "fit_explain":
         return _explain_input_schema()
     if name == "fit_sensitivity":
@@ -1386,22 +1465,22 @@ INSTRUCTIONS: str = (
     "noobbaozi 配装分析（EVE Online）。按这个顺序用：\n"
     "① fit_parse 先确认读懂了；\n"
     "② fit_killmail 战报上下文；\n"
-    "③ fit_index 默认入口：六维度摘要 + flags；\n"
+    "③ fit_index 默认入口：六维度摘要；\n"
     "④ fit_view 展开可疑维度；⑤ fit_get 只取一个数（带 provenance）；\n"
-    "⑥ fit_detail 深挖，返回很大，按需；\n"
-    "⑦ fit_explain 归因：某个数为什么这么大；\n"
-    "⑧ fit_sensitivity 灵敏度：改一个输入看指标变多少；\n"
-    "⑨ fit_project 投射：一艘船给另一艘船什么（一给一，不链式传递）；\n"
-    "⑩ fit_engagement 交战：命中 / 有效 DPS / 击穿时间 / 编队量级；\n"
-    "⑪ zkb_search 先找战报：筛 killmail_id 再回 ②。\n"
-    "⑫ zkb_stats 先看实体画像：再决定用⑪翻哪些战报。\n"
+    "⑥ fit_detail 深挖，很大，按需；\n"
+    "⑦ fit_explain 归因：为什么这么大；\n"
+    "⑧ fit_sensitivity 灵敏度：改输入看指标变多少；\n"
+    "⑨ fit_project 投射：船给船什么（一给一）；\n"
+    "⑩ fit_engagement 交战：命中 / 有效 DPS / 击穿 / 编队；\n"
+    "⑪ zkb_search 先找战报：筛 id 再回 ②。\n"
+    "⑫ zkb_stats 实体画像：决定用⑪翻哪些战报。\n"
+    "⑬ zkb_related 一场交火：星系+时间窗 → 双方阵营 / killmail id（唯一能查任意历史窗口）。\n"
     "三条判读纪律：\n"
     "1) unknown 不是 0：provenance=unknown 别用常识补数，看 unknown_reasons"
-    "（not_applicable=本配装不适用、不是「不知道」；input_incomplete=输入不足；"
-    "ambiguous=无唯一答案）。\n"
+    "（not_applicable=不适用、input_incomplete=输入不足、ambiguous=无唯一答案）。\n"
     "2) 顶层数值可能是不可达的叠加值：多推进同时启用时 speed_mps/signature_radius_m "
-    "叠加，用 mobility.propulsion_states.single 看「只开某一个」的真实值；"
-    "有 state_exclusive flag 就说明它。\n"
+    "叠加，用 mobility.propulsion_states.single 看单个推进的真实值；"
+    "state_exclusive flag 会提示。\n"
     "3) 别自己开 zkillboard/ESI 网页：战报上下文找 fit_killmail，列表检索找 zkb_search。\n"
     "业务失败是 isError=true 的正常响应，读 error.kind；术语见 meta.glossary。"
 )

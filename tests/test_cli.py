@@ -1255,3 +1255,136 @@ def test_module_entry_point_knows_engagement() -> None:
         "--mode", "--fleet", "--observed-hp", "--window-s", "--json",
     ):
         assert token in completed.stdout, f"--help 里应提到 {token}：\n{completed.stdout}"
+
+
+# =============================================================================
+# `related`（T-1/5 新一轮）：星系交火总览
+# =============================================================================
+
+RELATED_FIXTURE = ZKB_FIXTURES / "related-30004614-202609091400.json"
+RELATED_URL = "https://zkillboard.com/related/30004614/202609091400/"
+
+
+@pytest.fixture()
+def related_offline(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """把 zkb 的 GET 请求器换成 related fixture（不联网），并清掉限流时间戳。
+
+    用 `--url` 时不涉及 ESI 名字解析，所以只拦 GET；POST 一旦发生直接判失败。
+    """
+    document = json.loads(RELATED_FIXTURE.read_text(encoding="utf-8-sig"))
+    seen: list[str] = []
+
+    def fake(url: str, body: object | None = None) -> object:
+        seen.append(url)
+        if body is not None:
+            raise AssertionError(f"related 用 --url 时不该发 POST：{url}")
+        return document
+
+    api._reset_zkb_state()
+    api.clear_caches()
+    monkeypatch.setattr(api, "_zkb_default_requester", fake)
+    yield seen
+    api._reset_zkb_state()
+
+
+def test_related_json_is_the_api_envelope(
+    related_offline: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`related --url ... --json` → stdout 就是 `api.zkb_related` 的信封原样，退出码 0。"""
+    code, out, err = _run_cli(["related", "--url", RELATED_URL, "--json"], capsys)
+    assert code == cli.EXIT_OK, err
+    assert err == ""
+    envelope = json.loads(out)
+    assert envelope["ok"] is True
+    result = envelope["result"]
+    assert result["system"] == {"id": 30004614, "name": "AV-VB6"}
+    assert result["region"] == "Fountain"
+    assert related_offline == [
+        "https://zkillboard.com/api/related/30004614/202609091400/"
+    ], f"URL 拼错：{related_offline}"
+
+
+def test_related_human_output_shows_both_sides_and_the_window(
+    related_offline: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """人话摘要：时间窗 / 双方人数·舰船·ISK / killmail_ids，且**窗口口径要有提醒**。"""
+    code, out, err = _run_cli(["related", "--url", RELATED_URL], capsys)
+    assert code == cli.EXIT_OK, err
+    assert "AV-VB6" in out and "Fountain" in out
+    assert "2026-09-09 13:00" in out and "2026-09-09 16:00" in out
+    for side in ("teamA", "teamB"):
+        assert side in out, f"人话里应列出 {side}"
+    assert "舰船" in out, "应给出舰船构成"
+    assert "killmail_ids" in out, "必须给出可直接喂 fit_killmail 的 id 清单"
+    assert "窗口半径" in out, f"必须提醒 exHours 是窗口半径：\n{out}"
+    assert "不等于整场战斗" in out
+
+
+def test_related_human_output_mentions_truncation(
+    related_offline: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--limit 3` → 人话里要说明「明细只展示 3 条，但 id 清单是全的」。"""
+    code, out, err = _run_cli(["related", "--url", RELATED_URL, "--limit", "3"], capsys)
+    assert code == cli.EXIT_OK, err
+    assert "--limit 截断" in out, f"截断必须说出来：\n{out}"
+    assert "全的" in out
+
+
+def test_related_accepts_system_and_time(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--system <id> --time <12 位>` 也能用（整数 id 不需要 ESI 解析）。"""
+    document = json.loads(RELATED_FIXTURE.read_text(encoding="utf-8-sig"))
+    seen: list[str] = []
+
+    def fake(url: str, body: object | None = None) -> object:
+        seen.append(url)
+        return document
+
+    api._reset_zkb_state()
+    api.clear_caches()
+    monkeypatch.setattr(api, "_zkb_default_requester", fake)
+    try:
+        code, out, err = _run_cli(
+            ["related", "--system", "30004614", "--time", "202609091400", "--json"],
+            capsys,
+        )
+        assert code == cli.EXIT_OK, err
+        assert seen == ["https://zkillboard.com/api/related/30004614/202609091400/"]
+    finally:
+        api._reset_zkb_state()
+
+
+def test_related_bad_time_is_a_business_error(
+    related_offline: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """时间戳不合法 → 退出码 1（业务错误，不是用法错误 2），stderr 里带 kind 与 field。"""
+    code, out, err = _run_cli(
+        ["related", "--system", "30004614", "--time", "2026-09-09 14:00"], capsys
+    )
+    assert code == cli.EXIT_API_FAILURE
+    assert out == ""
+    assert "invalid_argument" in err
+    assert "time" in err
+    assert related_offline == [], "参数错误不该发请求"
+
+
+def test_related_url_and_system_conflict(
+    related_offline: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--url` 与 `--system` 同时给 → 退出码 1（api 判互斥），不发请求。"""
+    code, out, err = _run_cli(
+        ["related", "--url", RELATED_URL, "--system", "30004614"], capsys
+    )
+    assert code == cli.EXIT_API_FAILURE
+    assert out == ""
+    assert "invalid_argument" in err
+    assert related_offline == []
+
+
+def test_module_entry_point_knows_related() -> None:
+    """真起子进程：`python -m noobbaozi.cli related --help` 里能看到这一组选项。"""
+    completed = _subprocess_cli(["related", "--help"])
+    assert completed.returncode == 0, completed.stderr
+    for token in ("--url", "--system", "--time", "--limit", "--json"):
+        assert token in completed.stdout, f"--help 里应提到 {token}：\n{completed.stdout}"

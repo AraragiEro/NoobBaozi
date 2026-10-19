@@ -79,3 +79,40 @@ zkb 会**省略值为空/0 的整体块**，所以键集合天然不同，**不�
 字段实测表、`dangerRatio` 比对结论、返回形状草案见
 `noobbaozi/.tmp/zkb_stats_contract.md`（临时区，不入库）。
 
+---
+
+# `zkb_related` 样本（2 份，2026-10-20 抓取）
+
+给「星系交火总览」（第 13 个工具 `zkb_related`）用的离线样本。真实响应，
+**按本工具实际读的字段裁剪过**（原始 212 KB / 38 KB → 26 KB / 6 KB）。
+
+| 文件 | 来源请求 | 原始体量 | 裁剪后 | 内容 |
+|---|---|---:|---:|---|
+| `related-30004614-202609091400.json` | `GET /api/related/30004614/202609091400/` | 212,286 B | 26,338 B | AV-VB6 / Fountain，**23v23**，10 + 9 条 kill |
+| `related-30000142-202610191200.json` | `GET /api/related/30000142/202610191200/` | 38,778 B | 6,241 B | Jita / The Forge，4v3，4 + 1 条 kill |
+
+## 裁剪了什么（以及为什么）
+
+删掉的都是**摘要层不读**的逐 kill 明细块（它们是原始响应 212 KB 的主要来源）：
+
+- `kills[*].involved`（每条 kill 的参战者名单，10+9 条 × 5–11 人）；
+- `kills[*].victim` / `finalBlow` / `zkb` / `system` / `itemName` / `locationName` /
+  `padcheck` / `padhash` / `sequence` / `processed` / `warID` / `vGroupID` 等；
+- `totals.groupIDs[*].fielded`（网页上「谁带了几架」的明细）。
+
+保留的是 `zkb_related` 真正读的键：`systemID`/`systemName`/`regionName`/
+`time`/`startTime`/`endTime`/`exHours`/`complete`/`adjacentSystems`/`excluded`，
+`summary.<side>.list[*]`（驾驶员 / 公司 / 联盟 / 船名 + 舰级），
+`summary.<side>.totals`（`pilotCount`/`totalShips`/`total_points`/`total_price`/`groupIDs`），
+`summary.<side>.kills[*]`（`killID`/`attackerCount`/`damage_taken`/`dttm`/`awox`/`labels`/`solo`/`npc`）。
+
+## 两个实测口径（别按直觉理解）
+
+1. **窗口不对称**：`exHours=1`、`time=2026-09-09 14:00` → `startTime=13:00`、
+   `endTime=16:00`，即 `endTime = time + 2×exHours`，**不是**对称的 ±1h。所以窗口宽 **3 小时**。
+2. **两边 kill 集合互不相交**（实测交集 0 条）—— 所以 `killmail_ids.teamA` 与
+   `killmail_ids.teamB` 拼起来正好是这场交火在本窗口内的全部 kill。
+
+复现命令：`python noobbaozi/.tmp/build_related_fixtures.py`（抓取脚本
+`.tmp/probe_related.py`，两者都只在临时区）。
+
