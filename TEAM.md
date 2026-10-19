@@ -153,3 +153,25 @@ uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" 
 - 不确定要传什么 → 先 `git status` + `git diff --stat` 看清楚，多数情况根本不用传文件
 
 
+
+## 七、清理节律（2026-10-20，主人要求「及时清理」）
+
+**每个节点结束时**（或每轮批量交付后）做一次，10 秒的事：
+
+| 清什么 | 命令 / 判据 |
+|---|---|
+| 后台任务 | `job_list` 必须为空；有残留的 `job_kill` |
+| 空闲员工 | `list_agents` 里除在役者外全为 `inactive`；**成员上限 8，满了就复用空闲槽位，不要再 spawn** |
+| `.tmp/` | 只保留三份契约（`explain_contract.md` / `projection_contract.md` / `zkb_stats_contract.md`），其余全删 |
+| 工作区根 | 只允许 `AGENTS.md` + 项目文件夹 |
+| `git status` | 必须 clean（未提交 = 有人还在写） |
+
+**为什么要有节律**：2026-10-20 那次清理从 `.tmp` 清掉 **36 MB / 750 个文件** ——
+全是探针脚本与中间产物。**这些东西不占仓库，但会让人误以为"项目里有这些文件"。**
+
+### 成员上限的处理
+
+Team 成员上限 **8**（含退役但未销毁的）。满了之后：
+- **不要 `spawn_teammate`**（会直接报 `Team member limit 8 reached`）
+- 给一个 `inactive` 的老成员 `send_message` 一条完整新简报，**复用它的槽位**
+- 简报里必须重申当前规矩（sftp 禁令、自测范围、写入范围）—— 老成员的上下文可能过期
