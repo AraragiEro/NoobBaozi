@@ -1703,22 +1703,22 @@ def test_drone_flags_never_touch_feasible(ctx_from_eft) -> None:
 
 
 def test_drone_flag_hints_are_short_and_per_dimension() -> None:
-    """L0 `hint` 的硬门槛是 **6–10 字**，且两条各说各的量纲（`无人机带宽超N` / `无人机架数超N`）。"""
+    """L0 `hint` 的硬门槛是 **6–20 字**（T-56：一句能读懂的话），且两条各说各的量纲（`无人机带宽超N，放不下` / `同时在飞的无人机多N架`）。"""
     from noobbaozi import api
 
     bandwidth_hints = {
         flag["id"]: flag["hint"]
         for flag in api.fit_index(BANDWIDTH_OVER_EFT)["result"]["flags"]
     }
-    assert bandwidth_hints["drone_bandwidth_exceeded"] == "无人机带宽超50"
+    assert bandwidth_hints["drone_bandwidth_exceeded"] == "无人机带宽超50，放不下"
 
     launched_hints = {
         flag["id"]: flag["hint"]
         for flag in api.fit_index(LAUNCHED_OVER_EFT)["result"]["flags"]
     }
-    assert launched_hints["launched_drones_exceeded"] == "无人机架数超1"
+    assert launched_hints["launched_drones_exceeded"] == "同时在飞的无人机多1架"
     for hint in list(bandwidth_hints.values()) + list(launched_hints.values()):
-        assert hint and 6 <= len(hint) <= 10, f"hint 字数越界：{hint!r}"
+        assert hint and 6 <= len(hint) <= 20, f"hint 字数越界：{hint!r}"
 
 
 def test_drone_rule_config_matches_implementation() -> None:

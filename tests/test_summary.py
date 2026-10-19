@@ -39,7 +39,7 @@ render.get_path(ctx, "mobility.speed_mps")
 
 T-40 追加的四条（对应本轮四个增强，全部有独立断言）
 
-- **`flags` 带 `hint`**：`{id, hint}`，hint 是 **6–10 字**（或 `null`）、**从当次 evidence
+- **`flags` 带 `hint`**：`{id, hint}`，hint 是 **6–20 字**（或 `null`，T-56 起是「一句能读懂的话」）、**从当次 evidence
   生成**（同一 id 在不同样本上得到不同的真实数字，不是常量表）、每样本成本实测在
   预算内（见表 `HINT_COST_LIMIT`）；
 - **两处压缩且可逆**：`meta.module_states` 四槽同值 → 单值；`meta.damage_profile`
@@ -97,14 +97,16 @@ L0_LIMIT: int = 2500
 越过 2,000；2,500 仍比旧 `render_overview` 的 23,256 低 89%）。"""
 
 HINT_MIN_CHARS: int = 6
-HINT_MAX_CHARS: int = 10
-"""`flags[].hint` 的字数区间（文档 §3：6–10 字，`null` 表示没有 evidence 可生成）。"""
+HINT_MAX_CHARS: int = 20
+"""`flags[].hint` 的字数区间（T-56：6–20 字；`null` 表示没有 evidence 可生成）。"""
 
-HINT_COST_LIMIT: int = 150
+HINT_COST_LIMIT: int = 250
 """四个样本上「每个样本的 hint 总开销」上限（字符）。
 
 口径：把 `[{id, hint}]` 与 `[{id}]` 两种序列化逐条相减后求和（含 `, "hint": "…"` 的
-键名开销）。实测：均 4.25 条 flag/样本、hint 正文均 7.9 字 → 均 86.5 字符/样本，
+键名开销）。T-56（hint 升级成一句能读懂的话）后实测：f1 163 / f12 183 / f47 184 / f67 141 字符，
+**上限提到 250**（仍是「只拦失控」：L0 总预算 2,500 才是硬门，hint 占 ~7%）。
+T-40 时代：均 4.25 条 flag/样本、hint 正文均 7.9 字 → 均 86.5 字符/样本，
 最肥的样本（7 条 flag）146 字符。任务书给的「+80/样本」是按 12 字符/条估的，
 漏算了 JSON 键名（`"hint": ` 加引号共 12 字符/条）—— 所以这里钉的是**实测上限 150**
 （只拦「hint 失控变长」，不假装 80 成立），并在回报里作为偏离项说明。
@@ -510,7 +512,7 @@ def test_l0_flag_hints_are_generated_from_the_evidence(
     # ② `resist_hole` 的 hint 必须带「层」的中文名（来自 evidence.layer），不是固定串
     assert "resist_hole" in by_id, "四个样本都没有 resist_hole？样本或规则接错了"
     for _name, text in by_id["resist_hole"]:
-        assert "最弱" in text and ":" in text, text
+        assert "最怕" in text and "抗性有洞" in text, text
         assert any(label in text for label in ("护盾", "装甲", "结构")), text
 
     # ③ `resource_overflow` 的 hint 里那个数字必须是该样本 evidence 的 `*_deficit` 之一
@@ -1244,3 +1246,42 @@ def _assert_same_body(doc: dict, body: dict) -> None:
     assert set(doc) - {"budget"} == set(body)
     for key, expected in body.items():
         assert doc[key] == expected, f"{key} 在降级时被改了"
+
+# =============================================================================
+# T-56：L0 的 repair 前提与 hint 形态
+# =============================================================================
+
+
+@pytest.mark.parametrize("stem", SAMPLES)
+def test_l0_repair_total_stays_a_scalar(docs: dict[str, dict], stem: str) -> None:
+    """L0 不动（验收 43 字段）：`repair_total_hp_s` 仍是标量，不新增 `repair` 块。"""
+    block = docs[stem]["survivability"]
+    assert "repair" not in block, "结构化前提只进 L1/L2；L0 的 43 字段不许动"
+    assert isinstance(block["repair_total_hp_s"], (int, float))
+
+
+@pytest.mark.parametrize("stem", SAMPLES)
+def test_l0_repair_total_matches_the_l1_premise(
+    docs: dict[str, dict], ctxs: dict[str, ViewContext], stem: str
+) -> None:
+    """同一个数：L0 的标量与 L1 `repair.total_hp_s` 必须逐位同口径。"""
+    l1_total = render.render_view(ctxs[stem], "survivability")["overview"]["repair"]["total_hp_s"]
+    assert docs[stem]["survivability"]["repair_total_hp_s"] == pytest.approx(l1_total, abs=1e-6)
+
+
+def test_l0_repair_hint_says_it_is_charge_limited(docs: dict[str, dict]) -> None:
+    """f1 带 AAR：L0 hint 必须把「峰值 → 持续」说出来（T-56 的原始事故形态）。"""
+    hints = {entry["id"]: entry["hint"] for entry in docs["f1-hecate-killmail"]["flags"]}
+    hint = hints["repair_charge_limited"]
+    assert "装填" in hint, hint
+    assert "hp/s" in hint, hint
+
+
+def test_l0_state_exclusive_hint_is_a_sentence_not_a_key_value_dump(
+    docs: dict[str, dict],
+) -> None:
+    """T-56 的另一形态：旧 hint 落到兜底，成了 `modules=MWD 与 AB lab` 这种转储。"""
+    hints = {entry["id"]: entry["hint"] for entry in docs["f12-logistics-oneiros"]["flags"]}
+    hint = hints["state_exclusive"]
+    assert "=" not in hint and "modules" not in hint, hint
+    assert "只能开一个" in hint, hint

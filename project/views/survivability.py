@@ -48,6 +48,15 @@
 7. `overload` 用 `ctx.attrs("overload")` 与 `"base"` 对比：实测混合 EHP 不变
    （超载不改共振率），护甲修复 32.500 → 42.059 hp/s（有效 69.126 → 89.457）。
 8. 消耗品续航不在这里（字段规格 §2 尾注：归「不稳定」视角）。
+9. **`repair` 必须自带前提（T-56）**：`raw_hp_s` / `effective_ehp_s` 是引擎的
+   「充能无限」口径 —— 对充能型模块（Ancillary Shield Booster / Ancillary Armor
+   Repairer）来说，这个数只是**充能期间**的峰值：打完一轮要装填。真实事故：agent 只看到
+   `repair_total_hp_s: 269.5` 就写「270 > 承伤 108 → 打不死」，而 XL-ASB 9 发后要装填
+   60 秒。所以 `repair` 块与三个分组平级地给三件前提：
+   `total_hp_s`（三层 raw 之和，与 L0 同一口径）/ `assumes`（恒 `"unlimited_charges"`）/
+   `charge_limited`（有 active 的充能型模块）。峰值 vs 持续的完整事实由
+   `views/shared.charge_limited_repair()` 算一次，L1/L2 再由 `repair_charge_limited`
+   flag 讲给读者（**L0 不动**：`repair_total_hp_s` 仍是标量，验收 43 字段不变）。
 
 `FIELD_SOURCES` 的映射约定同火力视角：单属性决定的给属性 ID，多属性合成值给 `None`。
 """
@@ -58,7 +67,7 @@ import math
 
 from noobbaozi.config import attributes as _a
 from noobbaozi.project import units
-from noobbaozi.project.views import register
+from noobbaozi.project.views import register, shared as _shared
 from noobbaozi.project.views.base import BASE, OVERLOAD, ViewContext
 
 VIEW_NAME = "survivability"
@@ -150,6 +159,10 @@ FIELD_SOURCES: dict[str, int | None] = {
     "repair.hull.has_source": None,
     "repair.hull.raw_hp_s": _a.ATTR_HULL_REPAIR_RATE,
     "repair.hull.effective_ehp_s": _a.ATTR_HULL_EFFECTIVE_REPAIR_RATE,
+    # T-56：`repair` 块的三件**前提**（合成值 → 无单一属性来源）
+    "repair.total_hp_s": None,
+    "repair.assumes": None,
+    "repair.charge_limited": None,
     "overload.ehp_delta": None,
     "overload.repair_delta": None,
 }
@@ -252,16 +265,25 @@ def _has_source(attrs: dict[int, float], raw_attribute_id: int) -> bool:
     return attrs.get(raw_attribute_id) is not None
 
 
-def _repair(attrs: dict[int, float]) -> dict[str, dict[str, float | bool | None]]:
-    """每个修复分组的 `{has_source, raw_hp_s, effective_ehp_s}`。
+def _repair(attrs: dict[int, float], ctx: ViewContext) -> dict[str, object]:
+    """每个修复分组的 `{has_source, raw_hp_s, effective_ehp_s}` + 三件**前提**（T-56）。
 
     `effective_ehp_s` 已经是「raw ÷ 加权共振率」，直接用引擎的有效值，**不**自己再除一次。
 
     值口径（T-19 裁决 C4）：**无来源给 `0.0`，不给 `None`**——`None` 会污染下游数值运算，
     也会把「没装模块」误读成「不可知」。「有没有来源」由 `has_source` 独立表达；
     `provenance` 不承担这个语义（见模块 docstring §4–§6 与两级模型欠账）。
+
+    T-56 新增的三件**前提**（与三个分组平级）：
+
+    - `total_hp_s`：三层 raw 之和（与 L0 `repair_total_hp_s` 同一口径、同一份数据）；
+    - `assumes`：恒为 `"unlimited_charges"` —— 引擎的 boost/repair rate 就是「充能无限」口径；
+    - `charge_limited`：这套配装里有**active 的充能型本地回复模块**（ASB / AAR）。
+      为 `True` 时，「峰值 vs 持续」的完整事实由 `views/shared.charge_limited_repair()`
+      给出，并在 L1/L2 的诊断里升起 `repair_charge_limited` flag —— 只看 `total_hp_s`
+      会把「9 发打完要装填」误读成「长期 269.5 hp/s」。
     """
-    result: dict[str, dict[str, float | bool | None]] = {}
+    result: dict[str, object] = {}
     for layer, raw_attribute_id, effective_attribute_id in REPAIR_LAYERS:
         raw = attrs.get(raw_attribute_id)
         effective = attrs.get(effective_attribute_id)
@@ -270,6 +292,16 @@ def _repair(attrs: dict[int, float]) -> dict[str, dict[str, float | bool | None]
             "raw_hp_s": 0.0 if raw is None else units.fmt(raw),
             "effective_ehp_s": 0.0 if effective is None else units.fmt(effective),
         }
+
+    summary = _shared.charge_limited_repair(ctx)
+    result["total_hp_s"] = units.fmt(
+        sum(
+            result[layer]["raw_hp_s"]  # type: ignore[index]
+            for layer in ("shield", "armor", "hull")
+        )
+    )
+    result["assumes"] = _shared.CHARGE_LIMITED_ASSUMES
+    result["charge_limited"] = summary is not None
     return result
 
 
@@ -333,7 +365,7 @@ def build(ctx: ViewContext) -> dict:
         "ehp_mixed": _value(attrs.get(_a.ATTR_EHP)),
         "ehp_mixed_note": EHP_MIXED_NOTE,
         "thinnest": _thinnest(attrs, layer_hp),
-        "repair": _repair(attrs),
+        "repair": _repair(attrs, ctx),
         "overload": _overload_block(ctx),
     }
     return {"view": VIEW_NAME, "overview": overview, "flags": []}

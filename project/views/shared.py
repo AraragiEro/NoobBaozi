@@ -742,3 +742,157 @@ def activation_groups(path: Path | str | None = None) -> tuple[ActivationGroup, 
     target = Path(path) if path is not None else ACTIVATION_GROUPS_PATH
     return _load_activation_groups_cached(str(target))
 
+
+# =============================================================================
+# 充能型本地回复（T-56）：引擎的 boost / repair rate 是「充能无限」口径
+# =============================================================================
+#
+# 事故背景（不是假想）：主人用只接了 MCP 的 agent 问「超大注盾流浪 vs 重导奥苏斯」。
+# agent 在 L0 看到 `repair_total_hp_s: 269.5`，据此写「~270 hp/s > 承伤 ~108 → 打不死」。
+# **数字全对，前提不可见**：XL-ASB 打 9 发就要装填 60 秒，持续回复远低于 269.5。
+#
+# 引擎口径（实测）：
+# - `-47 shieldBoostRate` / `-45 armorRepairRate` 就是「一直有充能」时的速率，
+#   引擎不建模装填 —— 这是事实，不是我们猜的；
+# - 辅助装甲修（AAR）带纳米胶时 `-45` 是**充能后**的速率（实测 f1：带胶 32.5，
+#   去掉 charge 10.833 = 1/3），所以「峰值」直接用引擎值；
+# - 一轮发数 = floor(模块 capacity(38) ÷ 充能体积(161))
+#   （实测：XL-ASB 112/12 = 9 发；Small AAR 0.08/0.01 = 8 发）；
+# - 装填 = `reloadTime(1795)`（已是秒）；单发周期 = `duration(73)`（已是秒）。
+#
+# 持续速率 = Σ(发数 × 单发回复量) ÷ max(发数×周期 + 装填)，单发回复量 = 速率 × 周期
+# —— 所以不需要 68/84 这类「每发量」属性，也不会把引擎的峰值口径算重。
+
+ANCILLARY_REPAIR_GROUPS: frozenset[str] = frozenset(
+    {"Ancillary Shield Booster", "Ancillary Armor Repairer"}
+)
+"""充能型本地回复模块的 SDE group 名。"""
+
+CHARGE_LIMITED_ASSUMES: str = "unlimited_charges"
+"""引擎 boost/repair rate 的隐含前提：**假定充能无限、不建模装填**（实测口径，非推测）。"""
+
+
+def charge_volume(calc_items: list[dict], position: int) -> float | None:
+    """已装充能的体积（`charge.attributes` 的 `161`）；拿不到给 `None`（不猜）。"""
+    if not 0 <= position < len(calc_items):
+        return None
+    item = calc_items[position]
+    charge = item.get("charge") if isinstance(item, dict) else None
+    if not isinstance(charge, dict):
+        return None
+    node = (charge.get("attributes") or {}).get(A.ATTR_VOLUME)
+    if isinstance(node, dict):
+        value = node.get("value")
+        return (
+            float(value)
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+            else None
+        )
+    return float(node) if isinstance(node, (int, float)) and not isinstance(node, bool) else None
+
+
+def charge_limited_repair(ctx: object) -> dict | None:
+    """充能型本地回复的「峰值 vs 持续」事实；没有 active 的这类模块 → `None`。
+
+    Returns:
+        `{charges, cycle_s, reload_s, sustain_s, burst_hp_s, sustained_hp_s}`：
+
+        - `burst_hp_s`：引擎口径的峰值（所有 active 充能模块的 -47/-45 之和）；
+        - `charges`：**一轮**能打的总发数（capacity ÷ 体积；cargo 不足时按实际携带）；
+        - `cycle_s` / `reload_s`：代表模块（峰值最大那个）的单发周期与装填时间；
+        - `sustain_s`：把一轮打完再装填的总时长（多模块取各自一轮的最大值）；
+        - `sustained_hp_s`：`Σ(发数 × 单发回复量) ÷ sustain_s` —— 长期平均。
+
+    缺值口径（红线 N4）：拿不到 capacity/体积时按「实际携带的发数」算；拿不到速率或周期
+    的模块直接不计入（不补 0、不编一个峰值）。
+    """
+    calc_items = (ctx.variant(BASE) or {}).get("items") or []  # type: ignore[attr-defined]
+    items = ctx.items(BASE)  # type: ignore[attr-defined]
+
+    modules: list[dict] = []
+    for position, item in enumerate(items):
+        if item.get("slot_type") == "cargo":
+            continue
+        if item.get("group_name") not in ANCILLARY_REPAIR_GROUPS:
+            continue
+        if str(item.get("state") or "") != "active":
+            continue
+
+        attrs = item.get("attributes") or {}
+        is_shield = item.get("group_name") == "Ancillary Shield Booster"
+        rate = attrs.get(A.ATTR_SHIELD_BOOST_RATE if is_shield else A.ATTR_ARMOR_REPAIR_RATE)
+        duration = attrs.get(A.ATTR_MODULE_DURATION)
+        reload_s = attrs.get(A.ATTR_RELOAD_TIME)
+        if rate is None or duration is None or reload_s is None or rate <= 0.0:
+            continue
+
+        charge_type_id = item.get("charge_type_id")
+        loaded = 1 if isinstance(charge_type_id, int) else 0
+        cargo = sum(
+            int(other.get("quantity") or 1)
+            for other in items
+            if other.get("slot_type") == "cargo"
+            and isinstance(charge_type_id, int)
+            and other.get("type_id") == charge_type_id
+        )
+        available = cargo + loaded
+
+        capacity = attrs.get(A.ATTR_CARGO_CAPACITY)  # 模块 capacity（38）＝可装充能的体积
+        volume = charge_volume(calc_items, position)
+        per_load: int | None = None
+        if capacity is not None and volume is not None and volume > 0.0:
+            per_load = max(int(math.floor(capacity / volume + 1e-9)), 0)
+
+        modules.append(
+            {
+                "charge_type_id": charge_type_id if isinstance(charge_type_id, int) else None,
+                "rate": float(rate),
+                "cycle_s": float(duration),
+                "reload_s": float(reload_s),
+                "per_load": per_load,
+                "available": available,
+            }
+        )
+
+    if not modules:
+        return None
+
+    # 同一种充能的模块共享 cargo：把可用发数按模块数均分（单模块时就是全部）。
+    by_type: dict[int | None, int] = {}
+    for module in modules:
+        key = module["charge_type_id"]
+        by_type[key] = by_type.get(key, 0) + 1
+
+    for module in modules:
+        share = module["available"] // by_type[module["charge_type_id"]]
+        per_load = module["per_load"]
+        module["charges"] = share if per_load is None else min(per_load, share)
+
+    representative = max(modules, key=lambda module: module["rate"])
+    sustainable = [module for module in modules if module["charges"] > 0]
+    burst = round(sum(module["rate"] for module in modules), 3)
+    if not sustainable:
+        return {
+            "charges": 0,
+            "cycle_s": round(representative["cycle_s"], 3),
+            "reload_s": round(representative["reload_s"], 3),
+            "sustain_s": round(representative["reload_s"], 3),
+            "burst_hp_s": burst,
+            "sustained_hp_s": 0.0,
+        }
+
+    sustain_s = max(
+        module["charges"] * module["cycle_s"] + module["reload_s"] for module in sustainable
+    )
+    repaired_total = sum(
+        module["charges"] * module["rate"] * module["cycle_s"] for module in sustainable
+    )
+    return {
+        "charges": int(sum(module["charges"] for module in sustainable)),
+        "cycle_s": round(representative["cycle_s"], 3),
+        "reload_s": round(representative["reload_s"], 3),
+        "sustain_s": round(sustain_s, 3),
+        "burst_hp_s": burst,
+        "sustained_hp_s": round(repaired_total / sustain_s, 3) if sustain_s > 0 else 0.0,
+    }
+

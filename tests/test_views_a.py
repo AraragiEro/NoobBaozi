@@ -665,7 +665,10 @@ def test_survivability_repair_reads_engine_rates(ctx: ViewContext) -> None:
     attrs = ctx.attrs(BASE)
     repair = overview["repair"]
 
-    assert set(repair) == {"shield", "shield_passive", "armor", "hull"}
+    assert set(repair) == {
+        "shield", "shield_passive", "armor", "hull",
+        "total_hp_s", "assumes", "charge_limited",
+    }
     assert _close(repair["armor"]["raw_hp_s"], round(attrs[A.ATTR_ARMOR_REPAIR_RATE], 3))
     assert _close(
         repair["armor"]["effective_ehp_s"], round(attrs[A.ATTR_ARMOR_EFFECTIVE_REPAIR_RATE], 3)
@@ -732,8 +735,12 @@ def test_survivability_repair_never_emits_none(ctx: ViewContext) -> None:
     """`repair` 的**每个**数值叶子都是 float（含 shield_passive），`has_source` 是 bool。"""
     repair = build_view("survivability", ctx)["overview"]["repair"]
 
-    assert set(repair) == {"shield", "shield_passive", "armor", "hull"}
-    for layer, block in repair.items():
+    assert set(repair) == {
+        "shield", "shield_passive", "armor", "hull",
+        "total_hp_s", "assumes", "charge_limited",
+    }
+    for layer in ("shield", "shield_passive", "armor", "hull"):
+        block = repair[layer]
         assert set(block) == {"has_source", "raw_hp_s", "effective_ehp_s"}, layer
         assert isinstance(block["has_source"], bool), f"{layer}.has_source 必须是布尔"
         for field in ("raw_hp_s", "effective_ehp_s"):
@@ -901,6 +908,8 @@ def test_views_only_emit_whitelisted_strings(ctx: ViewContext) -> None:
             "thinnest.shield.damage_type",
             "thinnest.armor.damage_type",
             "thinnest.hull.damage_type",
+            # T-56：固定词表，不是判词（值域由 test_repair_premises_* 钉住）
+            "repair.assumes",
         },
         "mobility": set(),
     }
@@ -2224,3 +2233,74 @@ def test_defender_exclusion_is_not_vacuous(real_ctx, monkeypatch: pytest.MonkeyP
     ), "排除表清空后 dps.base 必须回到引擎原值（含那 160）"
 
 
+
+# =============================================================================
+# T-56：`repair` 的前提（峰值 vs 持续）—— 数字全对但前提不可见，结论会错
+# =============================================================================
+
+
+def test_repair_premises_are_shipped_next_to_the_rates(ctx: ViewContext) -> None:
+    """样本带 Small Ancillary Armor Repairer：`repair` 必须自带三件前提（T-56）。
+
+    事故：agent 只看到 `repair_total_hp_s: 269.5` 就写「270 > 承伤 108 → 打不死」，
+    而 XL-ASB 9 发后要装填 60 秒。前提必须**与数值一起**出现，不能只写在文档里。
+    """
+    repair = build_view("survivability", ctx)["overview"]["repair"]
+
+    assert repair["assumes"] == "unlimited_charges"
+    assert repair["charge_limited"] is True
+    expected = round(
+        sum(repair[layer]["raw_hp_s"] for layer in ("shield", "armor", "hull")), 3
+    )
+    assert _close(repair["total_hp_s"], expected)
+
+    facts = shared.charge_limited_repair(ctx)
+    assert facts is not None
+    assert facts["burst_hp_s"] == pytest.approx(repair["armor"]["raw_hp_s"], rel=1e-9)
+    assert facts["sustained_hp_s"] < facts["burst_hp_s"], "持续必须低于峰值（充能会打完）"
+    # 一轮 = 发数×周期 + 装填；持续 = 一轮内回复总量 ÷ 一轮时长
+    assert facts["sustain_s"] == pytest.approx(
+        facts["charges"] * facts["cycle_s"] + facts["reload_s"], abs=1e-3
+    )
+    assert facts["sustained_hp_s"] == pytest.approx(
+        facts["charges"] * facts["burst_hp_s"] * facts["cycle_s"] / facts["sustain_s"], abs=1e-3
+    )
+
+
+def test_repair_premises_without_ancillary_module(ctx_from_eft) -> None:
+    """没有充能型回复模块：`charge_limited=False`，但 `assumes` 照样说清引擎口径。"""
+    ctx = ctx_from_eft(NO_REPAIR_EFT)
+    repair = build_view("survivability", ctx)["overview"]["repair"]
+
+    assert repair["charge_limited"] is False
+    assert repair["assumes"] == "unlimited_charges"
+    assert repair["total_hp_s"] == 0.0
+    assert shared.charge_limited_repair(ctx) is None
+
+
+def test_repair_charge_limited_flag_speaks_peak_vs_sustained(ctx: ViewContext) -> None:
+    """L1/L2 的 flag 必须把「峰值 → 持续」讲成一句话，而不是只给一个数。"""
+    flags = {flag["id"]: flag for flag in R.render_view(ctx, "survivability")["flags"]}
+    flag = flags["repair_charge_limited"]
+    evidence = flag["evidence"]
+
+    assert set(evidence) == {
+        "charges",
+        "cycle_s",
+        "reload_s",
+        "sustain_s",
+        "burst_hp_s",
+        "sustained_hp_s",
+    }
+    assert evidence["sustained_hp_s"] < evidence["burst_hp_s"]
+    assert "装填" in flag["message"], "message 必须说清「打完要装填」"
+    assert "unlimited" not in flag["message"].lower(), "message 是给人看的，不要塞英文口径名"
+
+
+def test_repair_charge_limited_flag_absent_without_ancillary(ctx_from_eft) -> None:
+    """对照组：没有充能型模块 → 这条 flag 不该出（否则所有配装都被刷屏）。"""
+    flags = {
+        flag["id"]: flag
+        for flag in R.render_view(ctx_from_eft(NO_REPAIR_EFT), "survivability")["flags"]
+    }
+    assert "repair_charge_limited" not in flags

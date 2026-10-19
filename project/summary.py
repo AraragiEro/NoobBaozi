@@ -24,7 +24,7 @@ get_path(ctx, "mobility.speed_mps")  -> {value, provenance, reason?, source_view
    （唯一例外见下一条）。
 2. **L0 只砍元信息，不砍数值**：L0 丢掉的只有「逐叶子 provenance / unknown_reasons /
    confidence / 逐模块列表 / evidence / flag 的 message / 512 条技能明细」——**每一个业务
-   数值都还在**（`provenance_counts` 给三态计数、`flags` 给完整清单 + 6–10 字 `hint`、
+   数值都还在**（`provenance_counts` 给三态计数、`flags` 给完整清单 + 6–20 字 `hint`（一句能读懂的话）、
    `meta.skill_tier` 给 `{name, count, hash}`），并且都能用 `get_path()` 原路取回、逐位相同。
 3. **L1 不降级**：单视角本身就是「全量」，`render_view` 不做预算裁剪（预算护栏只属于
    `render_overview` 的六视角合计）。因此当 overview 因超预算而降级时，
@@ -53,7 +53,7 @@ T-40 之后的三处**形态**（都是验收方实测后裁决的，数值一�
 
 1. **`flags` 给 `{id, hint}`**（T-39 只给 `{id}`）：`message` 太长（f47 七条合计 688 字符），
    但只有 id 又猜不出来（`propulsion_state_conflict` / `resist_hole` 这类 id 光看没有信息量）
-   → 取 **6–10 字**的 `hint`，**由当次 evidence 生成**（见 `_flag_hint()`：形状规则 +
+   → 取 **6–20 字**的 `hint`（一句能独立读懂的话），**由当次 evidence 生成**（见 `_flag_hint()`：形状规则 +
    领域词表，**没有任何「flag id → 文案」的常量表**，所以 hint 永远带当次的真实数字）。
    无 evidence 可生成时 `hint` 给 `null`。实测成本见 `INDEX_BUDGET_CHARS` 的 docstring。
 2. **`provenance_counts` 用带标签对象 `{measured, assumed, unknown}`**（T-39 用的是顺序
@@ -198,10 +198,17 @@ T-40 的两处压缩（`module_states` 同值 → 单值、`damage_profile` 均�
 """
 
 HINT_MIN_CHARS: int = 6
-"""`flags[].hint` 的下限（文档 §3：6–10 字，够看清「是什么」，又放得进预算）。"""
+"""`flags[].hint` 的下限（文档 §3：6–20 字，够看清「是什么」，又放得进预算）。"""
 
-HINT_MAX_CHARS: int = 10
-"""`flags[].hint` 的上限（超过就截断——hint 是提示，不是诊断正文；正文在 L1）。"""
+HINT_MAX_CHARS: int = 20
+"""`flags[].hint` 的上限（T-56 从 10 提到 20）。
+
+为什么要提：旧形态是 4–8 字**短码**（`"8件全active"` / `"带宽25未用"`），
+只有读了 message 才看得懂；实测 agent 会把短码当结论用错。T-56 起 hint 必须是
+**一句能独立读懂的话**（`"8 件模块全开，电网不够，飞不起来"`），20 字是
+「说清因果」与「L0 预算」的折中（预算 2,500；实测 f12 余量见 `tests/test_budget_guard.py`）。
+超过 20 字仍截断——hint 是提示，不是诊断正文；正文在 L1。
+"""
 
 DAMAGE_PROFILE_UNIFORM: str = "uniform"
 """`meta.damage_profile` 的四系**全相等**时压缩成的单值（默认 25/25/25/25）。"""
@@ -665,7 +672,7 @@ def _entries(ctx: ViewContext, targets: tuple[str, ...]) -> tuple[dict[str, dict
 
 
 # -----------------------------------------------------------------------------
-# flags 的 `hint`（T-40）：从**当次 evidence** 生成 6–10 字摘要
+# flags 的 `hint`（T-40 / T-56）：从**当次 evidence** 生成 ≤20 字、能独立读懂的一句话
 # -----------------------------------------------------------------------------
 
 _LAYER_LABELS: dict[str, str] = {"shield": "护盾", "armor": "装甲", "hull": "结构"}
@@ -743,79 +750,123 @@ def _hint_from_scalars(evidence: Mapping[str, object]) -> str:
     return " ".join(parts)
 
 
+def _hint_one_dp(value: object) -> str:
+    """数字 → 至多一位小数（hint 里长小数会把整句挤到 20 字上限之外）。
+
+    例：`61.297 → "61.3"`、`84.0 → "84"`、非数字老实 `str()`（不编精度）。
+    """
+    if isinstance(value, bool):
+        return str(int(value))
+    if isinstance(value, (int, float)):
+        text = f"{float(value):.1f}"
+        return text.rstrip("0").rstrip(".") or "0"
+    return str(value)
+
+
 _HINT_SHAPES: tuple[tuple[tuple[str, ...], Callable[[Mapping[str, object]], str]], ...] = (
-    # 推进状态冲突：evidence.conflict 已经是人话（"AB 与 MWD"）→ "AB与MWD同时启用"
-    (("conflict",), lambda e: f"{_hint_compact(e['conflict'])}同时启用"),
-    # 抗性洞：最薄的那一层 + 最弱的系 → "装甲最弱:爆炸"
+    # 充能型回复：峰值 ≠ 持续（T-56）。形状最窄（三个专属键），必须排在最前。
+    # 例："9发打完要装填，只剩84hp/s"（峰值到持续的落差是这条 flag 的全部信息量）
+    (
+        ("charges", "sustain_s", "sustained_hp_s"),
+        lambda e: (
+            f"{_hint_number(e['charges'])}发打完要装填，"
+            f"只剩{_hint_one_dp(e['sustained_hp_s'])}hp/s"
+        ),
+    ),
+    # 推进状态冲突：evidence.conflict 已经是人话（"AB 与 MWD"）→ "AB与MWD同时开着，互相锁死"
+    (("conflict",), lambda e: f"{_hint_compact(e['conflict'])}同时开着，互相锁死"),
+    # 状态互斥（引擎 max_group / 配置表跨组）：evidence 是 modules + limit（T-56 补形状）
+    # 旧实现没有这条，落到 `_hint_from_scalars` → "modules=MWD 与 AB lab"（截断的短码）
+    (
+        ("modules", "limit"),
+        lambda e: f"{_hint_compact(e['modules'])}，同时只能开一个",
+    ),
+    # 抗性洞：最薄的那一层 + 最弱的系 → "装甲最怕爆炸，抗性有洞"
     (
         ("layer", "weakest_damage"),
         lambda e: (
-            f"{_hint_label(_LAYER_LABELS, e['layer'])}最弱:"
-            f"{_hint_label(_DAMAGE_LABELS, e['weakest_damage'])}"
+            f"{_hint_label(_LAYER_LABELS, e['layer'])}最怕"
+            f"{_hint_label(_DAMAGE_LABELS, e['weakest_damage'])}，抗性有洞"
         ),
     ),
-    # 资源超预算（按全 active 算装不下）：开着的模块数是这条的专属证据 → "11件全active"
-    (("open_state_modules",), lambda e: f"{_hint_number(e['open_state_modules'])}件全active"),
-    # 资源溢出（余量为负）→ "CPU超11" / "PG超64.71"
-    (("cpu_deficit",), _hint_deficit),
-    # MWD 把信号半径撑大 → "信号×5.5"
-    (("sig_ratio",), lambda e: f"信号×{_hint_number(e['sig_ratio'])}"),
-    # 高槽空 + **已在用的那一类**硬点没装满 → "高槽空3;发射器1"
+    # 资源超预算（按全 active 算装不下）→ "11 件模块全开，电网不够，飞不起来"
+    (
+        ("open_state_modules",),
+        lambda e: f"{_hint_number(e['open_state_modules'])} 件模块全开，电网不够，飞不起来",
+    ),
+    # 资源溢出（余量为负）→ "CPU超11，装不下" / "PG超64.71，装不下"
+    (("cpu_deficit",), lambda e: f"{_hint_deficit(e)}，装不下"),
+    # MWD 把信号半径撑大 → "MWD 开起来，信号×5.5"
+    (("sig_ratio",), lambda e: f"MWD 开起来，信号×{_hint_number(e['sig_ratio'])}"),
+    # 高槽空 + **已在用的那一类**硬点没装满 → "高槽空3个，发射器1没用满"
     # （T-54 审查：旧的 ("high_empty","high_total") 形状只给 "高槽空1/5"，把
     #  「哪一类硬点还有余」整个丢掉了 —— 而那正是这条 flag 的全部信息量）
     (
         ("free_kinds", "high_empty"),
-        lambda e: f"高槽空{_hint_number(e['high_empty'])};{_hint_compact(e['free_kinds'])}",
+        lambda e: f"高槽空{_hint_number(e['high_empty'])}个，{_hint_compact(e['free_kinds'])}没用满",
     ),
-    # 高槽有挂点但空着 → "高槽空3/4"（没有 free_kinds 时的兜底）
+    # 高槽有挂点但空着 → "高槽空3/4，还留着空位"（没有 free_kinds 时的兜底）
     (
         ("high_empty", "high_total"),
-        lambda e: f"高槽空{_hint_number(e['high_empty'])}/{_hint_number(e['high_total'])}",
+        lambda e: (
+            f"高槽空{_hint_number(e['high_empty'])}/{_hint_number(e['high_total'])}，还留着空位"
+        ),
     ),
-    # 炮/发射器超装（free 为负）→ "发射器超2" / 两类都超 → "炮位超1+发射器超1"
+    # 炮/发射器超装（free 为负）→ "炮位超1+发射器超1，硬点超装"
     # （`over_kinds` 是预渲染的全部类别；没有它的旧数据退回只报最严重的那一类）
-    (("over_kinds",), lambda e: _hint_compact(e["over_kinds"])),
+    (("over_kinds",), lambda e: f"{_hint_compact(e['over_kinds'])}，硬点超装"),
     (
         ("kind", "over"),
-        lambda e: f"{_hint_label(HARDPOINT_LABELS, e['kind'])}超{_hint_number(e['over'])}",
+        lambda e: f"{_hint_label(HARDPOINT_LABELS, e['kind'])}超{_hint_number(e['over'])}，硬点超装",
     ),
-    # 关掉这一件电容就稳 → "关5MN就稳"
-    (("module", "stable_pct_after"), lambda e: f"关{_hint_token(e['module'])}就稳"),
-    # 机库里有载机但没起飞 → "机库8架未飞"
-    (("fighter_bay_count",), lambda e: f"机库{_hint_number(e['fighter_bay_count'])}架未飞"),
-    # 有弹药却零齐射 → "5门有弹零伤害"
-    (("armed_weapons", "dph_hp"), lambda e: f"{_hint_number(e['armed_weapons'])}门有弹零伤害"),
-    # 电容会耗尽（有修复速率也不稳）→ "电容38.4s耗尽"
-    (("cap_depletes_in_s",), lambda e: f"电容{_hint_number(e['cap_depletes_in_s'])}s耗尽"),
-    # 无人机带宽超限（全部放飞所需 > 总带宽）→ "无人机带宽超125"
+    # 关掉这一件电容就稳 → "关掉5MN，电容就稳了"
+    (("module", "stable_pct_after"), lambda e: f"关掉{_hint_token(e['module'])}，电容就稳了"),
+    # 机库里有载机但没起飞 → "机库8架载机，一架没放飞"
+    (("fighter_bay_count",), lambda e: f"机库{_hint_number(e['fighter_bay_count'])}架载机，一架没放飞"),
+    # 有弹药却零齐射 → "5门有弹药，齐射伤害0"
+    (
+        ("armed_weapons", "dph_hp"),
+        lambda e: f"{_hint_number(e['armed_weapons'])}门有弹药，齐射伤害0",
+    ),
+    # 电容会耗尽（有修复速率也不稳）→ "电容38.4秒后耗尽，撑不住"
+    (("cap_depletes_in_s",), lambda e: f"电容{_hint_number(e['cap_depletes_in_s'])}秒后耗尽，撑不住"),
+    # 无人机带宽超限（全部放飞所需 > 总带宽）→ "无人机带宽超125，放不下"
     # 形状：`bandwidth_required` + `over`。必须排在 `("bandwidth_total","drones_carried")`
-    # （idle 那条）之前：新形状先于更宽的形状，否则会被「带宽50未用」吃掉。
-    # 字数：hint 的硬门槛是 **6–10 字**（`tests/test_summary.py`），所以前缀带上「无人机」——
-    # 只写「带宽超1」只有 4 字，会直接打红。
-    (("bandwidth_required", "over"), lambda e: f"无人机带宽超{_hint_number(e['over'])}"),
-    # 同时放飞架数超限 → "无人机架数超20"（与带宽是两个量纲，两条 flag 各带各的 hint，
-    # 同一配装可以同时出现「无人机带宽超125」与「无人机架数超20」）
-    (("max_launched", "over"), lambda e: f"无人机架数超{_hint_number(e['over'])}"),
-    # 无人机带宽闲着 → "带宽50未用"
-    (("bandwidth_total", "drones_carried"), lambda e: f"带宽{_hint_number(e['bandwidth_total'])}未用"),
-    # 一件推进模块都没有 → "无推进模块22件"
+    # （idle 那条）之前：新形状先于更宽的形状，否则会被「带宽50全空着」吃掉。
+    (("bandwidth_required", "over"), lambda e: f"无人机带宽超{_hint_number(e['over'])}，放不下"),
+    # 同时放飞架数超限 → "同时在飞的无人机多20架"（与带宽是两个量纲，两条 flag 各带各的）
+    (("max_launched", "over"), lambda e: f"同时在飞的无人机多{_hint_number(e['over'])}架"),
+    # 无人机带宽闲着 → "带宽50全空着，没带无人机"
+    (
+        ("bandwidth_total", "drones_carried"),
+        lambda e: f"带宽{_hint_number(e['bandwidth_total'])}全空着，没带无人机",
+    ),
+    # 一件推进模块都没有 → "22件模块里没有推进"
     (
         ("propulsion_modules", "fitted_modules"),
-        lambda e: f"无推进模块{_hint_number(e['fitted_modules'])}件",
+        lambda e: f"{_hint_number(e['fitted_modules'])}件模块里没有推进",
     ),
-    # 齐射/秒伤与武器周期不符 → "周期比0.0s"
-    (("ratio_s", "cycle_max_s"), lambda e: f"周期比{_hint_number(e['ratio_s'])}s"),
-    # 空槽闲置 → "空槽16个闲置"
-    (("empty_slots",), lambda e: f"空槽{_hint_number(e['empty_slots'])}个闲置"),
+    # 齐射/秒伤与武器周期不符 → "周期对不上，差了2.3秒"
+    (("ratio_s", "cycle_max_s"), lambda e: f"周期对不上，差了{_hint_number(e['ratio_s'])}秒"),
+    # 空槽闲置 → "16个空槽一直闲着"
+    (("empty_slots",), lambda e: f"{_hint_number(e['empty_slots'])}个空槽一直闲着"),
 )
 """evidence **形状** → hint 生成器（**表的键是 evidence 的字段名组合，不是 flag id**）。
 
-为什么按形状而不按 id：hint 必须**跟着当次数据走**（`"装甲最弱:爆炸"` 换成另一条船就是
-`"护盾最弱:电磁"`），所以不能写一张 `{flag_id: 文案}` 的常量表——那种表第一次换样本就过时。
-按形状登记之后：① 同一个 flag 在不同配装上得到**不同的真实数字**；② 新 flag 只要复用
+为什么按形状而不按 id：hint 必须**跟着当次数据走**（`"装甲最怕爆炸，抗性有洞"` 换一条船就是
+`"护盾最怕电磁，抗性有洞"`），所以不能写一张 `{flag_id: 文案}` 的常量表——那种表第一次换样本
+就过时。按形状登记之后：① 同一个 flag 在不同配装上得到**不同的真实数字**；② 新 flag 只要复用
 已有的 evidence 形状就自动有 hint；③ 表的每一条都只在「这些键同时存在」时命中，
 不存在的键不会编出数字。域词表（`_LAYER_LABELS` / `_DAMAGE_LABELS` / `_RESOURCE_LABELS`）
 只翻译 **evidence 里本来就有的值**（`armor` / `explosive` / `cpu`），不产生任何新事实。
+
+**T-56：hint 从「短码」升级成「一句能独立读懂的话」（≤20 字）。** 旧形态是
+`"8件全active"` / `"带宽25未用"`——agent 得自己把短码翻译成结论，实测会读错意图。
+新形态要求：**不看 message、只看 hint 也能知道发生了什么**（`HINT_MAX_CHARS = 20`）。
+
+**顺序纪律**：形状按「键越多越靠前」排。宽度相同的窄形状必须排在更宽的形状之前，
+否则会被更宽的规则先吃掉（历史上踩过两次：`("high_empty","high_total")` 吃掉
+`free_kinds`；`bandwidth_total` 吃掉 `bandwidth_required`）。新增形状请插到合适位置并留一句话。
 """
 
 
@@ -830,9 +881,9 @@ def _hint_from_evidence(evidence: Mapping[str, object]) -> str:
 
 
 def _flag_hint(flag: Mapping[str, object]) -> str | None:
-    """一条 flag → **6–10 字**的 hint（`None` = 没有 evidence 可生成）。
+    """一条 flag → **6–20 字**、能独立读懂的一句话（`None` = 没有 evidence 可生成）。
 
-    长度口径：形状表里的模板设计上都落在 6–10 之间；超过 `HINT_MAX_CHARS` 截断
+    长度口径：形状表里的模板设计上都落在 6–20 之间；超过 `HINT_MAX_CHARS` 截断
     （hint 是「要不要展开看」的提示，不是诊断正文），更短就照实给——**不填充假字**。
     """
     evidence = flag.get("evidence")
@@ -850,7 +901,7 @@ def _flag_pairs(entries: Mapping[str, dict], residual: list[dict] | None = None)
     为什么 L0 连 `message` 都不带：
 
     - **一条不丢**：L0 的 flag 清单是**完整**的（视角顺序 + 顶层兜底桶），只是把
-      「为什么」留给 L1——`id` + 6–10 字的 `hint` 已经够回答「要不要继续看」；
+      「为什么」留给 L1——`id` + 6–20 字的 `hint` 已经够回答「要不要继续看」；
     - **换成 message 就装不下**：实测 f47 有 7 条 flag，带 message 时 `flags` 单块
       **688 字符**（六视角合计才 960），无论怎么截都过不了预算，且正文被截成碎句；
     - 反过来「只留前 N 条」更糟：那会**真的丢诊断**（渲染层 docstring 的红线是

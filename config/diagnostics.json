@@ -75,6 +75,12 @@
       "message": "{layer} 层最弱抗性 {weakest_damage}（{weakest_resist_pct}%），最强 {strongest_damage}（{strongest_resist_pct}%），共振率比值 {ratio}"
     },
     {
+      "id": "repair_charge_limited",
+      "view": "survivability",
+      "enabled": true,
+      "message": "回复速率 {burst_hp_s} hp/s 是**充能期间**的峰值：带 {charges} 发、{cycle_s} s 一发，打完要装填 {reload_s} s（一轮共 {sustain_s} s），长期平均只有 {sustained_hp_s} hp/s —— 拿峰值当持续回复会高估续航"
+    },
+    {
       "id": "repaired_but_unstable",
       "view": "stability",
       "enabled": true,

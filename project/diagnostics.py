@@ -1117,6 +1117,17 @@ def _rule_repaired_but_unstable(facts: _Facts) -> dict | None:
     }
 
 
+def _rule_repair_charge_limited(facts: _Facts) -> dict | None:
+    """充能型本地回复：`repair_total_hp_s` 只是**充能期间的峰值**（T-56）。
+
+    真实事故：agent 只看到 L0 的 `repair_total_hp_s: 269.5` 就写「270 > 承伤 108 → 打不死」，
+    而 XL-ASB 打 9 发就要装填 60 秒。峰值与持续的口径只在
+    `views/shared.charge_limited_repair()` 实现一次 —— 本规则只做「搬事实」，
+    不在诊断层重算（否则两处口径又会长歪）。
+    """
+    return _shared.charge_limited_repair(facts.ctx)
+
+
 def _rule_alpha_dph_ratio(facts: _Facts) -> dict | None:
     """`dph/dps` 与主要武器周期明显不符（**相对**判定）。
 
@@ -1215,6 +1226,7 @@ _HANDLERS: dict[str, Callable[[_Facts], dict | None]] = {
     "state_exclusive": _rule_state_exclusive,
     "resist_hole": _rule_resist_hole,
     "repaired_but_unstable": _rule_repaired_but_unstable,
+    "repair_charge_limited": _rule_repair_charge_limited,
     "alpha_dph_ratio": _rule_alpha_dph_ratio,
     "weapon_damage_zero": _rule_weapon_damage_zero,
     "fighters_in_bay_only": _rule_fighters_in_bay_only,

@@ -487,7 +487,7 @@ def test_hardpoint_violation_reports_both_classes_in_message_and_hint() -> None:
     envelope = api.fit_index(text)
     assert envelope["ok"] is True, envelope.get("error")
     hints = {flag["id"]: flag["hint"] for flag in envelope["result"]["flags"]}
-    assert hints["hardpoint_violation"] == "炮位超1+发射器超1", "L0 hint 必须两类都说到"
+    assert hints["hardpoint_violation"] == "炮位超1+发射器超1，硬点超装", "L0 hint 必须两类都说到"
 
 # =============================================================================
 # 七、EFT 首行的两种写法 + 空槽标记（Lead 修了 engine 解析器，这里只钉行为）
@@ -827,7 +827,7 @@ def test_hardpoint_labels_are_imported_not_copied() -> None:
     )
     assert envelope["ok"] is True
     hints = {flag["id"]: flag["hint"] for flag in envelope["result"]["flags"]}
-    assert hints["hardpoint_violation"] == "炮位超1+发射器超1"
+    assert hints["hardpoint_violation"] == "炮位超1+发射器超1，硬点超装"
 
 
 # =============================================================================

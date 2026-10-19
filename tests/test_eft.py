@@ -144,11 +144,11 @@ def test_over_install_raises_hardpoint_violation() -> None:
 
 
 def test_hardpoint_violation_hint_is_generated_from_evidence() -> None:
-    """L0 的 `hint` 跟着当次 evidence 走（`发射器超2`），不是一张写死的文案表。"""
+    """L0 的 `hint` 跟着当次 evidence 走（`发射器超2，硬点超装`），不是一张写死的文案表。"""
     envelope = api.fit_index(_launchers(5))
     assert envelope["ok"] is True, envelope.get("error")
     hints = {flag["id"]: flag["hint"] for flag in envelope["result"]["flags"]}
-    assert hints["hardpoint_violation"] == "发射器超2"
+    assert hints["hardpoint_violation"] == "发射器超2，硬点超装"
 
 
 def test_hardpoints_is_visible_in_l0_next_to_slots() -> None:
