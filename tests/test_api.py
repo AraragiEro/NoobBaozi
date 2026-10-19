@@ -22,12 +22,18 @@ import copy
 import json
 import statistics
 import time
+import typing
 import urllib.error
 from pathlib import Path
 
 import pytest
 
-from noobbaozi import api
+from noobbaozi import api, contracts
+from noobbaozi.project import confidence as project_confidence
+from noobbaozi.project import explain as project_explain
+from noobbaozi.project import reasons as project_reasons
+from noobbaozi.project import sensitivity as project_sensitivity
+from noobbaozi.project import summary as project_summary
 
 NOOBBAOZI_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES_DIR = NOOBBAOZI_ROOT / "acceptance" / "fixtures"
@@ -4021,3 +4027,392 @@ def test_hp_pool_ehp_label_guard_is_not_vacuous(
     assert not _survival_labels_ok(broken["a_on_b"]["defender_survival"]), (
         "互换用途说明后守卫仍然通过 —— 那条断言是永真的"
     )
+
+
+# =============================================================================
+# 二十二、信封术语表（`meta.glossary`）：术语在返回体里自解释（T-52）
+# =============================================================================
+#
+# 为什么这一节存在（实证，不是想象）：一个**只接了 MCP** 的 agent 读到了
+#
+#     "provenance_counts": {"survivability": {"measured": 0, "assumed": 31, "unknown": 1}}
+#     "meta": {"damage_profile": "uniform", "state_policy": "engine_default"}
+#
+# 数字全对，但它不知道 `assumed` 是什么意思（依赖技能档 / 状态 / 剖面），也不知道
+# `uniform` 是什么剖面（四系均分）—— 于是把「依赖假设的值」当成了「实测事实」。
+# **agent 不会读 `mcp/README.md`、也不会读 `SKILL.md`**：它只看 `tools/list` 的
+# description（≤600 字符，塞不下）与返回的 JSON。所以术语必须在**返回体里**解释。
+#
+# 这一节钉四件事：
+# 1. **每个 `fit_*` 入口都带**（`zkb_*` 不带：它的 labels / npc / solo 已在
+#    description 里写清，也不涉及本项目的 provenance / combine 口径）；
+# 2. **只解释本次真的出现了的术语**（死条目 = 让 agent 去猜一个不存在的字段）；
+# 3. **本次出现的术语一个都不许漏**（缺解释正是本单要修的那个 bug）；
+# 4. **每个术语的文案写全了它的合法枚举值** —— 取值从 `contracts.Provenance` /
+#    `reasons.UNKNOWN_REASONS` / explain 与 sensitivity 的指标表**反查**，不抄第二份；
+#    新增一个枚举值而没更新文案 → 红。
+
+EXPECTED_TERM_KEYS = {
+    "provenance",
+    "confidence",
+    "unknown_reasons",
+    "combine",
+    "minimality",
+    "budget",
+    "assumes",
+    "damage_profile",
+    "state_policy",
+}
+"""术语表的**封闭**键集合（新增术语必须同时更新这里、`api.GLOSSARY_ORDER` 和 README）。"""
+
+_KEY_TO_TERM = {
+    "provenance": "provenance",
+    "provenance_counts": "provenance",
+    "confidence": "confidence",
+    "unknown_reasons": "unknown_reasons",
+    "combine": "combine",
+    "minimality": "minimality",
+    "folded_noops": "minimality",
+    "assumes": "assumes",
+    "unlimited_charges": "assumes",
+    # `survivability.repair.assumes` 的同义载体：L0 只给 `repair_total_hp_s`（那个 269.5），
+    # 前提在另一个键上；只认 `assumes` 会让 L0 漏掉它 —— 这正是本单的实证案例。
+    "charge_limited": "assumes",
+    "repair_total_hp_s": "assumes",
+    "budget": "budget",
+}
+"""结果里的键 → 它属于哪个术语（**测试自己的检测表**，故意不复用 `api._term_keys`：
+两边各写一份，才能发现「生成逻辑悄悄漏了一个术语」）。"""
+
+
+def _walk_mappings(node: object):
+    """递归产出所有 dict（`result` 的任意深度）。"""
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _walk_mappings(value)
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            yield from _walk_mappings(item)
+
+
+def _present_terms(result: object) -> set[str]:
+    """这次返回里**真的出现了载体**的术语（检测口径与 `api._term_keys` 逐条对应）。"""
+    found: set[str] = set()
+    for mapping in _walk_mappings(result):
+        for key, value in mapping.items():
+            if key == "provenance_counts":
+                found.add("provenance")
+                continue
+            if key == "provenance":
+                # 三态表（dict）或单个三态值；`null` 不算载体（没有值就没有三态要解释）
+                if isinstance(value, str) and value in api.PROVENANCE_STATES:
+                    found.add("provenance")
+                elif isinstance(value, dict) and any(
+                    state in api.PROVENANCE_STATES for state in value.values()
+                ):
+                    found.add("provenance")
+                continue
+            if key == "reason":
+                # `fit_engagement` 里也有 `reason`（no_damage / out_of_missile_range），
+                # 那是交战事实，不是三态原因 —— 只有落在 UNKNOWN_REASONS 里才算。
+                if isinstance(value, str) and value in project_reasons.UNKNOWN_REASONS:
+                    found.add("unknown_reasons")
+                continue
+            if key == "combine":
+                if isinstance(value, str) and value in api.COMBINE_VALUES:
+                    found.add("combine")
+                continue
+            if key == "budget":
+                if isinstance(value, dict) and "degraded" in value:
+                    found.add("budget")
+                continue
+            term = _KEY_TO_TERM.get(key)
+            if term is not None:
+                found.add(term)
+    return found
+
+
+def _glossary_violations(envelope: dict) -> list[str]:
+    """术语表与本次返回是否自洽（空列表 = 合格）。三个方向都查。"""
+    if not isinstance(envelope, dict):
+        return ["不是信封"]
+    meta = envelope.get("meta")
+    if not isinstance(meta, dict):
+        return ["信封没有 meta"]
+    glossary = meta.get("glossary")
+    if not isinstance(glossary, dict) or not glossary:
+        return ["信封 meta 缺 glossary（或为空）"]
+
+    problems: list[str] = []
+    listed = set(glossary)
+    expected = _present_terms(envelope.get("result")) | set(api.GLOSSARY_ALWAYS)
+    for term in sorted(expected - listed):
+        problems.append(f"返回里出现了 {term} 的载体，但 glossary 没解释它")
+    for term in sorted(listed - expected):
+        problems.append(f"glossary 解释了 {term}，但本次返回里没有它的载体（死条目）")
+    for term, text in glossary.items():
+        if term not in EXPECTED_TERM_KEYS:
+            problems.append(f"glossary 出现了未登记的术语键：{term}")
+        if not isinstance(text, str) or len(text.strip()) < 8:
+            problems.append(f"glossary[{term}] 不是一句能读懂的解释：{text!r}")
+    return problems
+
+
+_ENTRY_GLOSSARY_EXPECTED = {
+    "parse": {"damage_profile", "state_policy"},
+    # L0 只给摘要，但 `repair_total_hp_s` 那个数就带着 `unlimited_charges` 前提 ——
+    # 本单的实证案例正是它（agent 把 269.5 当成了长期回复速率）。
+    "index": {"damage_profile", "state_policy", "provenance", "budget", "assumes"},
+    "view": {
+        "damage_profile",
+        "state_policy",
+        "provenance",
+        "confidence",
+        "unknown_reasons",
+        "assumes",
+    },
+    "get": {"damage_profile", "state_policy", "provenance"},
+    "detail": {"damage_profile", "state_policy", "provenance", "confidence", "unknown_reasons"},
+    "explain": {"damage_profile", "state_policy", "provenance", "combine", "minimality"},
+    "sensitivity": {"damage_profile", "state_policy", "provenance", "combine"},
+    "project": {"damage_profile", "state_policy"},
+    "engagement": {"damage_profile", "state_policy"},
+    "killmail": {"damage_profile", "state_policy"},
+}
+"""每个入口在**这份固定样本**上应当带哪几条术语（枚举式断言，不是「有 glossary 就行」）。
+
+`engagement` 只带两条是**有意的**：它的单方向结果里有个 `reason`（`no_damage` 这类
+自由文本），把它当成三态原因会给出一个牛头不对马嘴的解释 —— `_present_terms` 的
+`reason` 分支就是这条纪律的守卫。
+"""
+
+
+def _entry_envelopes(eft_text: str, killmail_text: str) -> dict[str, dict]:
+    """十个 `fit_*` 入口各跑一次（**清缓存**，免得拿到别的用例留下的信封）。"""
+    api.clear_caches()
+    envelopes = {
+        "parse": api.parse_fit(eft_text),
+        "index": api.fit_index(eft_text),
+        "view": api.fit_view(eft_text, "survivability"),
+        "get": api.fit_get(eft_text, "survivability.ehp_mixed"),
+        "detail": api.fit_detail(eft_text, view="resources"),
+        "explain": api.fit_explain(eft_text, EXPLAIN_A_METRIC),
+        "sensitivity": api.fit_sensitivity(eft_text, "mobility.speed_mps", max_ops=3),
+        "project": api.fit_project(eft_text),
+        "engagement": api.fit_engagement(
+            _engagement_attacker(),
+            _engagement_defender(),
+            distance_m=ENGAGEMENT_DISTANCE_M,
+        ),
+        "killmail": api.fit_killmail(killmail_text),
+    }
+    return envelopes
+
+
+def test_every_fit_entry_carries_a_self_consistent_glossary(
+    eft_text: str, killmail_text: str
+) -> None:
+    """十个入口：术语表齐全、无死条目、无漏项，且键集合与枚举表**逐项相同**。"""
+    for name, envelope in _entry_envelopes(eft_text, killmail_text).items():
+        assert envelope["ok"] is True, (name, envelope.get("error"))
+        assert _glossary_violations(envelope) == [], name
+        assert set(envelope["meta"]["glossary"]) == _ENTRY_GLOSSARY_EXPECTED[name], (
+            f"{name} 的术语集合与预期不符"
+        )
+
+
+def test_glossary_term_keys_are_closed_and_ordered() -> None:
+    """术语表的键集合 = `GLOSSARY_ORDER`（顺序表），且与测试的封闭清单一致。"""
+    assert set(api.GLOSSARY_TERMS) == EXPECTED_TERM_KEYS
+    assert set(api.GLOSSARY_TERMS) == set(api.GLOSSARY_ORDER)
+    assert len(api.GLOSSARY_ORDER) == len(set(api.GLOSSARY_ORDER)), "顺序表里有重复键"
+    assert set(api.GLOSSARY_ALWAYS) <= set(api.GLOSSARY_TERMS)
+    # 两个「不可裁剪」的术语必须是 `meta` 自己回显的那两个
+    assert set(api.GLOSSARY_ALWAYS) == {"damage_profile", "state_policy"}
+
+
+def test_glossary_documents_every_legal_enum_value() -> None:
+    """每个术语的文案必须写全它的合法取值（**从唯一真源反查**，不在测试里抄清单）。"""
+    terms = api.GLOSSARY_TERMS
+
+    # 1) provenance：contracts.Provenance 是唯一真源
+    provenance_states = set(typing.get_args(contracts.Provenance))
+    assert provenance_states == set(api.PROVENANCE_STATES), "api 的三态清单与契约漂移了"
+    for state in provenance_states:
+        assert state in terms["provenance"], f"provenance 没解释 {state}"
+
+    # 2) unknown_reasons：五个原因（含 not_applicable ≠「不知道」这条判读纪律）
+    for reason in project_reasons.UNKNOWN_REASONS:
+        assert reason in terms["unknown_reasons"], f"unknown_reasons 没解释 {reason}"
+    assert "≠不知道" in terms["unknown_reasons"], (
+        "必须点明 not_applicable ≠「不知道」——这是实测踩过的误读"
+    )
+
+    # 3) combine：从 explain / sensitivity 的指标表反查（新增指标带新取值 → 这里红）
+    explain_values = {
+        project_explain.metric_combine(metric)
+        for metric in project_explain.supported_metrics()
+    }
+    sensitivity_values = {
+        project_sensitivity._combine(metric)
+        for metric in project_sensitivity.supported_metrics()
+    }
+    reachable = explain_values | sensitivity_values
+    assert reachable == {"additive", "multiplicative", "single"}, reachable
+    assert reachable <= set(api.COMBINE_VALUES), "api.COMBINE_VALUES 少了真实取值"
+    for value in api.COMBINE_VALUES:
+        assert value in terms["combine"], f"combine 没解释 {value}"
+
+    # 4) minimality：**真的调用** `_minimality()` 拿它能返回的两种
+    observed = {
+        project_explain._minimality([], 0),
+        project_explain._minimality([], 1),
+        project_explain._minimality([{"role": "offset"}], 0),
+    }
+    assert observed == set(api.MINIMALITY_VALUES), observed
+    for value in api.MINIMALITY_VALUES:
+        assert value in terms["minimality"], f"minimality 没解释 {value}"
+
+    # 5) confidence：输出层三档（B / D 只在合法域里，不会被写进返回）
+    registered = {
+        level
+        for table in project_confidence.CONFIDENCE.values()
+        for level in table.values()
+    } | {project_confidence.DEFAULT_CONFIDENCE}
+    assert registered <= set(api.CONFIDENCE_OUTPUT_VALUES), (
+        f"CONFIDENCE 表里出现了未声明的输出档：{registered - set(api.CONFIDENCE_OUTPUT_VALUES)}"
+    )
+    assert set(api.CONFIDENCE_OUTPUT_VALUES) <= project_confidence.CONFIDENCE_LEVELS
+    for level in api.CONFIDENCE_OUTPUT_VALUES:
+        assert f"{level}=" in terms["confidence"], f"confidence 没解释 {level}"
+
+    # 6) 两个回显参数 + 回复速率假设（含「峰值 vs 持续」的判读锚点）
+    for profile in api.DAMAGE_PROFILES:
+        assert profile in terms["damage_profile"]
+    for policy in api.STATE_POLICIES:
+        assert policy in terms["state_policy"]
+    assert "unlimited_charges" in terms["assumes"]
+    assert "charge_limited" in terms["assumes"], (
+        "必须点明 charge_limited=true 时那只是峰值 —— 只看 total_hp_s 会读错"
+    )
+
+
+def test_glossary_term_inventory_is_grounded_in_real_responses(
+    eft_text: str, killmail_text: str
+) -> None:
+    """**语料落地**：九个术语每一个都必须由某个真实入口产出（不许有凭空的死词条）。"""
+    seen: set[str] = set()
+    for envelope in _entry_envelopes(eft_text, killmail_text).values():
+        seen |= set(envelope["meta"]["glossary"])
+    assert seen == EXPECTED_TERM_KEYS, f"术语表里只有这些能被真实入口产出：{sorted(seen)}"
+
+
+def test_assumes_term_follows_the_repair_numbers(eft_text: str) -> None:
+    """`assumes` 只跟着「回复速率」的载体出现，`charge_limited` 也是载体。
+
+    它是 `survivability.repair.assumes = "unlimited_charges"` 的解释，而 L0 只把
+    `repair_total_hp_s` 这个数露出来、前提藏在下一层 —— 所以两处都必须带这条解释。
+    """
+    synthetic = api._glossary(
+        {"assumes": "unlimited_charges"},
+        damage_profile=api.DAMAGE_PROFILE_UNIFORM,
+        state_policy=api.STATE_POLICY_ENGINE_DEFAULT,
+    )
+    assert "assumes" in synthetic
+    assert "unlimited_charges" in synthetic["assumes"]
+
+    # L0 的 `repair_total_hp_s` 就是本单的实证案例：它必须带前提
+    api.clear_caches()
+    index = api.fit_index(eft_text)
+    assert "repair_total_hp_s" in index["result"]["survivability"]
+    assert "assumes" in index["meta"]["glossary"]
+
+    # 反面：没有任何回复速率数字的视角不许带它（否则就是死条目）
+    api.clear_caches()
+    mobility = api.fit_view(eft_text, "mobility")
+    assert "assumes" not in mobility["meta"]["glossary"]
+    # 正面：survivability 的 repair 块里 `assumes` / `charge_limited` 一起出现
+    api.clear_caches()
+    survival = api.fit_view(eft_text, "survivability")
+    assert "assumes" in survival["result"]["overview"]["repair"]
+    assert "assumes" in survival["meta"]["glossary"]
+
+
+def test_glossary_guard_is_not_vacuous(
+    eft_text: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**配对证明**：三种破坏都必须让 `_glossary_violations()` 变红。
+
+    1. 生成端整体失灵（`_glossary` 返回空表）→ 「缺 glossary」；
+    2. 删掉一条真在用的术语（`confidence`）→ 「出现载体但没解释」；
+    3. 塞一条本次没有载体的术语（`combine`）→ 「死条目」。
+    """
+    api.clear_caches()
+    good = api.fit_view(eft_text, "survivability")
+    assert _glossary_violations(good) == [], "前提：正常返回是自洽的"
+
+    dropped = copy.deepcopy(good)
+    del dropped["meta"]["glossary"]["confidence"]
+    assert any("confidence" in problem for problem in _glossary_violations(dropped))
+
+    dead = copy.deepcopy(good)
+    dead["meta"]["glossary"]["combine"] = api.GLOSSARY_TERMS["combine"]
+    assert any("combine" in problem for problem in _glossary_violations(dead))
+
+    monkeypatch.setattr(api, "_glossary", lambda *args, **kwargs: {})
+    api.clear_caches()
+    emptied = api.fit_view(eft_text, "survivability")
+    assert _glossary_violations(emptied) == ["信封 meta 缺 glossary（或为空）"]
+
+
+L0_GLOSSARY_MAX_CHARS = 460
+"""L0 术语表的字符上限（实测 **400** 字符，留 60 字符余量给措辞微调）。
+
+为什么单独卡它：L0 是默认入口、调用最频繁的入口，正文预算只有 2,500 字符；
+术语表虽然不算进 `budget.chars`，但它一样进 agent 的上下文，不能无限长。
+"""
+
+
+def test_l0_budget_is_not_inflated_by_the_glossary(eft_text: str) -> None:
+    """L0 体量：`budget.chars` 只量**正文**（不含 `budget` 块、也不含信封 `meta`）。
+
+    术语表加在信封 `meta` 上，所以正文口径不变；这里同时钉住「L0 正文仍在预算内」与
+    「L0 的术语表只有必要的几条」，防止有人把整张表塞进 L0。
+    """
+    api.clear_caches()
+    envelope = api.fit_index(eft_text)
+    assert envelope["ok"] is True
+    body = envelope["result"]
+    assert body["budget"]["chars"] <= project_summary.INDEX_BUDGET_CHARS
+    assert body["budget"]["degraded"] is False
+    # 口径自证：chars 量的是「摘掉 budget 块之后的正文」
+    without_budget = {key: value for key, value in body.items() if key != "budget"}
+    assert body["budget"]["chars"] == len(
+        json.dumps(without_budget, ensure_ascii=False)
+    ), "L0 的 budget.chars 口径变了（现在把 budget 块也算进去了？）"
+
+    glossary = envelope["meta"]["glossary"]
+    assert set(glossary) == _ENTRY_GLOSSARY_EXPECTED["index"], "L0 只该带这四条术语"
+    assert len(json.dumps(glossary, ensure_ascii=False)) <= L0_GLOSSARY_MAX_CHARS
+
+
+def test_per_entry_glossary_stays_within_its_allowance(
+    eft_text: str, killmail_text: str
+) -> None:
+    """每个入口的术语表都不许超过各自额度（额度 = 实测值 + ~15% 余量）。"""
+    allowance = {
+        "parse": 130,  # 实测 112
+        "index": L0_GLOSSARY_MAX_CHARS,  # 实测 400
+        "view": 640,  # 实测 570（survivability：六条）
+        "get": 250,  # 实测 221
+        "detail": 520,  # 实测 458
+        "explain": 470,  # 实测 415
+        "sensitivity": 380,  # 实测 335
+        "project": 130,  # 实测 112
+        "engagement": 130,  # 实测 112
+        "killmail": 130,  # 实测 112
+    }
+    for name, envelope in _entry_envelopes(eft_text, killmail_text).items():
+        size = len(json.dumps(envelope["meta"]["glossary"], ensure_ascii=False))
+        assert size <= allowance[name], f"{name} 的术语表 {size} 字符，超过 {allowance[name]}"

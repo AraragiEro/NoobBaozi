@@ -1402,8 +1402,8 @@ INSTRUCTIONS: str = (
     "2) 顶层数值可能是不可达的叠加值：多推进同时启用时 speed_mps/signature_radius_m "
     "叠加，用 mobility.propulsion_states.single 看「只开某一个」的真实值；"
     "有 state_exclusive flag 就说明它。\n"
-    "3) 不要自己开 zkillboard/ESI 网页：战报上下文找 fit_killmail，列表检索找 zkb_search。\n"
-    "业务失败是 isError=true 的正常响应，读 error.kind。"
+    "3) 别自己开 zkillboard/ESI 网页：战报上下文找 fit_killmail，列表检索找 zkb_search。\n"
+    "业务失败是 isError=true 的正常响应，读 error.kind；术语见 meta.glossary。"
 )
 
 

@@ -134,6 +134,7 @@ from noobbaozi.engine.assumptions import default_assumptions
 from noobbaozi.project import combat as _combat
 from noobbaozi.project import explain as _explain
 from noobbaozi.project import projection as _projection
+from noobbaozi.project import reasons as _reasons
 from noobbaozi.project import render
 from noobbaozi.project import sensitivity as _sensitivity
 from noobbaozi.project import summary as _summary
@@ -171,6 +172,91 @@ STATE_POLICY_ENGINE_DEFAULT: str = "engine_default"
 """唯一支持的模块状态推定策略（L2 只记录这一个来源，§10.2）。"""
 
 STATE_POLICIES: tuple[str, ...] = (STATE_POLICY_ENGINE_DEFAULT,)
+
+# ---- 信封 `meta.glossary`：术语随返回体自带解释（T-52）----------------------
+#
+# 为什么要有它：**agent 永远不会读 `mcp/README.md` 和 `SKILL.md`**，它只看
+# `tools/list` 的 description（≤600，塞不下）与返回的 JSON。实测过一个只接了 MCP 的
+# agent：数字全读对了，但把 `assumed`（依赖假设）当成了「引擎实测」，也把
+# `damage_profile=uniform` 当成了「这套配装的实际承伤剖面」。术语必须在**返回体里**解释。
+#
+# 两条硬约束（`tests/test_api.py` 的「信封术语表」一节盯着）：
+# 1. **按需裁剪**：只解释本次返回里**真的出现**的术语（否则就是死条目）；
+# 2. **枚举值必须写全**：每个术语的文案必须点出它全部合法取值 —— 这些取值从
+#    `contracts.Provenance` / `reasons.UNKNOWN_REASONS` / explain 与 sensitivity 的
+#    指标表**反查**，新增一个枚举值而没更新文案就会红。
+
+PROVENANCE_STATES: tuple[str, ...] = ("measured", "assumed", "unknown")
+"""三态取值（与 `contracts.Provenance` 同源；测试用 `typing.get_args()` 反查，不写第二份）。"""
+
+COMBINE_VALUES: tuple[str, ...] = ("additive", "multiplicative", "single", "mixed")
+"""`combine` 的全部取值（口径见 `project/explain.py` 模块 docstring 的 A / B / C 三类）。
+
+- `additive`：A 可加类，`Σ sources[].contribution == value`；
+- `multiplicative`：B 乘性 / C 投影类，给 `base + 有序因子链` 或公式两项，**因子不可相加**；
+- `single`：单值指标（`sensitivity` 多出来的 5 个），既不是相加也不是相乘；
+- `mixed`：**降级标记**（可加类里出现了非 `mod_add`/`mod_sub` 的项）—— 实测四个 A 类指标
+  全是 `mod_add`，走不到这一支；真出现时它就是「别当可加」的意思。
+"""
+
+MINIMALITY_VALUES: tuple[str, ...] = ("filtered_noops", "not_minimal")
+"""`minimality` 的两个取值（判据见 `project/explain.py::_minimality`）。"""
+
+CONFIDENCE_OUTPUT_VALUES: tuple[str, ...] = ("A", "C", "E")
+"""`confidence` 在**输出层**会出现的三档（口径见 `project/confidence.py` 的模块 docstring）。
+
+`B`（需换算）/ `D`（需对拍）在输出层已不存在：换算是投影层做完的，而「半可信」没有
+判据 —— 它们只留在 `confidence.CONFIDENCE_LEVELS` 的合法域里，不会被写进返回。
+"""
+
+GLOSSARY_ALWAYS: tuple[str, ...] = ("damage_profile", "state_policy")
+"""**每个 `fit_*` 信封都带**的两个术语：它们由 `meta` 自己回显，必然出现在返回里。"""
+
+GLOSSARY_ORDER: tuple[str, ...] = (
+    "provenance",
+    "confidence",
+    "unknown_reasons",
+    "combine",
+    "minimality",
+    "budget",
+    "assumes",
+    *GLOSSARY_ALWAYS,
+)
+"""术语的固定输出顺序（`GLOSSARY_TERMS` 的键集合必须与它**完全一致**）。"""
+
+GLOSSARY_TERMS: dict[str, str] = {
+    "provenance": (
+        "measured=引擎直接给、换假设不变；assumed=依赖技能档/模块状态/伤害剖面，换假设会变；"
+        "unknown=取不到（≠0，别用常识补数，看 unknown_reasons）"
+    ),
+    "confidence": (
+        "口径可信度（与 provenance 正交）：A=已对拍可直接用；C=不可用（引擎不给值）；"
+        "E=未建模（只给参数，结论自己建）；稀疏表，没写出的路径 = A"
+    ),
+    "unknown_reasons": (
+        "unknown 的原因：input_incomplete=输入不足；not_applicable=本配装不适用（≠不知道）；"
+        "engine_omits=引擎永不提供；ambiguous=无唯一答案；unclassified=缺规则（缺陷）"
+    ),
+    "combine": (
+        "additive=各项相加（Σcontribution=value）；multiplicative=因子相乘（factor 不可相加）；"
+        "single=单值不可组合；mixed=混入非可加项，别当可加"
+    ),
+    "minimality": (
+        "filtered_noops=零贡献项已滤掉（滤掉几个见 folded_noops）；not_minimal=有截断或反向项"
+    ),
+    "budget": "chars=正文长度（不含 budget 块）；degraded=true 表示超出字符预算，只上报不裁剪",
+    "assumes": (
+        "某数值所依赖的前提：unlimited_charges=回复速率（repair_total_hp_s）按「充能无限」算；"
+        "charge_limited=true 时那只是峰值，实际受充能/装填限制"
+    ),
+    "damage_profile": "uniform=四系伤害均分 25/25/25/25；真实战况取决于对手",
+    "state_policy": "engine_default=模块状态按引擎默认推定（不是实测状态）",
+}
+"""术语键 → 一句话解释（**只能解释、不能给结论**：本层不做判词，红线 N5）。
+
+`zkb_*` 分支**不带** `glossary`：它的 `labels` / `npc` / `solo` / `efficiency` 已经在
+工具 description 里写清，又不涉及本项目的 provenance / combine 口径。
+"""
 
 CACHE_MAX_ENTRIES: int = 64
 """结果缓存的 LRU 容量（§10.6 要求 LRU；64 条覆盖一次战报的常见规模）。"""
@@ -962,10 +1048,12 @@ def _context(fit: dict, skill_tier: str) -> ViewContext:
 
 
 def _meta(ctx: ViewContext, *, source_format: str, damage_profile: str,
-          state_policy: str, with_assumptions: bool = False) -> dict:
-    """`meta` 块：版本三元组 + **实际**技能档 + 两个回显参数 + 输入形态。
+          state_policy: str, with_assumptions: bool = False,
+          result: object = None) -> dict:
+    """`meta` 块：版本三元组 + **实际**技能档 + 两个回显参数 + 输入形态 + 术语表。
 
     `with_assumptions=True` 时追加完整假设（**完整技能表只在这里**，§10.1 detail）。
+    `result` 只用来**裁剪** `meta.glossary`（本次返回里出现了哪些术语），不参与任何计算。
     """
     engine_meta = ctx.meta if isinstance(ctx.meta, dict) else {}
     assumptions = ctx.assumptions if isinstance(ctx.assumptions, dict) else {}
@@ -983,7 +1071,78 @@ def _meta(ctx: ViewContext, *, source_format: str, damage_profile: str,
     }
     if with_assumptions:
         meta["assumptions"] = assumptions
+    meta["glossary"] = _glossary(
+        result,
+        damage_profile=damage_profile,
+        state_policy=state_policy,
+    )
     return meta
+
+
+def _term_keys(node: object) -> set[str]:
+    """递归找出「本次返回里真的出现了术语载体」的术语键（`glossary` 的裁剪依据）。
+
+    **判据是结构，不是字符串搜索**：`reason` 只在其值属于 `reasons.UNKNOWN_REASONS`
+    时才算「unknown 的原因」—— `fit_engagement` 的单方向结果里也有一个 `reason`
+    （`no_damage` / `out_of_missile_range` 这类自由文本），那是**交战事实**，不是三态原因，
+    按名字命中会给出一个牛头不对马嘴的解释。
+    """
+    found: set[str] = set()
+    stack: list[object] = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if key == "provenance_counts":
+                    found.add("provenance")
+                elif key == "provenance":
+                    if isinstance(value, str) and value in PROVENANCE_STATES:
+                        found.add("provenance")
+                    elif isinstance(value, dict) and any(
+                        state in PROVENANCE_STATES for state in value.values()
+                    ):
+                        found.add("provenance")
+                elif key == "confidence":
+                    found.add("confidence")
+                elif key == "unknown_reasons":
+                    found.add("unknown_reasons")
+                elif (
+                    key == "reason"
+                    and isinstance(value, str)
+                    and value in _reasons.UNKNOWN_REASONS
+                ):
+                    found.add("unknown_reasons")
+                elif key == "combine" and isinstance(value, str) and value in COMBINE_VALUES:
+                    found.add("combine")
+                elif key in ("minimality", "folded_noops"):
+                    found.add("minimality")
+                elif key in ("assumes", "unlimited_charges"):
+                    found.add("assumes")
+                elif key in ("charge_limited", "repair_total_hp_s"):
+                    # `survivability.repair.assumes` 的**同义载体**：L0 只给
+                    # `repair_total_hp_s`（那个 269.5），前提不在同一层，但读它的人
+                    # 必须在同一份返回里看到前提 —— 这正是本单要修的那个实证案例。
+                    found.add("assumes")
+                elif key == "budget" and isinstance(value, dict) and "degraded" in value:
+                    found.add("budget")
+                stack.append(value)
+        elif isinstance(current, (list, tuple)):
+            stack.extend(current)
+    return found
+
+
+def _glossary(result: object, *, damage_profile: str, state_policy: str) -> dict[str, str]:
+    """本次返回要带的术语表：**只解释真的出现了的术语**（没有死条目）。
+
+    两个术语不可裁剪：`damage_profile` / `state_policy` 由 `meta` 自己回显，必然出现。
+    """
+    present = _term_keys(result)
+    present.update(GLOSSARY_ALWAYS)
+    if damage_profile not in DAMAGE_PROFILES:  # pragma: no cover - 参数已先校验
+        present.discard("damage_profile")
+    if state_policy not in STATE_POLICIES:  # pragma: no cover - 参数已先校验
+        present.discard("state_policy")
+    return {name: GLOSSARY_TERMS[name] for name in GLOSSARY_ORDER if name in present}
 
 
 def _execute(
@@ -1048,6 +1207,7 @@ def _execute(
                 damage_profile=str(damage_profile),
                 state_policy=str(state_policy),
                 with_assumptions=with_assumptions,
+                result=result,
             ),
         )
     except _ApiFailure as exc:
@@ -1945,6 +2105,7 @@ def fit_project(
                 source_format=str(target_parsed.get("source_format")),
                 damage_profile=str(damage_profile),
                 state_policy=str(state_policy),
+                result=result,
             ),
         )
     except _ApiFailure as exc:
@@ -2323,6 +2484,7 @@ def fit_engagement(
             source_format=str(attacker_parsed.get("source_format")),
             damage_profile=str(damage_profile),
             state_policy=str(state_policy),
+            result=result,
         )
         meta["mode"] = mode_text
         meta["defender_source_format"] = str(defender_parsed.get("source_format"))
@@ -3527,6 +3689,7 @@ def _execute_killmail(
             source_format=str(parsed.get("source_format")),
             damage_profile=str(damage_profile),
             state_policy=str(state_policy),
+            result=result,
         )
         meta["killmail_source"] = killmail_source
         meta["killmail_origin"] = killmail_origin

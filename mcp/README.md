@@ -978,6 +978,59 @@ duration_s=None, points=6)`。**`distance_m` 必填** —— 距离与角速度�
 协议版本 ≥ `2025-06-18` 时**同时**给 `structuredContent`（内容就是同一个信封对象），
 方便客户端直接取结构而不必二次解析文本。老版本只给 `content` 里的文本。
 
+### 术语表 `meta.glossary`（术语在**返回体里**自解释）
+
+**为什么放在返回体里、而不是放在这份 README 里**：agent 不读 README、也不读 `SKILL.md`；
+它只看 `tools/list` 的 description（每条 ≤600 字符，塞不下）和返回的 JSON。术语只写进文档
+就等于不存在。实测有一个**只接了 MCP** 的 agent，把 `provenance` 的 `assumed`（依赖假设）
+当成了「引擎实测」，又把 `repair_total_hp_s: 269.5` 当成了长期回复速率 —— 那个数是
+`unlimited_charges` 口径的**峰值**。
+
+所以每个 `fit_*` 信封的 `meta.glossary` 里带的是**本次返回里真的出现了的术语**（按需裁剪；
+没出现的术语不写，免得 agent 去猜一个不存在的字段）：
+
+```json
+"meta": {
+  "spec_version": "v1", "engine_version": "13.6.0", "sde_build": 1234567,
+  "skill_tier": {"name": "all4+min_required", "count": 512, "hash": "…"},
+  "damage_profile": "uniform", "state_policy": "engine_default", "source_format": "eft",
+  "glossary": {
+    "provenance": "measured=引擎直接给、换假设不变；assumed=依赖技能档/模块状态/伤害剖面，换假设会变；unknown=取不到（≠0，别用常识补数，看 unknown_reasons）",
+    "budget": "chars=正文长度（不含 budget 块）；degraded=true 表示超出字符预算，只上报不裁剪",
+    "assumes": "某数值所依赖的前提：unlimited_charges=回复速率（repair_total_hp_s）按「充能无限」算；charge_limited=true 时那只是峰值，实际受充能/装填限制",
+    "damage_profile": "uniform=四系伤害均分 25/25/25/25；真实战况取决于对手",
+    "state_policy": "engine_default=模块状态按引擎默认推定（不是实测状态）"
+  }
+}
+```
+
+唯一真源是 `api.GLOSSARY_TERMS`（九个术语）：`provenance` / `confidence` /
+`unknown_reasons` / `combine` / `minimality` / `budget` / `assumes` /
+`damage_profile` / `state_policy`。**每个术语的文案都写全了它的合法取值**，比如
+`unknown_reasons` 的五种原因、`combine` 的四种取值 —— 新增一个枚举值而没更新文案，
+`tests/test_api.py` 会直接红。
+
+| 入口 | 本次返回会带哪几条（示例样本） |
+|---|---|
+| `fit_index`（L0） | `provenance`（来自 `provenance_counts`）+ `budget` + `assumes`（`repair_total_hp_s` 的前提）+ 两个回显参数 |
+| `fit_view` / `fit_detail` | 上面那些（取决于视角）+ `confidence` + `unknown_reasons`；survivability 另有 `assumes` |
+| `fit_get` | `provenance`（该路径是 `unknown` 时另有 `unknown_reasons`）+ 两个回显参数 |
+| `fit_explain` | `provenance` + `combine` + `minimality`（含 `folded_noops`）+ 两个回显参数 |
+| `fit_sensitivity` | `provenance` + `combine` + 两个回显参数 |
+| `fit_parse` / `fit_project` / `fit_engagement` / `fit_killmail` | 只有两个回显参数（结果里没有这些口径） |
+| `zkb_search` / `zkb_stats` | **不带**：`labels` / `npc` / `solo` / `efficiency` 已在工具 description 里写清，且不涉及本项目的三态 / `combine` 口径 |
+
+**体量代价**（实测 f1 Hecate 样本）：信封 `meta` 从 242 → 368（`parse` / `project`）／
+656（`index`）／826（`view`）字符，L0 的术语表另由测试卡在 460 字符以内。
+**`budget.chars` 的口径没变**（它只量正文，不含 `budget` 块本身，也不含信封 `meta`）：
+f1 是 2,201、65 个样本里最肥的 2,236 —— 仍在 `INDEX_BUDGET_CHARS = 2,500` 以内。
+
+守卫在 `tests/test_api.py` 的「信封术语表」一节，三个方向都查：① 每个入口的术语集合是
+**枚举断言**（不是「有 glossary 就行」）；② glossary 里每条都必须有本次返回里的载体
+（否则是**死条目**）；③ 本次返回里出现的每个术语都必须被解释（否则就是**漏项**，也就是
+本单要修的那个 bug）。`fit_engagement` 的单方向结果里也有个 `reason`（`no_damage` 这类
+自由文本），它**不算** `unknown_reasons` 的载体 —— 按名字命中会给出一个牛头不对马嘴的解释。
+
 ### 错误语义（很重要）
 
 | 情形 | JSON-RPC 层 | 内容 |

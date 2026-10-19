@@ -421,6 +421,32 @@ def test_fit_detail_gives_full_skill_table(eft_text: str) -> None:
     assert len(tier) == 512, f"完整技能表应是 512 条，实际 {len(tier)}"
 
 
+def test_glossary_travels_over_mcp(eft_text: str) -> None:
+    """`meta.glossary` 必须真的**穿过 MCP 传输**：只接了 MCP 的 agent 看到的就是这份 JSON。
+
+    本单的起因就是这个 —— agent 拿不到 `mcp/README.md`、也不读 `SKILL.md`，
+    它手里只有 `tools/list` 的 description（≤600）与返回体。术语解释若只写在文档里，
+    对它就等于不存在。
+    """
+    index = _envelope(_call("fit_index", {"fit": eft_text}))
+    glossary = index["meta"]["glossary"]
+    assert {"provenance", "budget", "assumes", "damage_profile", "state_policy"} <= set(
+        glossary
+    )
+    assert "assumed" in glossary["provenance"], "三态必须写到返回体里，不是只写进文档"
+    assert "unlimited_charges" in glossary["assumes"]
+    assert "charge_limited" in glossary["assumes"]
+
+    view = _envelope(_call("fit_view", {"fit": eft_text, "view": "survivability"}))
+    assert {"provenance", "confidence", "unknown_reasons", "assumes"} <= set(
+        view["meta"]["glossary"]
+    )
+
+    # `structuredContent` 是同一个信封对象（协议 ≥ 2025-06-18）：术语表也在里面
+    structured = _call("fit_index", {"fit": eft_text})["structuredContent"]
+    assert structured["meta"]["glossary"] == glossary
+
+
 def test_skill_tier_argument_is_honoured(eft_text: str) -> None:
     """显式传 `skill_tier=all5`：`meta` 要回显 **all5**（不许静默按 all4 算）。"""
     envelope = _envelope(
