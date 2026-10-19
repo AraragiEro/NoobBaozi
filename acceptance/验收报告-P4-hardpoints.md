@@ -384,3 +384,108 @@ feasible  = True   （我按 cpu/pg/cal 重算 = True）
 | `run_acceptance.py`（65×43） | **2,795/2,795**，`status=pass`（27 条 low，0 条 medium+） |
 | `pytest`（我自己跑） | **1,101 passed** |
 
+## 17. P3 独立验收：`explain` + `sensitivity`（归因是不是真归因）
+
+工具：`acceptance/check_p3.py`（新建，可一键重跑）｜产物：`out/p3-check.json`
+样本 **8 个**：f1 / f7（T3C）/ f11 / f12（后勤）/ f25（电容敏感）/ f26（航母）/ f33（货舱）/ f67。
+**结论：0 缺陷**；变异证明 1/1 命中。
+
+### 17.1 我先同步了自己的硬编码
+
+`check_mcp.py` 的 `TOOL_ORDER` 原来是手写的 5 个（加工具后静默过期）。
+现改为 **从 `evefit.mcp_server.TOOL_NAMES` 派生**，并交叉断言 `len(tools) == TOOL_COUNT`。
+实测 `tools/list` = **10 个**（`fit_parse / fit_killmail / fit_index / fit_view / fit_get /
+fit_detail / fit_explain / fit_sensitivity / zkb_search / zkb_stats`），0 缺陷。
+`验收报告-MCP.md` 里「5 个」也已更新为「10 个（派生）」。
+
+### 17.2 ① `explain` A 类（加性）：正向 + 反向
+
+指标：`survivability.ehp_mixed` / `firepower.dps.base` / `resources.cpu.load` /
+`resources.powergrid.load`，共 **30 次**（8 样本 × 覆盖到的 3–4 个）。
+
+| 判据 | 结果 |
+|---|---|
+| `base + Σ contribution == value`（相对 1e-9） | 30/30 ✅ |
+| **反向**：去掉任一 contributor → 和不再等于 value | 全部 ✅（每项都必需） |
+| `folded_noops` 与「被滤掉的零项数」一致 | ✅；且返回的 `sources` 里确实**没有**零项/未应用项 |
+| `unexplained ≈ 0` | ✅ |
+
+> `explain(firepower.dps.base)` 在 f12 / f33 返回 `None`（无武器齐射）——**不是缺陷**，
+> 记「未验 + 原因」：这两个配装没有可用齐射，指标不适用。
+
+### 17.3 ② `explain` B 类（乘性）：**这里挖到了本次唯一的口径细节**
+
+指标：`mobility.speed_mps` / `stability.capacitor.peak_recharge`，共 **16 次**。
+
+`base × Π factor == replayed == value` 全部成立，但**重放公式必须带 `penalty`**：
+
+```
+有效倍数 = 1 + (本项倍数 − 1) × penalty
+post_percent 先折成 1 + factor/100；post_div 折成 1/factor
+```
+
+证据：f33（4×Expanded Cargohold II + 隐身）若不乘 `penalty`（0.8691 / 0.5706 / 0.2830 / 0.1060），
+算出来是 **15.15**，与 `value 23.6127` 差 36%；带上 `penalty` 后逐位吻合。
+f67（2×Nanofiber + 隐身 + MWD）同理：60616 → **59928.36** ✅。
+另外断言了「**不许**把 B 类当加数求和」（Σcontribution ≠ value）——通过。
+`replay_ok` 16/16 为 true。
+
+### 17.4 ③ `explain` C 类（投影）
+
+指标：`survivability.thinnest.{shield,armor,hull}.ehp`，共 **24 次**。
+
+- `formula` 是字符串（如 `"armorHP ÷ 共振[explosive]"`），我按 `÷` 拆两项，
+  从 depth-1 `sources` 取分子（`armorHP` 的 contribution）与分母（`post_div` 的 factor），
+  **24/24 能算出 `value`**（相对 1e-6）；
+- depth-2 覆盖：**效应型模块源 41 个**、**堆叠惩罚 7 个**（含 `0.8691`）✅。
+- 一处事实修正：RAH 在 armor 侧的表现是 **`pre_mul 0.85`（−15%）**，不是 `post_percent −24%`；
+  那个 −24% 来自 **Multispectrum Energized Membrane II**（`post_percent −24`）。
+  两者都在 depth-2 里，堆叠惩罚挂在 DC II / membrane 上（0.8691 = 第二件同类）。
+
+### 17.5 ④ `sensitivity`
+
+| 判据 | 结果 |
+|---|---|
+| `delta == value − baseline` | 8/8 样本、全部 change 通过 |
+| `delta_pct == delta/baseline`，baseline 0 时必须 `null` | ✅（f1/f12/f25 的 baseline=0 → `null`） |
+| `ops_planned == ops_executed + skipped` | ✅ |
+| `len(changes) == ops_executed`、`executed <= max_ops` | ✅ |
+
+**交叉验证（重点，你的要求是 ≥3 个）**：做了 **8 个**不同配装，
+`cap_sensitivity[0].module` + `stable_pct` ↔ `sensitivity(disable_item=同一件)` 的 `value`：
+
+| 样本 | 模块 type_id | L2 `cap_sensitivity` | P3 `sensitivity` | 一致 |
+|---|---|---|---|---|
+| f1 | 33076 | 0.0 | 0.0 | ✅ |
+| f7 | 14068 | 100.0 | 100.0 | ✅ |
+| f11 | 5973 | 75.798 | 75.79811 | ✅ |
+| f12 | 26914 | 0.0 | 0.0 | ✅ |
+| f25 | 33101 | 0.0 | 0.0 | ✅ |
+| f26 | 41498 | 100.0 | 100.0 | ✅ |
+| f33 | 6005 | 73.505 | 73.50538 | ✅ |
+| f67 | 5973 | 100.0 | 100.0 | ✅ |
+
+→ **8/8 一致**：L2 的“关掉谁”与 P3 的“关掉这件会怎样”是同一套事实，没有各说各话。
+
+### 17.6 边界
+
+| 边界 | 结果 |
+|---|---|
+| 0 模块（`[Hecate]` 空配装） | 不崩；`ops_planned=3` 是 **3 个 `set_mode`**（Hecate 三模式），不是模块 op ✅ |
+| 全 offline | 不崩；`baseline=0`、`delta_pct=null`、计数自洽 ✅ |
+| T3C 无 mode（f32） | `set_mode` op = **0**，计数自洽 ✅ |
+| 同一件关两次 | `planned=2 / executed=1 / skipped=1`，值只出现一次 ✅（去重正确） |
+
+### 17.7 变异证明
+
+把 A 类某条 `value ×1.001` → 加性正向判据**必须红**：**抓到** ✅
+
+### 17.8 当前基线（我自己跑）
+
+| 脚本 | 结果 |
+|---|---|
+| `check_p3.py` | **0 缺陷**（A 30 / B 16 / C 24 / sensitivity 8 / 交叉 8） |
+| `check_mcp.py` | **0 缺陷**（10 工具，派生） |
+| `run_acceptance.py`（65×43） | **2,795/2,795**，`status=pass`（27 low，0 medium+） |
+| `pytest` | **1,296 passed**（你给的是 1294，树比那之后又进了一步） |
+

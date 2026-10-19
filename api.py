@@ -1652,8 +1652,18 @@ def fit_sensitivity(
           value, delta, delta_pct, note}`；`delta = value - baseline`、
           `delta_pct = delta / baseline`（**基线为 0 时是 `null`**，不是 0 也不是 inf）；
         - `combine` 多一个枚举值 **`"single"`**（单值指标：既不是相加也不是相乘）；
-        - `ops_executed` 是**真的跑出来**的条数（变体算不出来的进 `warnings` 并跳过，
-          所以它可能小于 `ops_planned`；`truncated` 由 `max_ops` 决定）。
+        - **计数恒等式：`ops_planned == ops_executed + skipped`**（恒成立）。
+          `ops_planned` 是**考虑过**的 op 总数（**含空操作** —— 否则「计划 20 / 执行 3 /
+          跳过 0」三个数互相打架，少掉的 17 条无处交代）；`ops_executed` 是**真产出一条
+          `changes[]`** 的 op 数；`skipped` 是**没产出**的总数，由四部分组成：
+          **空操作**（模块已 `offline`、状态/模式已是目标值、重复 op、`mode_not_available`）
+          + 被 `max_ops` **砍掉**的 + `variant_error` + `metric_missing_after_change`。
+          **`skipped` 只是总数，逐条原因看 `warnings[].kind`**（`noop` 带 `count`，
+          一个被跳过的 op 可能同时计入 `noop.count` 与某个具体原因条目 —— 别把各 kind
+          的条数直接相加当 `skipped`）；`invalid_op` / `invalid_ops` 是**没成为计划**的坏
+          输入，不计入三个计数。
+        - `modes_unknown` 表示「模式这一维**没覆盖**」（T3C 的模式在本地索引里枚举不到），
+          不等于「切模式没有影响」；`no_index` 同理（没有索引，只能逐件 op）。
 
         业务失败：
 
@@ -1664,8 +1674,11 @@ def fit_sensitivity(
           `field="max_ops"`。
 
     Note:
-        返回的 dict 是**每次调用新建的**（`sensitivity` 没有跨调用共享的结果对象；它只
-        缓存引擎变体），所以本层不需要像 `fit_explain` 那样深拷贝。
+        返回的 dict 是**每次调用新建的**（`sensitivity` **没有自己的进程级 LRU**，每个变体
+        走 `engine.calculate` 并命中引擎自己的 LRU），所以本层不需要像 `fit_explain` 那样
+        深拷贝。跨调用的幂等靠 **api 的结果缓存**（key 含 `metric` / 规范化后的 `ops` /
+        `max_ops`）；`api.clear_caches()` 清的是**api 结果缓存 + `explain` 的 LRU**，
+        没有「sensitivity 的 LRU」这个东西。
     """
     text = str(metric or "").strip()
     metrics = _sensitivity.supported_metrics()

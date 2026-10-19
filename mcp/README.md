@@ -777,12 +777,49 @@ delta_pct, note}`。
 - **`delta = value - baseline`**（每位都成立，可自证）；`delta_pct = delta / baseline`
   是**比例**（不是 0–100 的百分数），而且 **`baseline == 0` 时是 `null`** —— 不适用，
   不是 0、也不是无限大；基线为**负**时百分比符号会反过来（看 `delta` 更直观）；
-- **`ops_planned` / `ops_executed` / `skipped` / `truncated` 是四个不同的数**：
-  计划了几个 / **真的跑出来几个**（变体算不出来、目标指标取不到的进 `warnings` 并跳过，
-  所以 `ops_executed ≤ ops_planned`）/ 空操作跳过了几个（已经是 offline、状态没变）/
-  是否被 `max_ops` 截断（截断时**另给一条** `truncated` warning，写明计划数与执行数）；
-- **坏 op 不是错误**：未知 `kind` / 越界 `item_index` / 货舱件 / 非法 `state` → 进
-  `warnings`（`invalid_op`）并跳过，其余 op 照跑（这是**数据问题**，不是参数问题）。
+- **计数恒等式：`ops_planned == ops_executed + skipped`**（恒成立）。三个数的口径：
+  `ops_planned` 是**考虑过**的 op 总数（**含空操作**）/ `ops_executed` 是**真产出一条
+  `changes[]`** 的 op 数 / `skipped` 是**没产出**的总数。
+  `skipped` = 空操作（模块已 offline、状态或模式已是目标值、**重复 op**、
+  `mode_not_available`）+ 被 `max_ops` **砍掉**的 + `variant_error` +
+  `metric_missing_after_change`。**`skipped` 只是总数，逐条原因看 `warnings[].kind`**
+  （见下表；`noop` 是空操作的汇总条、带 `count`，一个被跳过的 op 可能同时计入
+  `noop.count` 和某个具体原因条目 —— 所以别把各 kind 的条数直接相加当 `skipped`）；
+- **`truncated`** 是布尔：是否被 `max_ops` 截断（截断时另给一条 `truncated` warning，
+  写明可执行计划数、空操作数与执行数）；
+- **坏 op 不是错误**：未知 `kind` / 越界 `item_index` / 货舱件 / 非法 `state` /
+  非法 `mode_id` → 进 `warnings`（`invalid_op`）并**不计入** `ops_planned`（它压根没成为
+  计划的一部分），其余 op 照跑（这是**数据问题**，不是参数问题）。
+
+**`warnings[].kind` 全集**（`skipped` 的原因都在这里，别只看计数）：
+
+| kind | 什么时候出现 | 计入 `skipped`？ |
+|---|---|---|
+| `noop` | **空操作汇总**（带 `count`）：模块已 offline、状态/模式已是目标值、重复 op | ✅（`count` 就是条数） |
+| `truncated` | 可执行 op 数 > `max_ops` | ✅（被砍掉的那些） |
+| `variant_error` | 变体交给引擎后抛异常（本场景的正常输出，不猜 0） | ✅ |
+| `metric_missing_after_change` | 变体算出来了，但这个指标取不到（不补 0） | ✅ |
+| `mode_not_available` | 给定的 `mode_id` **不在本船的可切换模式**里 | ✅（同时计入 `noop.count`） |
+| `modes_unknown` | 本船的模式在本地 SDE 索引里**枚举不到**（T3C 常见）→ 自动计划不含 `set_mode`，或显式 mode 无法判断是否适用 | ❌（**维度未覆盖**，不是某条 op 被跳过） |
+| `no_index` | 压根没有 SDE 索引 → 无法枚举模式，只给逐件 op | ❌ |
+| `invalid_op` | 单条 op 不合法（未知 kind / 越界 / 货舱件 / 非法 state / 非法 mode_id） | ❌（没进计划） |
+| `invalid_ops` | `ops` 整个不是数组 | ❌ |
+
+> **`modes_unknown` 是「没测」而不是「测了没影响」**：T3C 的模式在本地索引里常常枚举
+> 不到，那时自动计划**不含** `set_mode` 维度 —— 如实说「这一维没覆盖」，别读成
+> 「切模式对这个数没影响」。
+
+**两条容易误读的口径**（实测）：
+
+- **全 offline ≡ 同型空配装**：把每件模块设成 `offline` 之后，9 个 `explain` 指标里有
+  **8 个与同型空配装逐位相同**（`ehp_mixed` / `cpu.load` / `powergrid.load` /
+  `speed_mps` / `peak_recharge` / `thinnest.*.ehp`）；**唯一例外是 `dps.base`**
+  —— 全 offline 是 **`0.0`**（有武器但没生效），空配装是 **`null`**（压根没有武器属性）。
+  所以别拿「全关掉」去反推「空船基线」，差的那一项是「有没有武器」这个事实。
+- **`sensitivity` 没有自己的进程级缓存**（每个变体走 `engine.calculate`，命中引擎自己的
+  LRU）；跨调用的结果是 **api 的结果缓存**（key 含 `metric`、规范化后的 `ops`、`max_ops`）。
+  `api.clear_caches()` 清的是 **api 结果缓存 + `explain` 的 LRU**，没有「sensitivity 的
+  LRU」这个东西 —— 别在文档或测试里把它当成第二层要清的对象。
 
 **错误口径**：
 
@@ -793,8 +830,8 @@ delta_pct, note}`。
 | `max_ops` 不是正整数（`0` / `-1` / `true` / `"8"`） | `invalid_argument` | `field="max_ops"` + `hint={min, default}` |
 
 **体量 / 耗时**（实测 f1，`max_ops=32` → 自动计划 20 个 op）：`result` 紧凑 JSON
-**3.7–4.3 KB**，单次 **46–157 ms**（首次数值含引擎预热）。所以按需给 `ops`、别在循环里
-对同一配装重复枚举——结果会进 api 的结果缓存（key 含 `metric`、规范化后的 `ops`、`max_ops`）。
+**3.7–4.3 KB**，单次 **46–164 ms**（首次数值含引擎预热）。所以按需给 `ops`、别在循环里
+对同一配装重复枚举（幂等靠 api 结果缓存，见上）。
 
 > **只给数值变化，不给判词**：返回里没有「该不该拆」的结论（红线：多视角、无判据）。
 > 拆不拆由用户按自己的目标决定 —— 同一个 `delta` 对「跑得动」和「打得多」意义不同。

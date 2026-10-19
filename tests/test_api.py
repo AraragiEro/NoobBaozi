@@ -3347,3 +3347,131 @@ def test_fit_sensitivity_delta_guard_is_not_vacuous(
     assert any(change["delta"] != change["value"] - baseline for change in result["changes"]), (
         "value 被舍成 3 位后 delta 仍然等于 value-baseline —— 这条自证等式是永真的"
     )
+
+
+# =============================================================================
+# 二十二、sensitivity 的计数恒等式与 warning kind（契约同步：dev-engine-3 裁决）
+# =============================================================================
+#
+# 旧行为：`max_ops=3` 时报 `planned=20 / exec=3 / skipped=0` —— 17 条**无声消失**。
+# 新契约：`ops_planned == ops_executed + skipped` 恒成立，`skipped` 是总数，逐条原因在
+# `warnings[].kind`。这三条断言钉的就是「别再回到旧口径」。
+
+SENSITIVITY_WARNING_KINDS: tuple[str, ...] = (
+    "noop",
+    "truncated",
+    "variant_error",
+    "metric_missing_after_change",
+    "mode_not_available",
+    "modes_unknown",
+    "no_index",
+    "invalid_op",
+    "invalid_ops",
+)
+"""`sensitivity` 会发出的 `warnings[].kind` 全集（README §4.11 的表格必须与它一致）。"""
+
+
+def _sensitivity_identity(result: dict) -> None:
+    """断言计数恒等式，并把三个数的关系写进失败信息（排查时不用回读代码）。"""
+    planned = result["ops_planned"]
+    executed = result["ops_executed"]
+    skipped = result["skipped"]
+    assert planned == executed + skipped, (
+        f"计数恒等式不成立：planned={planned} != executed={executed} + skipped={skipped}"
+        f"（少掉的 op 必须落在 skipped 里，不能无声消失）"
+    )
+    assert executed == len(result["changes"]), "ops_executed 必须等于真的产出的 change 条数"
+
+
+def test_fit_sensitivity_counts_identity_holds(eft_text: str) -> None:
+    """恒等式在**四种形态**下都成立：自动计划 / 截断 / 重复 op / 模式不可用。"""
+    scenarios = (
+        ("自动计划", {}),
+        ("截断", {"max_ops": 3}),
+        ("重复 op", {"ops": [{"kind": "disable_item", "item_index": 0}] * 2}),
+        ("模式不可用", {"ops": [{"kind": "set_mode", "mode_id": 999999}]}),
+    )
+    for label, kwargs in scenarios:
+        api.clear_caches()
+        envelope = api.fit_sensitivity(eft_text, "resources.cpu.free", **kwargs)
+        assert envelope["ok"] is True, (label, envelope.get("error"))
+        _sensitivity_identity(envelope["result"])
+
+    # 反证：截断场景下 skipped 真的是 17（旧口径是 0）—— 写死具体数会把「恒等式」变成
+    # 「恰好这一次相等」，所以只断言「截断后 skipped > 0」+ 与 planned/exec 的关系。
+    api.clear_caches()
+    cut = api.fit_sensitivity(eft_text, "resources.cpu.free", max_ops=3)["result"]
+    _sensitivity_identity(cut)
+    assert cut["truncated"] is True
+    assert cut["skipped"] > 0, "被 max_ops 砍掉的 op 必须进 skipped（旧口径是 0）"
+    assert cut["skipped"] == cut["ops_planned"] - 3
+
+
+def test_fit_sensitivity_noop_warning_counts_skipped_noops(eft_text: str) -> None:
+    """空操作进 `ops_planned`、计入 `skipped`，并由一条带 `count` 的 `noop` warning 汇总。"""
+    api.clear_caches()
+    result = api.fit_sensitivity(
+        eft_text,
+        "resources.cpu.free",
+        ops=[{"kind": "disable_item", "item_index": 0}] * 2,
+    )["result"]
+    _sensitivity_identity(result)
+    assert result["ops_planned"] == 2, "重复 op 也在计划里（不是被悄悄丢掉）"
+    assert result["ops_executed"] == 1 and result["skipped"] == 1
+    noops = [w for w in result["warnings"] if w["kind"] == "noop"]
+    assert len(noops) == 1, f"空操作要有且只有一条汇总 warning：{result['warnings']}"
+    assert noops[0]["count"] == 1
+
+
+def test_fit_sensitivity_mode_warnings_say_what_was_not_covered() -> None:
+    """两类模式 warning 的口径：**没覆盖**（`modes_unknown`）≠ **不适用**（`mode_not_available`）。"""
+    fixtures = (NOOBBAOZI_ROOT / "acceptance" / "fixtures")
+    legion = (fixtures / "f7-t3c-legion.json").read_text(encoding="utf-8")
+    hecate = (fixtures / "f1-hecate-killmail.eft").read_text(encoding="utf-8")
+
+    # T3C（Legion）：本地索引枚举不到模式 → 自动计划**不含 set_mode**，并明说这一维没覆盖
+    api.clear_caches()
+    t3c = api.fit_sensitivity(legion, "resources.cpu.free")["result"]
+    assert "modes_unknown" in [w["kind"] for w in t3c["warnings"]]
+    assert all(change["op"]["kind"] != "set_mode" for change in t3c["changes"]), (
+        "枚举不到模式时不许编造 set_mode 变化行"
+    )
+
+    # 有模式表的船（Hecate）给一个不存在的 mode → mode_not_available，且计入 skipped
+    api.clear_caches()
+    bogus = api.fit_sensitivity(
+        hecate, "resources.cpu.free", ops=[{"kind": "set_mode", "mode_id": 999999}]
+    )["result"]
+    kinds = [w["kind"] for w in bogus["warnings"]]
+    assert "mode_not_available" in kinds, kinds
+    assert bogus["ops_executed"] == 0
+    _sensitivity_identity(bogus)
+
+
+def test_all_offline_equals_empty_fit_except_dps_base(eft_text: str) -> None:
+    """全 offline ≡ 同型空配装（9 个指标里 8 个逐位相同）；唯一例外 `dps.base`。
+
+    `dps.base`：全 offline 是 **0.0**（有武器但没生效），空配装是 **取不到值**
+    （`explain` 给 `None` → 接口层 `invalid_path`）。所以「全关掉」不能当「空船基线」。
+    """
+    parsed = api.parse_fit(eft_text)["result"]["fit"]
+    offline = copy.deepcopy(parsed)
+    for item in offline["items"]:
+        item["state"] = "offline"
+    empty = api.parse_fit("[Hecate, empty]\n")["result"]["fit"]
+
+    for metric in api.EXPLAIN_METRICS:
+        api.clear_caches()
+        left = api.fit_explain(offline, metric)
+        api.clear_caches()
+        right = api.fit_explain(empty, metric)
+        if metric == "firepower.dps.base":
+            assert left["ok"] is True and left["result"]["value"] == 0.0
+            assert right["ok"] is False and right["error"]["kind"] == "invalid_path", (
+                "空配装的 dps.base 是「取不到」（None），不是 0.0"
+            )
+            continue
+        assert left["ok"] is True and right["ok"] is True, metric
+        assert left["result"]["value"] == right["result"]["value"], (
+            f"{metric}: 全 offline 与空配装必须逐位相同（差的是「有没有模块」这件事）"
+        )

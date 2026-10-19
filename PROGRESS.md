@@ -775,3 +775,38 @@ failed to solve: failed to compute cache key: "/__init__.py": not found
 11. **验收员对 explain 的验收方法已定**：正向 Σcontributors 与 `value` 比 + **反向去掉某项后必须不再相等**
     （只验正向会被「多算一项恰好抵消」骗过）。因此契约必须声明 `combine: additive | multiplicative | mixed`
     与 `sources` 是否为最小集。
+### 2026-10-19 · P3 完成（detail / explain / sensitivity）+ 独立验收 0 缺陷
+
+**1200+ passed，MCP 10 个工具。** 设计定义 P3 = `detail / explain / sensitivity`，验收标准「归因可查；灵敏度可算」，三件齐。
+
+**新增能力**
+
+| 层 | 入口 | 能力 |
+|---|---|---|
+| L2 | `fit_detail` | 完整 overview（未降级）+ 顶层 orphan flags + 信封 512 技能表 |
+| 归因 | `fit_explain` | 9 指标；A 可加（Σ==value）/ B 乘性（base × Πfactor **带堆叠惩罚**）/ C 投影（公式 + depth-2） |
+| 灵敏度 | `fit_sensitivity` | 14 指标；`disable_item` / `set_state` / `set_mode` → delta；`max_ops` 截断 |
+
+**验收（独立，不复用开发方测试）**
+
+- A 类 30 次：`base + Σcontribution == value`（rel 1e-9）+ **反向**「去掉任一项和必变」
+- B 类 16 次：独立从因子链重算，**必须带堆叠惩罚** `1 + (factor−1) × penalty`
+- C 类 24 次：按 `÷` 拆公式两项算出 value（rel 1e-6），depth-2 覆盖效应型源 41 个、惩罚 7 个
+- sensitivity：`delta == value − baseline`、`delta_pct` 基线 0 时为 null、四计数恒等
+- 与 `cap_sensitivity` **8/8 交叉一致**（两种不同实现给出同一事实）
+- 65×43 字段级仍 **2,795/2,795**
+
+**本轮最重要的教训（流程级）**
+
+12. **「自洽」不等于「算对」**。验收员第一版重算 B 类时漏了堆叠惩罚，f33 算出 15.15 vs 真值 23.61（差 36%）。
+    若它只对照产品自己的 `replayed` 字段，会得到「产品自洽，通过」。
+    **规则：验收必须能独立从原始因子/贡献项重算出 value，不能拿产品的中间结果当基准。**
+
+13. **产品自报的中间量不能作为验收依据**（`replayed` / `replay_ok` 是产品的断言，不是证据）。
+
+**已知限制**
+
+14. `feasible` 只算 CPU/PG/标定，**不含无人机**（主人裁决不改定义，改用 `drone_bandwidth_exceeded` / `launched_drones_exceeded` 两条 flag）。
+15. `explain.value` 是全精度，L1 显示 3 位小数 —— 刻意如此，舍入会破坏 rel 1e-9 的加和判据。
+16. **本地 SDE 的 T3C 模式为 0 条**（Legion/Tengu/Proteus/Loki 的 `*Mode*` 类型缺失）→ T3C 模式维度**不可测**，是数据缺口。
+17. `fit_explain(firepower.dps.base)` 在无可用齐射的样本上返回 `None`（指标不适用），不是缺陷。
