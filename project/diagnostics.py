@@ -574,7 +574,7 @@ def _rule_hardpoint_violation(facts: _Facts) -> dict | None:
 
     T-54 新增。`total` 是船体给的硬点上限（102 `turretSlotsLeft` / 101
     `launcherSlotsLeft`），`used` 是**我们自己数**的已装模块（分类规则见
-    `views.resources.HARDPOINT_*`：只数高槽、按名字/组名关键词、分不清就进 `unclassified`）。
+    `views.resources.HARDPOINT_*`：只数高槽、按名字/组名关键词、分不清就进 `unattributed`）。
     **`free` 为负不能静默通过** —— 那就是「5 个发射器挂点装 5 门、船只有 3 个挂点」这种
     非法装配，引擎不会替我们报（SDE 里没有「模块占几个炮位」的属性）。
 

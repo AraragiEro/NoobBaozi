@@ -28,6 +28,7 @@ from noobbaozi import api
 from noobbaozi.config import attributes as A
 from noobbaozi.engine import normalize
 from noobbaozi.project import eft
+from noobbaozi.project import reasons as RS
 from noobbaozi.project.views import resources as R
 
 OSPREY_NI = "Osprey Navy Issue"
@@ -115,7 +116,7 @@ def _clean_api_cache() -> None:
 def test_non_weapon_high_slot_modules_are_never_counted(name: str, group: str) -> None:
     """这些模块一律**不进 `turret` / `launcher`**：误分类会让 `free` 变负、**误报超装**。
 
-    它们现在落在 `non_hardpoint`（确定不占硬点）而不是 `unclassified`（认不出）——
+    它们现在落在 `non_hardpoint`（确定不占硬点）而不是 `unattributed`（认不出）——
     但这条测试只关心一件事：**一件都不许算成武器**。
     """
     kind = R._hardpoint_kind(name, group)
@@ -161,7 +162,7 @@ def test_a_smartbomb_fit_never_reports_a_hardpoint_violation_on_a_zero_hardpoint
     assert overview["hardpoints"]["turret"] == {"total": 0, "used": 0, "free": 0}
     assert overview["hardpoints"]["launcher"] == {"total": 0, "used": 0, "free": 0}
     assert overview["hardpoints"]["non_hardpoint"] == 3, "3 个智能炸弹 = 确定不占硬点"
-    assert overview["hardpoints"]["unclassified"] == 0, "智能炸弹是**确定**的，不是「认不出」"
+    assert overview["hardpoints"]["unattributed"] == 0, "智能炸弹是**确定**的，不是「认不出」"
     assert "hardpoint_violation" not in {flag["id"] for flag in result["flags"]}
 
 
@@ -174,7 +175,7 @@ def test_launcher_keyword_is_what_counts_the_launchers(monkeypatch: pytest.Monke
     """`LAUNCHER_KEYWORDS` 是 `used` 的唯一来源 —— 抹成空表后 `used` 必须变 0。
 
     这是「`used == 3` 不是永真」的证明：数出 3 门发射器的**就是**那张关键词表。
-    抹掉之后 3 门 RLML 会全落进 `unclassified`（**不猜**），`free` 也随之变回 3。
+    抹掉之后 3 门 RLML 会全落进 `unattributed`（**不猜**），`free` 也随之变回 3。
     """
     text = _eft(("Damage Control II",), (), (LAUNCHER,) * 3, name="KeywordProbe")
     baseline = _resources(text)["overview"]["hardpoints"]
@@ -185,7 +186,7 @@ def test_launcher_keyword_is_what_counts_the_launchers(monkeypatch: pytest.Monke
     mutated = _resources(text)["overview"]["hardpoints"]
 
     assert mutated["launcher"] == {"total": 3, "used": 0, "free": 3}, "抹掉关键词后必须数不出门数"
-    assert mutated["unclassified"] == 3, "数不出来的必须进 unclassified，不许猜成 0 门也不许猜成炮"
+    assert mutated["unattributed"] == 3, "数不出来的必须进 unattributed，不许猜成 0 门也不许猜成炮"
 
 
 # =============================================================================
@@ -290,7 +291,7 @@ def test_every_rendered_line_resolves_back_to_a_fitted_type_id() -> None:
     assert checked >= 7, f"至少要逐行检查 7 行（本样本已装 7 件），实际 {checked}"
 
 # =============================================================================
-# 四、`Gas Cloud Harvester` 漏分类（T-54 只收 `miner`，整族落进 unclassified）
+# 四、`Gas Cloud Harvester` 漏分类（T-54 只收 `miner`，整族落进 unattributed）
 # =============================================================================
 
 
@@ -304,7 +305,7 @@ def test_every_rendered_line_resolves_back_to_a_fitted_type_id() -> None:
     ],
 )
 def test_gas_cloud_harvesters_are_turrets(name: str, group: str) -> None:
-    """采气器**占炮位**：`Gas Cloud Harvester` 一族必须判成 `turret`（不是 `unclassified`）。"""
+    """采气器**占炮位**：`Gas Cloud Harvester` 一族必须判成 `turret`（不是 `unattributed`）。"""
     assert R._hardpoint_kind(name, group) == "turret"
 
 
@@ -317,7 +318,7 @@ def test_prospect_gas_harvesters_are_counted_and_over_install_is_caught() -> Non
     two = _eft(("Gas Cloud Harvester II",) * 2, ship="Prospect", name="GasTwo")
     overview = _resources(two)["overview"]
     assert overview["hardpoints"]["turret"] == {"total": 2, "used": 2, "free": 0}
-    assert overview["hardpoints"]["unclassified"] == 0
+    assert overview["hardpoints"]["unattributed"] == 0
 
     three = _eft(("Gas Cloud Harvester II",) * 3, ship="Prospect", name="GasThree")
     result = _resources(three)
@@ -338,7 +339,7 @@ def test_harvester_keyword_is_what_makes_the_harvesters_count(monkeypatch: pytes
     mutated = _resources(two)["overview"]["hardpoints"]
 
     assert mutated["turret"] == {"total": 2, "used": 0, "free": 2}, "抹掉关键词后必须数不出采气器"
-    assert mutated["unclassified"] == 2, "数不出来的一律进 unclassified，不许猜"
+    assert mutated["unattributed"] == 2, "数不出来的一律进 unattributed，不许猜"
 
 
 # =============================================================================
@@ -622,7 +623,8 @@ def test_hardpoints_free_is_unreachable_from_every_view() -> None:
 
 
 # =============================================================================
-# 九、`unclassified` 拆分：确定不占硬点 vs 真分不清
+# 九、`unattributed` 拆分：确定不占硬点 vs 真分不清
+# （该键 2026-10-19 由 `unclassified` 改名：旧名与 `unknown_reasons` 的兜底值撞名）
 # =============================================================================
 
 
@@ -660,21 +662,22 @@ def test_confirmed_non_hardpoint_modules_are_their_own_bucket(name: str, group: 
         ("Compression Module", "Miscellaneous"),
     ],
 )
-def test_unknown_modules_stay_in_unclassified(name: str, group: str) -> None:
-    """**真分不清**的留在 `unclassified`：这一类 `> 0` 就是「可能漏收了一族」的维护信号。"""
-    assert R._hardpoint_kind(name, group) == "unclassified"
+def test_unknown_modules_stay_unattributed(name: str, group: str) -> None:
+    """**真分不清**的留在 `unattributed`：这一类 `> 0` 就是「可能漏收了一族」的维护信号。"""
+    assert R._hardpoint_kind(name, group) == "unattributed"
 
 
-def test_osprey_cloak_is_non_hardpoint_and_unclassified_is_zero() -> None:
-    """Osprey 真实装配：`non_hardpoint: 1`（那件隐身）+ 样例名字；`unclassified: 0`。
+def test_osprey_cloak_is_non_hardpoint_and_unattributed_is_zero() -> None:
+    """Osprey 真实装配：`non_hardpoint: 1`（那件隐身）+ 样例名字；`unattributed: 0`。
 
-    改之前是 `unclassified: 1` —— 读起来像「有一件武器我们认不出」，实际是确定不占硬点的隐身。
+    拆之前两类混在一个计数里（旧名 `unclassified`），读起来像「有一件武器我们认不出」，
+    实际是确定不占硬点的隐身。
     """
     hardpoints = _resources(MISSILE_BOAT_TEXT)["overview"]["hardpoints"]
 
     assert hardpoints["non_hardpoint"] == 1
     assert hardpoints["non_hardpoint_modules"] == ["Improved Cloaking Device II"]
-    assert hardpoints["unclassified"] == 0
+    assert hardpoints["unattributed"] == 0
     # 硬点的 used 不受影响（隐身一件都不加）
     assert hardpoints["launcher"] == {"total": 3, "used": 3, "free": 0}
 
@@ -696,7 +699,7 @@ def test_non_hardpoint_modules_list_caps_at_three() -> None:
 
     assert hardpoints["non_hardpoint"] == 4
     assert len(hardpoints["non_hardpoint_modules"]) == 3
-    assert hardpoints["unclassified"] == 0
+    assert hardpoints["unattributed"] == 0
 
 
 def test_both_counts_are_in_l0_with_provenance() -> None:
@@ -706,12 +709,12 @@ def test_both_counts_are_in_l0_with_provenance() -> None:
     block = envelope["result"]["resources"]["hardpoints"]
 
     assert block["non_hardpoint"] == 1
-    assert block["unclassified"] == 0
+    assert block["unattributed"] == 0
     assert block["non_hardpoint_modules"] == ["Improved Cloaking Device II"]
 
     for path, expected in (
         ("resources.hardpoints.non_hardpoint", 1),
-        ("resources.hardpoints.unclassified", 0),
+        ("resources.hardpoints.unattributed", 0),
     ):
         answer = api.fit_get(MISSILE_BOAT_TEXT, path)
         assert answer["ok"] is True, answer
@@ -720,19 +723,19 @@ def test_both_counts_are_in_l0_with_provenance() -> None:
     provenance = _resources(MISSILE_BOAT_TEXT)["provenance"]
     assert provenance["hardpoints.non_hardpoint"] == "assumed"
     assert provenance["hardpoints.non_hardpoint_modules"] == "assumed"
-    assert provenance["hardpoints.unclassified"] == "assumed"
+    assert provenance["hardpoints.unattributed"] == "assumed"
 
 
-def test_moving_a_group_out_of_the_whitelist_sends_it_to_unclassified(
+def test_moving_a_group_out_of_the_whitelist_sends_it_to_unattributed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**非永真证明**：把 `Cloaking Device` 从确定白名单里挪走 → 隐身必须落回 `unclassified`。
+    """**非永真证明**：把 `Cloaking Device` 从确定白名单里挪走 → 隐身必须落回 `unattributed`。
 
     这是「`non_hardpoint: 1` 真的是白名单判出来的」的唯一验法：抹掉那一行，
-    同一套配装的结论必须翻转（`non_hardpoint` 0 / `unclassified` 1），否则断言在空转。
+    同一套配装的结论必须翻转（`non_hardpoint` 0 / `unattributed` 1），否则断言在空转。
     """
     baseline = _resources(MISSILE_BOAT_TEXT)["overview"]["hardpoints"]
-    assert baseline["non_hardpoint"] == 1 and baseline["unclassified"] == 0
+    assert baseline["non_hardpoint"] == 1 and baseline["unattributed"] == 0
 
     mutated_whitelist = frozenset(
         group
@@ -745,7 +748,66 @@ def test_moving_a_group_out_of_the_whitelist_sends_it_to_unclassified(
 
     assert mutated["non_hardpoint"] == 0, "白名单被抹掉后不许还算「确定不占硬点」"
     assert mutated["non_hardpoint_modules"] == []
-    assert mutated["unclassified"] == 1, "数不出来的必须落回 unclassified（不猜）"
+    assert mutated["unattributed"] == 1, "数不出来的必须落回 unattributed（不猜）"
+
+
+def test_unattributed_key_is_gone_under_its_old_name() -> None:
+    """改名必须**一次改干净**：`unclassified` 这个键在 L0 / L1 / `get_path` 三处都得消失。
+
+    旧名与 `reasons.UNKNOWN_REASONS` 的兜底值 `unclassified`（=「不知道为什么不知道」）同字
+    不同义：agent 在 L0 同时看到 `hardpoints.unclassified: 1` 与 `unknown_reasons: {…:
+    "unclassified"}` 会以为是同一件事。**不留别名**——同时输出新旧两个键正是 `hardpoints_free`
+    的反面教材（一份数据说两遍就会漂移）。
+    """
+    overview = _resources(MISSILE_BOAT_TEXT)["overview"]["hardpoints"]
+    assert "unattributed" in overview, "新键必须在"
+    assert "unclassified" not in overview, "旧键不许留（哪怕值一样）"
+
+    # L0 是同一份块的透传：必须只剩新名
+    index_block = api.fit_index(MISSILE_BOAT_TEXT)["result"]["resources"]["hardpoints"]
+    assert "unattributed" in index_block and "unclassified" not in index_block
+
+    # 旧路径取不到（不是「取到 None」，是**根本没这条路**）
+    old = api.fit_get(MISSILE_BOAT_TEXT, "resources.hardpoints.unclassified")
+    assert old["ok"] is False, f"旧路径仍然取得到：{old}"
+    assert old["error"]["kind"] == "invalid_path"
+    new = api.fit_get(MISSILE_BOAT_TEXT, "resources.hardpoints.unattributed")
+    assert new["ok"] is True and new["result"]["value"] == 0
+    assert new["result"]["provenance"] == "assumed"
+
+
+def test_unattributed_count_is_counted_not_hardcoded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**非永真证明**：这个数真是「数」出来的 —— 抹掉「分不清」组表就必须归 0。
+
+    `Festival Launcher` 落进 `unattributed` 的唯一原因是它在 `HARDPOINT_UNATTRIBUTED_GROUPS`
+    里。抹空那张表后，名字里的 `launcher` 会被关键词表接住 → 算进 `launcher.used`、
+    `unattributed` 归 0。所以「`unattributed == 1`」不是永真：把它写死 0 的实现会在第一条
+    断言上红；把组表写死进函数体的实现在第二条上红。
+    """
+    text = _eft(("Festival Launcher",), name="FestivalProbe")
+    baseline = _resources(text)["overview"]["hardpoints"]
+    assert baseline["unattributed"] == 1, "节日发射器是「分不清」，必须计数"
+    assert baseline["launcher"]["used"] == 0, "分不清的一件都不许猜进 used"
+
+    monkeypatch.setattr(R, "HARDPOINT_UNATTRIBUTED_GROUPS_FOLDED", frozenset())
+    api.clear_caches()  # api 是 LRU：不清缓存会直接返回**抹表之前**的结果，测试变成永真
+    mutated = _resources(text)["overview"]["hardpoints"]
+    assert mutated["unattributed"] == 0, "抹掉组表后不许还算「分不清」"
+    assert mutated["launcher"]["used"] == 1, "名字里的 launcher 由关键词表接住（不猜）"
+
+
+def test_hardpoint_state_never_reuses_an_unknown_reason_value() -> None:
+    """硬点第四态**不许再撞** `unknown_reasons` 的取值（改名的唯一目的，钉成不变式）。
+
+    `reasons.UNKNOWN_REASONS` 是「为什么不知道」的合法取值集合；`HARDPOINT_UNATTRIBUTED` 是
+    「这件模块归不了类」。两者同字时，L0 的两块数据会被读成同一件事 —— 这里钉住**集合不相交**，
+    以后谁把名字改回去都会立刻红。
+    """
+    assert R.HARDPOINT_UNATTRIBUTED not in RS.UNKNOWN_REASONS, (
+        "硬点第四态又与 unknown 原因表撞名了 —— 本次改名的意义就是让这两个词不重合"
+    )
+    assert R.HARDPOINT_UNATTRIBUTED == "unattributed"
+    assert RS.FALLBACK_REASON == "unclassified", "reason 侧不该跟着改（它的语义没有歧义）"
 
 
 # =============================================================================

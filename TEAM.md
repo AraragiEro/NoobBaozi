@@ -7,11 +7,26 @@
 
 | 代号 | 角色 | 文件拥有权 | 已执行任务 | 状态 |
 |---|---|---|---|---|
-| `dev-engine` | 投影层与数值口径（六视角 / 诊断 / 渲染） | `project/**`、`config/diagnostics.json`、`config/activation_groups.json`、`tests/test_views_*.py` / `test_render.py` / `test_attr_coverage.py` / `test_units.py` | **0 / 5** | 在役 |
+| `dev-engine-2` | 投影层与数值口径（第二任，接 self 前任交接） | `project/**`、`config/diagnostics.json`、`config/activation_groups.json`、`tests/test_views_*.py` / `test_render.py` / `test_attr_coverage.py` / `test_units.py` / `test_t54_audit.py` | **0 / 5** | 在役 |
 | `dev-surface` | 对外契约与工具面（API / CLI / MCP / 文档 / 容器） | `api.py`、`cli.py`、`mcp_server.py`、`mcp_http.py`、`mcp/**`、`docker/**`、`skill/**`、`tests/test_api.py` / `test_cli.py` / `test_mcp_*.py` | **0 / 5** | 在役 |
 | `evefit-tester` | 独立验收（不占开发名额） | `acceptance/**` | 常驻 | 在役 |
 
-Lead 拥有：`engine/**`、`sde/**`、`contracts.py`、`docs/**`、`PROGRESS.md`、其余测试与配置文件、`git` 操作。
+Lead 拥有：`engine/**`、`sde/**`、`contracts.py`、`docs/**`、`PROGRESS.md`、`git` 操作，
+以及下列**引擎/底层测试**（它们测的是 Lead 的代码，员工改不了被测算的东西，所以不给员工）：
+`tests/test_engine.py`、`test_sde.py`、`test_attribute_dict.py`、`test_contracts.py`、`test_fighters.py`、`test_regress.py`。
+
+### 测试文件属主总表（**每个 test_*.py 必须有属主**）
+
+| 属主 | 测试文件 |
+|---|---|
+| `dev-surface` | `test_api.py`、`test_cli.py`、`test_mcp_server.py`、`test_mcp_http.py` |
+| `dev-engine-2` | `test_views_a.py`、`test_views_b.py`、`test_render.py`、`test_attr_coverage.py`、`test_units.py`、`test_t54_audit.py`、**`test_eft.py`、`test_projection_core.py`、`test_summary.py`、`test_budget_guard.py`** |
+| Lead | `test_engine.py`、`test_sde.py`、`test_attribute_dict.py`、`test_contracts.py`、`test_fighters.py`、`test_regress.py` |
+
+> **教训（2026-10-19）**：`test_eft.py` / `test_projection_core.py` 曾是「一次性代理 T-54 写的、没人认领」的文件。
+> `dev-engine-2` 做改名任务时被它 9 条红卡住，才发现名册漏了 10 个测试文件。
+> **规则：名册必须覆盖 `tests/` 下每一个文件；一次性代理新增的文件，交付时必须显式移交属主。**
+
 
 ## 二、任务计数
 

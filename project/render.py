@@ -238,7 +238,8 @@ BUDGET_CHARS: int = 20500
   就是**整块丢掉 `flags.evidence`**（诊断证据消失，不是「少几行」）。长期贴着红线等价于
   「随机看运气是否降级」，这比显式抬高更难查。
   - **为什么不能靠省体积**：逐项实测过可省项，全部很低效 —— 删
-    `non_hardpoint_modules` 只省 **59 B**、`non_hardpoint` 18 B、`unclassified` 17 B；
+    `non_hardpoint_modules` 只省 **59 B**、`non_hardpoint` 18 B、`unattributed` 17 B
+    （`unclassified` → `unattributed` 是同长度改名：两者都是 12 字符，体量一字不变）；
     再往下就要动 `constraints.tier_violations`（968 B）/ `stability.cap_sensitivity`（723 B）/
     `mobility.propulsion_states`（550 B）—— **拿真信息换几十个字符是错的交易**。
   - **取值依据**：`18,962 × 1.08 ≈ 20,479`，按千位取整落到 **20,500**，三样本余量

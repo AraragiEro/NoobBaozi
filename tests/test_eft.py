@@ -82,7 +82,8 @@ def _resources(text: str) -> dict:
 
 
 # =============================================================================
-# 一、炮位口径：`hardpoints` 三段 + `unclassified`
+# 一、炮位口径：`hardpoints` 三段 + `unattributed`
+# （该键 2026-10-19 由 `unclassified` 改名：旧名与 `reasons.UNKNOWN_REASONS` 的兜底值撞名）
 # =============================================================================
 
 
@@ -112,10 +113,10 @@ def test_high_slots_are_not_hardpoints() -> None:
     assert overview["hardpoints"]["launcher"]["total"] == 3, "但发射器挂点只有 3 个"
     assert overview["hardpoints"]["turret"]["total"] == 2
     # 真实装配：3 门 RLML（+1 件隐身）。隐身是**确定不占硬点**，进 `non_hardpoint`
-    # （T-54 审查①把它从 `unclassified` 里拆出来了，见 views/resources.py 的硬点文档）
+    # （T-54 审查①把它从「分不清」那个计数里拆出来了，见 views/resources.py 的硬点文档）
     assert overview["hardpoints"]["launcher"] == {"total": 3, "used": 3, "free": 0}
     assert overview["hardpoints"]["non_hardpoint"] == 1, "隐身：确定不占硬点"
-    assert overview["hardpoints"]["unclassified"] == 0, "没有「认不出」的东西"
+    assert overview["hardpoints"]["unattributed"] == 0, "没有「认不出」的东西"
 
 
 def test_over_install_raises_hardpoint_violation() -> None:
@@ -161,7 +162,7 @@ def test_hardpoints_is_visible_in_l0_next_to_slots() -> None:
     assert block["hardpoints"]["turret"] == {"total": 2, "used": 0, "free": 2}
     assert block["hardpoints"]["launcher"] == {"total": 3, "used": 3, "free": 0}
     assert block["hardpoints"]["non_hardpoint"] == 1
-    assert block["hardpoints"]["unclassified"] == 0
+    assert block["hardpoints"]["unattributed"] == 0
     # L0 的值必须能原路取回（文档 §1 的关键约束）
     answer = api.fit_get(OSPREY_REAL_TEXT, "resources.hardpoints.launcher.free")
     assert answer["ok"] is True, answer.get("error")
@@ -177,7 +178,7 @@ def test_hardpoints_provenance_three_states() -> None:
     assert provenance["hardpoints.turret.used"] == "assumed"
     assert provenance["hardpoints.turret.free"] == "assumed"
     assert provenance["hardpoints.launcher.used"] == "assumed"
-    assert provenance["hardpoints.unclassified"] == "assumed"
+    assert provenance["hardpoints.unattributed"] == "assumed"
 
 
 def test_empty_hardpoint_uses_the_same_free() -> None:
@@ -228,19 +229,19 @@ def test_empty_hardpoint_uses_the_same_free() -> None:
         ("Light Entropic Disintegrator II", "Precursor Weapon", "turret"),
         ("Strip Miner I", "Strip Miner", "turret"),
         ("Miner II", "Mining Laser", "turret"),
-        # 确定不占硬点（T-54 审查①：它们**不再**混进 unclassified）→ 独立桶 non_hardpoint
+        # 确定不占硬点（T-54 审查①：它们**不再**混进「分不清」计数）→ 独立桶 non_hardpoint
         ("Improved Cloaking Device II", "Cloaking Device", "non_hardpoint"),
         ("Scan Probe Launcher II", "Scan Probe Launcher", "non_hardpoint"),
         ("Expanded Probe Launcher I", "Scan Probe Launcher", "non_hardpoint"),
         ("Survey Probe Launcher I", "Survey Probe Launcher", "non_hardpoint"),
         ("Tractor Beam II", "Tractor Beam", "non_hardpoint"),
-        # 真分不清 → unclassified（只计数，不许猜）
-        ("Festival Launcher I", "Festival Launcher", "unclassified"),
-        ("Interdiction Sphere Launcher I", "Interdiction Sphere Launcher", "unclassified"),
+        # 真分不清 → unattributed（只计数，不许猜）
+        ("Festival Launcher I", "Festival Launcher", "unattributed"),
+        ("Interdiction Sphere Launcher I", "Interdiction Sphere Launcher", "unattributed"),
         # 反例：`ion` 必须**整词**匹配，否则 447 个「-tion」结尾的普通模块全会中招
-        ("Reaction Control Unit", "Miscellaneous", "unclassified"),
-        ("Compression Module", "Miscellaneous", "unclassified"),
-        (None, None, "unclassified"),
+        ("Reaction Control Unit", "Miscellaneous", "unattributed"),
+        ("Compression Module", "Miscellaneous", "unattributed"),
+        (None, None, "unattributed"),
     ],
 )
 def test_hardpoint_kind_classification(name: object, group: object, expected: str) -> None:
@@ -267,7 +268,7 @@ def test_hardpoints_counts_only_high_slots() -> None:
     assert block["turret"] == {"total": 2, "used": 1, "free": 1}
     assert block["launcher"] == {"total": 3, "used": 1, "free": 2}
     assert block["non_hardpoint"] == 1, "隐身是确定不占硬点（不是「认不出」）"
-    assert block["unclassified"] == 0
+    assert block["unattributed"] == 0
 
 
 def test_hardpoints_never_invents_a_total() -> None:

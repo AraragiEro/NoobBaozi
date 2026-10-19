@@ -44,7 +44,7 @@ L0 的字段清单（文档 §3，每视角 3–5 个）
 | `firepower` | `weapons{count, families}` / `dps_base` / `dph` / `range_m{optimal[, max]}` / `damage_split` |
 | `survivability` | `ehp_mixed` / `layers{shield, armor, hull}` / `thinnest{layer, damage_type}` / `repair_total_hp_s` |
 | `mobility` | `speed_mps` / `align_time_s` / `signature_radius_m` / `propulsion_state` |
-| `resources` | `cpu{output, load, free}` / `powergrid{...}` / `feasible` / `slots{high: "3/6", …}` / `hardpoints{turret{total,used,free}, launcher{…}, unclassified}` |
+| `resources` | `cpu{output, load, free}` / `powergrid{...}` / `feasible` / `slots{high: "3/6", …}` / `hardpoints{turret{total,used,free}, launcher{…}, non_hardpoint, non_hardpoint_modules, unattributed}` |
 | `constraints` | `hard_violations{count, kinds}` / `tier_violations{count, kinds}` / `needs_implant` |
 | `stability` | `cap_stable_pct` / `cap_depletes_in_s` / `cap_load_gj_s` / `cap_recharge_gj_s` / `has_external_dependency` |
 | 顶层 | `ship{name, group, type_id}` / `meta`（**技能档只给 `{name, count, hash}`**）/ `flags[{id, hint}]` / `provenance_counts{measured, assumed, unknown}` / `budget{chars, degraded}` |
@@ -485,10 +485,11 @@ INDEX_SPEC: dict[str, tuple[IndexField, ...]] = {
                 ("launcher.used", "hardpoints.launcher.used"),
                 ("launcher.free", "hardpoints.launcher.free"),
                 # T-54 审查①：两种「不计入硬点」的计数都要能在 L0 取到
-                # （`non_hardpoint` = 确定不占硬点；`unclassified` = 真分不清，语义收窄）
+                # （`non_hardpoint` = 确定不占硬点；`unattributed` = 真分不清，语义收窄；
+                # T-1/5 改名：旧名 `unclassified` 与 `unknown_reasons` 的兜底值撞名，已删）
                 ("non_hardpoint", "hardpoints.non_hardpoint"),
                 ("non_hardpoint_modules", "hardpoints.non_hardpoint_modules"),
-                ("unclassified", "hardpoints.unclassified"),
+                ("unattributed", "hardpoints.unattributed"),
             ),
         ),
     ),

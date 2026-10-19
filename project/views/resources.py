@@ -42,7 +42,14 @@
 | `free` | `total - used`，**可以为负**（负数 = 非法装配，由 `hardpoint_violation` flag 报） | `assumed` |
 | `non_hardpoint` | 高槽里**确定不占硬点**的件数（隐身 / 智能炸弹 / 吸电 / 遥修…），**一件都不进 `used`** | `assumed` |
 | `non_hardpoint_modules` | 上面那件事的**样例名字**（最多 3 个，人读时不用猜是哪件） | `assumed` |
-| `unclassified` | 高槽里**分不清**是炮还是发射器的件数（`Festival Launcher` 一族，**不许猜进 `used`**） | `assumed` |
+| `unattributed` | 高槽里**分不清**是炮还是发射器的件数（`Festival Launcher` 一族，**不许猜进 `used`**） | `assumed` |
+
+> **这个键的真名是 `unattributed`，不是 `unclassified`**（2026-10-19 改名）。
+> 旧名与 `reasons.UNKNOWN_REASONS` 里的兜底值 `unclassified`（=「**不知道，也不知道
+> 为什么不知道**」）**同字不同义**：agent 在 L0 同时看到 `hardpoints.unclassified: 1` 与
+> `unknown_reasons: {…: "unclassified"}` 会以为是同一件事。`reasons` 那个值的语义没有歧义，
+> **保持不动**；硬点这个改成「未归属到任何炮位类别」。**没有留别名**——同时输出新旧两个键
+> 正是 `hardpoints_free` 那个反面教材的做法（一份数据说两遍就会漂移）。
 
 `total` 缺失（属性没有）时 `free` 也是 `None`（缺值不补 0，红线 N4）；`used` 仍然是数出来的
 真值（0 就是真 0）。
@@ -55,23 +62,23 @@
    （`Cloaking Device` / `Smart Bomb` / `Energy Neutralizer` / `Energy Nosferatu` /
    `Remote Armor Repairer` / `Scan Probe Launcher` / `Tractor Beam` / `Command Burst`…，
    每一行为什么确定都写在表里）；
-2. 组名命中 `HARDPOINT_UNCLASSIFIED_GROUPS` → **分不清**，进 `unclassified`
+2. 组名命中 `HARDPOINT_UNATTRIBUTED_GROUPS` → **分不清**，进 `unattributed`
    （`Festival Launcher` / `Interdiction Sphere Launcher`——**不许猜**）；
 3. 名字或组名含 `launcher` → `launcher`（`Rapid Light Missile Launcher` /
    `Heavy Missile Launcher` / `Torpedo Launcher` / `Rocket Launcher` / `Cruise Missile Launcher`…）；
 4. 名字或组名含 `HARDPOINT_TURRET_KEYWORDS` 之一 → `turret`；其中 `ion` 按**整词**匹配
    （SDE 实测：`ion` 当子串会命中 447 个模块——凡是 `-tion` 结尾的普通词都会中，
    整词匹配后只剩 `Ion Blaster` 这类真正的炮）；
-5. 都不命中 → `unclassified`（计数，不给结论）。
+5. 都不命中 → `unattributed`（计数，不给结论）。
 
-**为什么把 `non_hardpoint` 和 `unclassified` 拆成两个数**（T-54 审查）：拆之前它们挤在一个
-`unclassified` 里，于是 Osprey 真实装配的 `unclassified: 1` 读起来像「有一件武器我们认不出」，
+**为什么把 `non_hardpoint` 和 `unattributed` 拆成两个数**（T-54 审查）：拆之前它们挤在一个
+计数里（那时叫 `unclassified`），于是 Osprey 真实装配的 `1` 读起来像「有一件武器我们认不出」，
 实际是那件**隐身**（确定不占硬点）。现在：确定的进 `non_hardpoint`（还带样例名字），
-只有**真正分不清**的才留在 `unclassified` —— 后者 `> 0` 就是一条维护信号（「可能漏收了一族」，
+只有**真正分不清**的才留在 `unattributed` —— 后者 `> 0` 就是一条维护信号（「可能漏收了一族」，
 `Gas Cloud Harvester` 当年就躲在这里）。
 
 `used` 一律 `assumed`：这是**按名字/组名的启发式分类**，不是引擎算出来的（SDE 里没有
-「这个模块占几个炮位」的属性，只有船体侧的 102 / 101 总量）。分不清就进 `unclassified`，
+「这个模块占几个炮位」的属性，只有船体侧的 102 / 101 总量）。分不清就进 `unattributed`，
 不猜、不补。
 
 **`feasible` / `over_budget` 是 T-22 新增的可行性事实（字段规格 §0.6）**：
@@ -178,12 +185,12 @@ HARDPOINT_TURRET_KEYWORDS: tuple[str, ...] = (
 
 `disintegrator` 是任务书清单**之外**的一个（三神裔 `Precursor Weapon` 组的
 `Light Entropic Disintegrator II`）：那一组同样是**炮位**（SDE group 1986），
-不收就会白白落进 `unclassified`。关键词表的取舍标准是「SDE 组名 + 是否占炮位」，
-不是「任务书列了几个词」——多收一个**有证据**的词，比让一件真炮去 unclassified 更有用。
+不收就会白白落进 `unattributed`。关键词表的取舍标准是「SDE 组名 + 是否占炮位」，
+不是「任务书列了几个词」——多收一个**有证据**的词，比让一件真炮去 unattributed 更有用。
 
 `harvester` 是**独立审查补的漏分类**（T-54 只收了 `miner`）：`Gas Cloud Harvester I/II`
 落在 SDE group `Gas Cloud Harvesters`，名字与组名都不含上面任何一个词，于是整族落进
-`unclassified`。它是**占炮位**的采掘炮——Prospect（2 turret 硬点）装 2 门后实测
+`unattributed`。它是**占炮位**的采掘炮——Prospect（2 turret 硬点）装 2 门后实测
 `turret {total:2, used:0, free:2}`：`free` **虚报 2**，装 3 门（超 1 门）时**一条 flag 都不出**。
 全 SDE 4714 个 Module/Subsystem 类型里，含 `harvester` 的**高槽**模块只有 Gas Cloud Harvester
 一族；其余命中是 `Gang Coordinator`（`Mining Foreman Link - Harvester …`）/ `Mining Upgrade`
@@ -224,12 +231,12 @@ HARDPOINT_NON_HARDPOINT_GROUPS: frozenset[str] = frozenset(
         "Gang Coordinator",  # 指挥模块（`Mining Foreman Link - Laser Optimization` 名字含 Laser）
     }
 )
-"""**确定不占硬点**的高槽模块组 → 计入 `hardpoints.non_hardpoint`（**不是** `unclassified`）。
+"""**确定不占硬点**的高槽模块组 → 计入 `hardpoints.non_hardpoint`（**不是** `unattributed`）。
 
 为什么不含 `Micro Jump Field Generator`：引擎实测它是**中槽**，永远进不了硬点统计。
 """
 
-HARDPOINT_UNCLASSIFIED_GROUPS: frozenset[str] = frozenset(
+HARDPOINT_UNATTRIBUTED_GROUPS: frozenset[str] = frozenset(
     {
         # —— **分不清**（既证明不了它占硬点，也证明不了它不占）→ 只计数，不猜
         "Festival Launcher",
@@ -237,15 +244,22 @@ HARDPOINT_UNCLASSIFIED_GROUPS: frozenset[str] = frozenset(
         "Interdiction Sphere Launcher",  # 实测在 high 槽，但「是否消耗发射器硬点」没有证据
     }
 )
-"""**分不清**的高槽模块组 → 计入 `hardpoints.unclassified`（`used` 一件都不许加）。
+"""**分不清**的高槽模块组 → 计入 `hardpoints.unattributed`（`used` 一件都不许加）。
 
-T-54 审查拆分（诚实性）：拆之前这两类**混在同一个 `unclassified` 计数**里 ——
-Osprey 真实装配的 `unclassified: 1` 其实是**隐身**（确定不占硬点），读起来却像
-「有一件武器我们认不出」。现在确定的那类有独立字段 `non_hardpoint`（带样例名字）。
+T-54 审查拆分（诚实性）：拆之前这两类**混在同一个计数**里（旧名 `unclassified`）——
+Osprey 真实装配的 `1` 其实是**隐身**（确定不占硬点），读起来却像「有一件武器我们认不出」。
+现在确定的那类有独立字段 `non_hardpoint`（带样例名字）。
+
+T-1（2026-10-19）：字段与常量从 `UNCLASSIFIED` / `unclassified` 改名成
+`UNATTRIBUTED` / `unattributed` —— 旧名与 `reasons.UNKNOWN_REASONS` 的兜底值撞名。
 """
 
-HARDPOINT_UNCLASSIFIED: str = "unclassified"
-"""`hardpoints` 里**分不清**是炮还是发射器的件数字段名（只装 `HARDPOINT_UNCLASSIFIED_GROUPS`）。"""
+HARDPOINT_UNATTRIBUTED: str = "unattributed"
+"""`hardpoints` 里**分不清**是炮还是发射器的件数字段名（只装 `HARDPOINT_UNATTRIBUTED_GROUPS`）。
+
+**也是 `_hardpoint_kind()` 第四态的值**（四态：`turret` / `launcher` / `non_hardpoint` /
+`unattributed`）。旧名 `unclassified` 已删除，**不留别名**。
+"""
 
 HARDPOINT_NON_HARDPOINT: str = "non_hardpoint"
 """`hardpoints` 里**确定不占硬点**的件数字段名（装 `HARDPOINT_NON_HARDPOINT_GROUPS`）。"""
@@ -271,10 +285,10 @@ HARDPOINT_NON_HARDPOINT_GROUPS_FOLDED: frozenset[str] = frozenset(
 )
 """`HARDPOINT_NON_HARDPOINT_GROUPS` 的小写影子表（组名比对统一走小写，避免大小写分叉）。"""
 
-HARDPOINT_UNCLASSIFIED_GROUPS_FOLDED: frozenset[str] = frozenset(
-    name.casefold() for name in HARDPOINT_UNCLASSIFIED_GROUPS
+HARDPOINT_UNATTRIBUTED_GROUPS_FOLDED: frozenset[str] = frozenset(
+    name.casefold() for name in HARDPOINT_UNATTRIBUTED_GROUPS
 )
-"""`HARDPOINT_UNCLASSIFIED_GROUPS` 的小写影子表（组名比对统一走小写，避免大小写分叉）。"""
+"""`HARDPOINT_UNATTRIBUTED_GROUPS` 的小写影子表（组名比对统一走小写，避免大小写分叉）。"""
 
 HARDPOINT_KINDS: tuple[str, ...] = tuple(HARDPOINT_SOURCES)
 """两个硬点类别（顺序即输出顺序：`turret` → `launcher`）。"""
@@ -386,10 +400,10 @@ FIELD_SOURCES: dict[str, int | None] = {
     "hardpoints.launcher.used": None,
     "hardpoints.launcher.free": None,
     # 两种「不计入 hardpoint」的计数（T-54 审查拆分）：
-    # `non_hardpoint` = 确定不占硬点；`unclassified` = 真分不清。两者都是数出来的合成值。
+    # `non_hardpoint` = 确定不占硬点；`unattributed` = 真分不清。两者都是数出来的合成值。
     "hardpoints.non_hardpoint": None,
     "hardpoints.non_hardpoint_modules": None,
-    "hardpoints.unclassified": None,
+    "hardpoints.unattributed": None,
     # 无人机：上限来自船体，占用是从 items 合成的
     "drone.bandwidth.used": None,
     "drone.bandwidth.total": A.ATTR_DRONE_BANDWIDTH,
@@ -519,32 +533,35 @@ def _hardpoint_kind(name: object, group_name: object) -> str:
     |---|---|---|
     | `"turret"` / `"launcher"` | 关键词命中，**推定**占该类硬点 | 计入 `used` |
     | `"non_hardpoint"` | 组名在 `HARDPOINT_NON_HARDPOINT_GROUPS` 里，**确定不占** | 计入 `non_hardpoint` 计数 |
-    | `"unclassified"` | 既判不出武器类、也不在确定白名单里 —— **分不清** | 只计数，不进 `used` |
+    | `"unattributed"` | 既判不出武器类、也不在确定白名单里 —— **分不清** | 只计数，不进 `used` |
 
-    规则顺序：确定白名单 →「分不清」组 → launcher 关键词 → turret 关键词 → 兜底 `unclassified`。
+    规则顺序：确定白名单 →「分不清」组 → launcher 关键词 → turret 关键词 → 兜底 `unattributed`。
     白名单**必须先行**：`Scan Probe Launcher` 组名含 `launcher`、`Tractor Beam` 含 `beam`，
     先判关键词就会把它们算成武器。
+
+    第四态的值是 `HARDPOINT_UNATTRIBUTED`（`"unattributed"`）。**不是** `unclassified`：
+    那个词是 `reasons.UNKNOWN_REASONS` 的兜底值（「不知道为什么不知道」），两码事。
     """
     group = str(group_name or "").strip()
     folded = group.casefold()
     if folded in HARDPOINT_NON_HARDPOINT_GROUPS_FOLDED:
         return HARDPOINT_NON_HARDPOINT
-    if folded in HARDPOINT_UNCLASSIFIED_GROUPS_FOLDED:
-        return HARDPOINT_UNCLASSIFIED
+    if folded in HARDPOINT_UNATTRIBUTED_GROUPS_FOLDED:
+        return HARDPOINT_UNATTRIBUTED
     text = f"{name or ''} {group}".lower()
     if not text.strip():
-        return HARDPOINT_UNCLASSIFIED
+        return HARDPOINT_UNATTRIBUTED
     if any(_matches_keyword(text, keyword) for keyword in LAUNCHER_KEYWORDS):
         return "launcher"
     if any(_matches_keyword(text, keyword) for keyword in HARDPOINT_TURRET_KEYWORDS):
         return "turret"
     # 没命中任何关键词、也不在确定白名单里 → **不猜**（这可能是我们漏收的一族真炮，
     # 历史实证：`Gas Cloud Harvester` 就是这样躲过关键词表的）
-    return HARDPOINT_UNCLASSIFIED
+    return HARDPOINT_UNATTRIBUTED
 
 
 def hardpoints(attrs: dict[int, float], fitted: list[tuple[int, dict]]) -> dict:
-    """炮位三段 `{kind: {total, used, free}}` + `non_hardpoint` / `unclassified` 两个计数（T-54）。
+    """炮位三段 `{kind: {total, used, free}}` + `non_hardpoint` / `unattributed` 两个计数（T-54）。
 
     - `total` ← 船体属性 102 / 101（**基准值**，引擎已把模块的 hardpoint 修正叠进去）；
     - `used` ← **数**高槽里被 `_hardpoint_kind()` 判成该类的已装模块（启发式 → `assumed`）；
@@ -552,12 +569,12 @@ def hardpoints(attrs: dict[int, float], fitted: list[tuple[int, dict]]) -> dict:
     - `total` 缺失 → `free = None`（缺值不补 0）；`used` 仍是数出来的真值；
     - `non_hardpoint` ← **确定不占硬点**的件数（隐身 / 智能炸弹 / 吸电 / 遥修…）；
       `non_hardpoint_modules` 带最多 `NON_HARDPOINT_SAMPLE` 个真名字（人读时不用再猜是哪件）；
-    - `unclassified` ← 只剩**真正分不清**的（`Festival Launcher` / `Interdiction Sphere Launcher`）。
+    - `unattributed` ← 只剩**真正分不清**的（`Festival Launcher` / `Interdiction Sphere Launcher`）。
     """
     counted = dict.fromkeys(HARDPOINT_KINDS, 0)
     non_hardpoint = 0
     non_hardpoint_modules: list[str] = []
-    unclassified = 0
+    unattributed = 0
     for _position, item in fitted:
         if item.get("slot_type") != HARDPOINT_SLOT_TYPE:
             continue
@@ -576,7 +593,7 @@ def hardpoints(attrs: dict[int, float], fitted: list[tuple[int, dict]]) -> dict:
             ):
                 non_hardpoint_modules.append(module_name)
             continue
-        unclassified += 1
+        unattributed += 1
 
     block: dict[str, object] = {}
     for kind in HARDPOINT_KINDS:
@@ -589,7 +606,7 @@ def hardpoints(attrs: dict[int, float], fitted: list[tuple[int, dict]]) -> dict:
         }
     block[HARDPOINT_NON_HARDPOINT] = non_hardpoint
     block[HARDPOINT_NON_HARDPOINT_MODULES] = non_hardpoint_modules
-    block[HARDPOINT_UNCLASSIFIED] = unclassified
+    block[HARDPOINT_UNATTRIBUTED] = unattributed
     return block
 
 

@@ -281,7 +281,8 @@ def test_resources_hardpoints_drones_cargo(views: dict[str, dict], ctx: ViewCont
 
     **T-54 改口径**：旧断言把 102 / 101（**船体基准炮位数**）直接当「剩余」，实测与装配
     无关（同一艘船装 0 / 3 / 5 门发射器都输出同一个数）。现在旧键 `hardpoints_free` 已删除，
-    改成 `hardpoints.{turret,launcher}.{total,used,free}` + `unclassified` 件数。
+    改成 `hardpoints.{turret,launcher}.{total,used,free}` + `unattributed` 件数
+    （该键 2026-10-19 由 `unclassified` 改名：旧名与 `unknown_reasons` 的兜底值撞名）。
     """
     overview = views["resources"]["overview"]
     attrs = ctx.attrs(BASE)
@@ -298,7 +299,7 @@ def test_resources_hardpoints_drones_cargo(views: dict[str, dict], ctx: ViewCont
         assert row["free"] == row["total"] - row["used"]
     # 已装的炮/发射器必须真的被数进去（样本 Hecate 装了 5 门 Light Neutron Blaster II）
     assert hardpoints["turret"]["used"] == 5
-    assert isinstance(hardpoints["unclassified"], int) and hardpoints["unclassified"] >= 0
+    assert isinstance(hardpoints["unattributed"], int) and hardpoints["unattributed"] >= 0
 
     bandwidth = overview["drone"]["bandwidth"]
     capacity = overview["drone"]["capacity"]
@@ -614,7 +615,7 @@ def test_missing_values_stay_none_not_zero() -> None:
         assert resources["hardpoints"][kind]["total"] is None
         assert resources["hardpoints"][kind]["used"] == 0
         assert resources["hardpoints"][kind]["free"] is None, "总量未知时 free 不得补 0"
-    assert resources["hardpoints"]["unclassified"] == 0
+    assert resources["hardpoints"]["unattributed"] == 0
     assert resources["drone"]["bandwidth"]["total"] is None
     assert resources["cargo"]["used"] is None, "没有索引就查不到体积，必须给 None"
     for name in ("high", "medium", "low", "rig"):
