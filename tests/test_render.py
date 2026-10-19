@@ -2608,3 +2608,378 @@ def test_not_applicable_bucket_holds_only_conditional_fields(
         f"  多：{sorted(set(actual) - set(NOT_APPLICABLE_LEAVES[stem]))}\n"
         f"  少：{sorted(set(NOT_APPLICABLE_LEAVES[stem]) - set(actual))}"
     )
+
+
+# =============================================================================
+# 十二、L2（detail）契约审查：missing / 未降级 / 512 技能表 / provenance 完整性 / 跨层一致
+#     （dev-engine 4/5；每条都带「改坏就红」的变异证明，见交付报告）
+# =============================================================================
+
+DETAIL_AUDIT_EFT = """[Hecate, l2-audit]
+
+Damage Control II
+1600mm Steel Plates II
+Multispectrum Coating II
+
+50MN Quad LiF Restrained Microwarpdrive
+
+Light Neutron Blaster II, Void S
+Light Neutron Blaster II, Void S
+Light Neutron Blaster II, Void S
+
+Void S x1000
+"""
+"""L2 审查用的小样本（无外部依赖的 EFT 文本）。"""
+
+CAP_SAMPLE_EFT = """[Osprey Navy Issue, capmany]
+
+Damage Control II
+
+Multispectrum Shield Hardener II
+Multispectrum Shield Hardener II
+Multispectrum Shield Hardener II
+Multispectrum Shield Hardener II
+Multispectrum Shield Hardener II
+Multispectrum Shield Hardener II
+
+Rapid Light Missile Launcher II
+"""
+"""会命中 `repaired_but_unstable` 的样本（用来证明 detail 的 flag **保留 evidence**）。"""
+
+
+def _ctx_for(engine: Engine, index, text: str) -> ViewContext:
+    """一段 EFT 文本 → `ViewContext`（技能档与其它 fixtures 同一套口径）。"""
+    fit = engine.load_eft(text)
+    fit["character"] = {"skills": derive_skill_tier(fit, engine, index=index)}
+    return ViewContext(
+        engine=engine,
+        index=index,
+        fit=fit,
+        assumptions=default_assumptions(fit, engine, index=index),
+        meta=engine.meta(),
+    )
+
+
+def _api():
+    """接口层模块（函数内 import：`test_render` 只做渲染层单测，不拖慢模块加载）。"""
+    from noobbaozi import api
+
+    return api
+
+
+# ---- ① missing 的语义 ----
+
+
+def test_detail_missing_is_the_requested_field_string() -> None:
+    """找不到的字段：`missing` 里是**调用方传进来的那个字段串**（去掉视角名前缀），不静默忽略。
+
+    实测口径：请求 `stability.no_such_field` → `views.stability.missing == ["no_such_field"]`。
+    视角名已经是 envelope 的键，所以「视角 + missing 里的串」就是原请求（不丢信息）；
+    越深的路径同样原样保留（`capacitor.bogus`）。
+    """
+    api = _api()
+    for request, expected in (
+        ("stability.no_such_field", ["no_such_field"]),
+        ("stability.capacitor.bogus", ["capacitor.bogus"]),
+        ("firepower.weapons[9].name", ["weapons[9].name"]),  # 越界下标 = 找不到，不是 None
+    ):
+        view = request.split(".", 1)[0]
+        envelope = api.fit_detail(DETAIL_AUDIT_EFT, path=request)
+        assert envelope["ok"] is True, envelope.get("error")
+        entry = envelope["result"]["views"][view]
+        assert entry["missing"] == expected, request
+        assert entry["overview"] == {}, "找不到就不许编一个空壳值出来"
+
+
+def test_detail_missing_is_empty_for_existing_paths_and_full_views() -> None:
+    """能取到的时候 `missing` 必须是 `[]`（空 `missing` 本身不代表缺字段，得配上值看）。"""
+    api = _api()
+    cases = (
+        dict(),  # 六视角全给
+        dict(view="stability"),
+        dict(path="stability.capacitor"),
+        dict(path="resources.upgrade_space"),
+        dict(view="resources", path="resources.cpu"),
+    )
+    for kwargs in cases:
+        envelope = api.fit_detail(DETAIL_AUDIT_EFT, **kwargs)
+        assert envelope["ok"] is True, (kwargs, envelope.get("error"))
+        views = envelope["result"]["views"]
+        assert views, kwargs
+        for name, entry in views.items():
+            assert entry["missing"] == [], (kwargs, name)
+            assert entry["overview"] != {}, (kwargs, name, "能取到时 overview 不许是空对象")
+
+
+def test_detail_rejects_a_path_without_a_registered_view() -> None:
+    """`path` 的首段必须是视角名；`view` 与 `path` 不一致是参数错，不是 `missing`。"""
+    api = _api()
+    missing_view = api.fit_detail(DETAIL_AUDIT_EFT, path="no_such_view.whatever")
+    assert missing_view["ok"] is False
+    assert missing_view["error"]["kind"] == "invalid_path"
+
+    mismatch = api.fit_detail(DETAIL_AUDIT_EFT, view="firepower", path="stability.capacitor")
+    assert mismatch["ok"] is False
+    assert mismatch["error"]["kind"] == "invalid_argument"
+
+    bad_view = api.fit_detail(DETAIL_AUDIT_EFT, view="no_such_view")
+    assert bad_view["ok"] is False
+    assert bad_view["error"]["kind"] == "invalid_argument"
+
+
+# ---- ①′ 路径语言跨层一致：`[N]` 必须和 get_path 一样被认 ----
+
+
+def test_detail_accepts_index_paths_exactly_like_get_path(
+    ctx: ViewContext, killmail: dict
+) -> None:
+    """`tier_violations[0].kind` 这种**下标**写法：L1 的 `get_path` 认，L2 必须也认。
+
+    改之前 `render_detail` 只认 `[]`（逐元素），同一串路径在 `fit_get` 上能取、在
+    `fit_detail` 上落进 `missing` —— 同一个产品两种路径语言，agent 一定会踩。
+    """
+    api = _api()
+    full = render.render_detail(ctx, view="constraints")["overview"]["tier_violations"]
+    assert full, "反证：样本必须有 tier_violations，否则断言永真"
+
+    path = "constraints.tier_violations[0].kind"
+    l1 = api.fit_get(killmail, path)
+    l2 = api.fit_detail(killmail, path=path)
+
+    assert l1["ok"] is True and l1["result"]["value"] == full[0]["kind"]
+    assert l2["ok"] is True, l2.get("error")
+    entry = l2["result"]["views"]["constraints"]
+    assert entry["missing"] == [], f"L2 少认一种 L1 认的写法：{path}"
+    assert entry["overview"] == {"tier_violations": [{"kind": full[0]["kind"]}]}
+    # 有值就必须有三态（provenance 用元素约定 `[]` 的键空间匹配下标请求）
+    assert entry["provenance"] == {"tier_violations[].kind": "assumed"}
+
+
+def test_select_index_form_keeps_position_and_reports_out_of_range() -> None:
+    """`_select` 的 `[N]` 口径：**保位置**（未请求的元素是 `{}` 占位），越界进 `missing`。"""
+    overview = {"weapons": [{"name": "A"}, {"name": "B"}, {"name": "C"}]}
+
+    picked, missing = render._select(overview, ["weapons[2].name"])
+    assert picked == {"weapons": [{}, {}, {"name": "C"}]}, "下标 2 的元素不许被摆到位置 0"
+    assert missing == []
+
+    blank, missing_blank = render._select(overview, ["weapons[5].name"])
+    assert blank == {} and missing_blank == ["weapons[5].name"]
+
+    # 多字段合并：同一列表的两个下标要落在各自位置
+    merged, missing_merged = render._select(overview, ["weapons[0].name", "weapons[1].name"])
+    assert merged == {"weapons": [{"name": "A"}, {"name": "B"}]}
+    assert missing_merged == []
+
+    # `[]` 的逐元素语义不受影响
+    elementwise, missing_elementwise = render._select(overview, ["weapons[].name"])
+    assert elementwise == {"weapons": [{"name": "A"}, {"name": "B"}, {"name": "C"}]}
+    assert missing_elementwise == []
+
+
+# ---- ② detail 的 overview 必须**真的未降级** ----
+
+
+def test_detail_gives_the_full_upgrade_space_while_overview_summarizes(ctx: ViewContext) -> None:
+    """`resources.upgrade_space`：L1 是摘要 dict，L2 是**完整候选列表**（长度 = 摘要里的计数）。"""
+    l1_entry = render.render_view(ctx, "resources")
+    l2_entry = render.render_detail(ctx, view="resources")
+
+    summary = l1_entry["overview"]["upgrade_space"]
+    full = l2_entry["overview"]["upgrade_space"]
+
+    assert isinstance(summary, dict), "L1 必须是摘要（渲染层的粒度决定）"
+    assert isinstance(full, list) and full, "L2 必须给完整候选清单"
+    assert summary["slots_checked"] == len(full), "摘要的计数与 L2 的条数必须对得上"
+    assert set(summary) == {"slots_checked", "upgradeable_count", "blocked_by_resource"}
+    # L2 每行是**逐条明细**，不是摘要
+    assert all({"slot", "module", "candidate", "fits"} <= set(row) for row in full)
+    # 摘要叶子只属于 L1；L2 的 provenance 给的是逐条明细的叶子
+    assert "upgrade_space.slots_checked" in l1_entry["provenance"]
+    assert "upgrade_space.slots_checked" not in l2_entry["provenance"]
+    assert "upgrade_space[].fits" in l2_entry["provenance"]
+
+
+def test_detail_keeps_list_rows_and_flag_evidence_when_overview_degrades(
+    engine: Engine, index, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**强制 L1 降级**（预算 = 1）：L1 必须丢 flag 的 `evidence`，而 L2 一行都不许少。
+
+    这是「detail 未降级」最硬的证据 —— 降级的第一档就是剥掉诊断证据，而 L2 没有预算概念。
+    """
+    ctx = _ctx_for(engine, index, CAP_SAMPLE_EFT)
+    monkeypatch.setattr(render, "BUDGET_CHARS", 1)
+
+    overview = render.render_overview(ctx, views=("stability",))
+    detail = render.render_detail(ctx, view="stability")
+
+    assert overview["budget"]["degraded"] is True, "预算 = 1 时必须降级，否则这条测试在空转"
+    l1_flags = overview["views"]["stability"]["flags"]
+    assert l1_flags, "反证：样本必须命中至少一条诊断，否则比的是两堆空列表"
+    assert all("evidence" not in flag for flag in l1_flags), "降级第一档：L1 丢 evidence"
+    assert all("evidence" in flag for flag in detail["flags"]), "L2 不许降级，evidence 必须留着"
+    # L2 没有降级标记（预算块只属于 L1）
+    assert "budget" not in detail
+    assert set(detail) == {
+        "meta",
+        "view",
+        "overview",
+        "provenance",
+        "unknown_reasons",
+        "confidence",
+        "flags",
+        "missing",
+    }
+
+
+# ---- ③ 512 条技能表只在 detail ----
+
+
+def _assert_skill_table_only_in_detail(l0: dict, l1: dict, l2: dict) -> None:
+    """三条一起验：L0/L1 一条都不许有、L2 必须 512 条且与 `meta.skill_tier` 一致。"""
+    for label, envelope in (("L0", l0), ("L1", l1)):
+        assert envelope["ok"] is True, (label, envelope.get("error"))
+        assert "assumptions" not in (envelope.get("meta") or {}), f"{label} 不许带完整技能表"
+        assert "assumptions" not in (envelope.get("result") or {}), f"{label} result 也不许带"
+
+    assert l2["ok"] is True, l2.get("error")
+    assumptions = (l2.get("meta") or {}).get("assumptions")
+    assert isinstance(assumptions, dict), "detail 的 meta 必须带 assumptions"
+    skills = assumptions.get("skill_tier")
+    assert isinstance(skills, dict) and len(skills) == 512, "技能表必须是 512 条"
+
+    tier = (l2.get("meta") or {}).get("skill_tier") or {}
+    assert tier.get("count") == 512
+    assert tier.get("name") == assumptions.get("skill_tier_name"), "两处技能档名必须一致"
+
+
+def test_skill_table_appears_only_in_the_detail_meta() -> None:
+    """完整技能表（512 条）只在 `fit_detail` 的 `meta.assumptions` 里；L0 / L1 一条都不许有。
+
+    同时钉三件事：条数 = 512、两次调用**逐位相同**、与 `meta.skill_tier`（name/count）一致。
+    """
+    import hashlib
+
+    api = _api()
+    l0 = api.fit_index(DETAIL_AUDIT_EFT)
+    l1 = api.fit_view(DETAIL_AUDIT_EFT, "resources")
+    l2 = api.fit_detail(DETAIL_AUDIT_EFT)
+    _assert_skill_table_only_in_detail(l0, l1, l2)
+
+    skills = (l2.get("meta") or {})["assumptions"]["skill_tier"]
+    again = (api.fit_detail(DETAIL_AUDIT_EFT).get("meta") or {}).get("assumptions") or {}
+    digest = lambda table: hashlib.md5(  # noqa: E731
+        json.dumps(table, sort_keys=True, ensure_ascii=False).encode()
+    ).hexdigest()
+    assert digest(again.get("skill_tier")) == digest(skills), "两次调用的技能表必须逐位相同"
+
+
+def test_skill_table_guard_catches_a_detail_meta_without_assumptions() -> None:
+    """**非永真证明**：把 detail 的 `assumptions` 摘掉 → 同一套检查必须红。
+
+    守门测试最怕「表里永远没有这个值」所以永真；这里是自检：注入一个坏信封，判据必须看得见。
+    """
+    api = _api()
+    l0 = api.fit_index(DETAIL_AUDIT_EFT)
+    l1 = api.fit_view(DETAIL_AUDIT_EFT, "resources")
+    l2 = copy.deepcopy(api.fit_detail(DETAIL_AUDIT_EFT))
+    l2["meta"].pop("assumptions", None)
+
+    with pytest.raises(AssertionError):
+        _assert_skill_table_only_in_detail(l0, l1, l2)
+
+    # 再把条数改错一位：同样必须红
+    l2_bad = copy.deepcopy(api.fit_detail(DETAIL_AUDIT_EFT))
+    skills = l2_bad["meta"]["assumptions"]["skill_tier"]
+    l2_bad["meta"]["assumptions"]["skill_tier"] = dict(list(skills.items())[:511])
+    with pytest.raises(AssertionError):
+        _assert_skill_table_only_in_detail(l0, l1, l2_bad)
+
+    # 反向：真实信封必须通过（否则上面的 raises 可能只是 helper 有 bug）
+    _assert_skill_table_only_in_detail(l0, l1, api.fit_detail(DETAIL_AUDIT_EFT))
+
+
+# ---- ④ provenance / unknown_reasons 在 detail 的完整性 ----
+
+
+@pytest.mark.parametrize("view", available_views())
+def test_detail_provenance_covers_every_overview_leaf(ctx: ViewContext, view: str) -> None:
+    """L2 的 `provenance` **必须覆盖 detail overview 的每一个叶子**（三张表键空间对齐）。
+
+    L1 的覆盖率守门只看降级后的 overview；detail 是**另一份**（更长）的 overview，
+    它自己的叶子必须同样一条不少 —— 否则 agent 拿到值却没有可信度。
+    """
+    detail = render.render_detail(ctx, view=view)
+
+    leaves = set(render._leaf_paths(detail["overview"], ""))
+    assert leaves, f"{view} 的 detail overview 不许为空"
+    assert set(detail["provenance"]) == leaves, (
+        f"{view} 的 provenance 键空间与 detail overview 叶子不一致："
+        f"缺={sorted(leaves - set(detail['provenance']))[:5]} "
+        f"多={sorted(set(detail['provenance']) - leaves)[:5]}"
+    )
+
+
+@pytest.mark.parametrize("view", available_views())
+def test_detail_every_unknown_leaf_carries_a_reason(ctx: ViewContext, view: str) -> None:
+    """`provenance == "unknown"` 的叶子必须能在 `unknown_reasons` 里找到原因（L2 同口径）。"""
+    detail = render.render_detail(ctx, view=view)
+
+    unknown = {path for path, state in detail["provenance"].items() if state == "unknown"}
+    assert unknown <= set(detail["unknown_reasons"]), (
+        f"{view} 有 unknown 却没给原因：{sorted(unknown - set(detail['unknown_reasons']))[:5]}"
+    )
+    # 反过来：reasons 的键必须在 provenance 里，且确实标了 unknown（不许有孤儿原因）
+    for path, reason in detail["unknown_reasons"].items():
+        assert detail["provenance"].get(path) == "unknown", path
+        assert isinstance(reason, str) and reason
+
+
+def test_detail_reports_the_detail_only_paths_in_provenance(ctx: ViewContext) -> None:
+    """detail 独有的路径（升级候选 / 逐模块电容）在 provenance 里**有交代**。"""
+    resources = render.render_detail(ctx, view="resources")
+    stability = render.render_detail(ctx, view="stability")
+
+    up = resources["overview"]["upgrade_space"]
+    assert up, "反证：样本要有升级候选"
+    up_prov = {path for path in resources["provenance"] if path.startswith("upgrade_space[")}
+    assert up_prov, "upgrade_space 的**逐条明细**必须在 provenance 里出现"
+    assert {"upgrade_space[].fits", "upgrade_space[].candidate"} <= up_prov
+
+    cap = stability["overview"]["cap_by_module"]
+    assert cap, "反证：样本要有逐模块电容明细"
+    cap_prov = {path for path in stability["provenance"] if path.startswith("cap_by_module[")}
+    assert "cap_by_module[].cap_use_gj_s" in cap_prov
+    assert all(state in PROVENANCE_STATES for state in stability["provenance"].values())
+
+
+# ---- ⑤ 跨层：同一个视角，L1 与 L2 除「被降级的那条路径」外必须逐字节一致 ----
+
+
+@pytest.mark.parametrize("view", available_views())
+def test_detail_matches_overview_apart_from_the_downgraded_path(
+    ctx: ViewContext, view: str
+) -> None:
+    """**detail 与 L1 说法不一致的守门**：除 `OVERVIEW_DOWNGRADES` 登记的路径外必须一模一样。
+
+    这是本任务最担心的那件事的自动化版本：同一个字段在两层给出不同数字/形状，
+    只要不是登记在案的粒度改写，就必须变红。
+    """
+    l1 = render.render_view(ctx, view)
+    l2 = render.render_detail(ctx, view=view)
+    downgraded = set(render.OVERVIEW_DOWNGRADES.get(view) or {})
+
+    l1_overview = {key: value for key, value in l1["overview"].items() if key not in downgraded}
+    l2_overview = {key: value for key, value in l2["overview"].items() if key not in downgraded}
+    assert l1_overview == l2_overview, f"{view} 的 L1/L2 在非降级路径上分叉"
+
+    assert l1["flags"] == l2["flags"], f"{view} 的 flags 在两层不一致"
+    assert l1["unknown_reasons"] == l2["unknown_reasons"]
+    assert l1["confidence"] == l2["confidence"]
+
+    # 降级路径只在 resources 上存在，且 L1 是摘要、L2 是列表（粒度不同但**不矛盾**）
+    if downgraded:
+        for path in downgraded:
+            assert isinstance(l1["overview"][path], dict)
+            assert isinstance(l2["overview"][path], list)
+

@@ -32,6 +32,7 @@ from noobbaozi.config.paths import db_path
 from noobbaozi.engine.adapter import Engine
 from noobbaozi.engine.assumptions import default_assumptions, derive_skill_tier
 from noobbaozi.project import diagnostics as D
+from noobbaozi.project import render
 from noobbaozi.project import units
 from noobbaozi.project.views import build_view
 from noobbaozi.project.views.base import BASE, ViewContext
@@ -1397,3 +1398,143 @@ def test_rendered_overview_carries_the_renamed_flag_in_mobility(real_ctx) -> Non
     for word in FORBIDDEN_WORDS:
         assert word not in text, f"渲染输出里出现了判词 {word!r}"
 
+
+
+# =============================================================================
+# 十二、两条 L2 语义修正（dev-engine 4/5 追加）：`becomes_stable` / `blocked_by`
+# =============================================================================
+
+CAP_FLIP_EFT = """[Hecate, cap-flip]
+
+50MN Quad LiF Restrained Microwarpdrive
+Light Neutron Blaster II
+Light Neutron Blaster II
+Light Neutron Blaster II
+"""
+"""`cap_sensitive` 的**命中形态**：摘掉 MWD 真的稳了（92.2%），摘掉炮仍然 0%。"""
+
+RIFTER_UPGRADE_EFT = """[Rifter, upgrade]
+
+200mm AutoCannon I
+200mm AutoCannon I
+200mm AutoCannon I
+
+Small Shield Extender I
+"""
+"""装得下的升级候选样本（T1 炮 → T2 炮，余量充足）。"""
+
+F7_PATH = NOOBBAOZI_ROOT / "acceptance" / "fixtures" / "f7-t3c-legion.json"
+"""测试员报的那个样本：16 个候选全部 `fits=false`，但 CPU/PG/标定都够。"""
+
+F1_PATH = NOOBBAOZI_ROOT / "acceptance" / "fixtures" / "f1-hecate-killmail.eft"
+"""本来就超载的样本：摘掉任何一件都仍然不稳。"""
+
+
+def test_cap_sensitivity_becomes_stable_is_the_flip_boolean(ctx_from_eft) -> None:
+    """`becomes_stable` = `stable_pct > 0`：**摘掉后仍不稳**的行必须 `False`。
+
+    这条字段存在的理由：`cap_sensitivity` 报的是「摘掉这一件**之后的状态**」，不是
+    「摘掉就稳」。测试员实测 29 条里只有 17 条真的翻转，不给布尔就会被读成「照做就稳」。
+    """
+    view = render.render_view(ctx_from_eft(CAP_FLIP_EFT), "stability")
+    rows = view["overview"]["cap_sensitivity"]
+    assert rows, "反证：样本必须有敏感度明细"
+
+    mwd = [row for row in rows if "Microwarpdrive" in (row["module"] or "")]
+    assert len(mwd) == 1
+    assert mwd[0]["becomes_stable"] is True, "摘掉 MWD 真的稳了"
+    assert mwd[0]["stable_pct"] > 0.0
+
+    others = [row for row in rows if row is not mwd[0]]
+    assert others and all(row["becomes_stable"] is False for row in others), (
+        "摘掉炮仍然不稳 → 必须是 False（否则 agent 会把「摘掉」当成「就稳」）"
+    )
+    # 口径一致：不许和 stable_pct 各算一套；未知（None）不许当 False
+    for row in rows:
+        if row["stable_pct"] is None:
+            assert row["becomes_stable"] is None, "stable_pct 未知时 becomes_stable 也必须未知"
+        else:
+            assert row["becomes_stable"] is (row["stable_pct"] > 0.0)
+    # 只有真翻转才出 flag（它的文案才敢写「由不稳定转为稳定」）
+    assert "cap_sensitive" in {flag["id"] for flag in view["flags"]}
+
+
+def test_cap_sensitivity_does_not_claim_stability_when_removal_does_not_help(
+    ctx_from_eft,
+) -> None:
+    """超载样本（f1）：摘掉任何一件都仍然不稳 → 全 `False`，且**不许**出 `cap_sensitive` flag。"""
+    if not F1_PATH.is_file():
+        pytest.skip(f"缺少样本：{F1_PATH}")
+    view = render.render_view(
+        ctx_from_eft(F1_PATH.read_text(encoding="utf-8-sig")), "stability"
+    )
+    rows = view["overview"]["cap_sensitivity"]
+
+    assert rows, "反证：f1 必须有敏感度明细"
+    assert all(row["becomes_stable"] is False for row in rows), "f1 摘掉任何一件都仍不稳"
+    assert all(row["stable_pct"] is not None for row in rows)
+    ids = {flag["id"] for flag in view["flags"]}
+    assert "cap_sensitive" not in ids, "没翻转就不许报「关掉就稳」"
+    assert "repaired_but_unstable" in ids, "反证：样本确实不稳定（不是恰好稳定）"
+
+
+def test_becomes_stable_has_provenance(ctx_from_eft) -> None:
+    """新字段必须登记来源（合成判断 → `assumed`），否则会掉成 `unknown`。"""
+    view = render.render_view(ctx_from_eft(CAP_FLIP_EFT), "stability")
+    assert view["overview"]["cap_sensitivity"], "反证：有明细才有这个叶子"
+    assert view["provenance"]["cap_sensitivity[].becomes_stable"] == "assumed"
+
+
+def test_upgrade_space_blocked_by_names_the_dimension_beyond_cpu_pg_calibration() -> None:
+    """`fits=false` 必须带 `blocked_by`，并点名**不在那三个数里**的资源维度。
+
+    测试员实测（f7）：4 个候选 `fits=false` 但 `cpu_free` / `power_free` / `calibration_free`
+    都 ≥ 0 —— 卡它们的是 `drone_bandwidth` / `launched_drones`。只给 `fits=false` 的话，
+    agent 只能得出「资源够却装不下」的矛盾结论。
+    """
+    if not F7_PATH.is_file():
+        pytest.skip(f"缺少样本：{F7_PATH}")
+    from noobbaozi import api
+
+    api.clear_caches()
+    payload = json.loads(F7_PATH.read_text(encoding="utf-8"))
+    envelope = api.fit_detail(payload, path="resources.upgrade_space")
+    assert envelope["ok"] is True, envelope.get("error")
+    entry = envelope["result"]["views"]["resources"]
+    rows = entry["overview"]["upgrade_space"]
+
+    assert rows, "反证：f7 必须有升级候选"
+    false_rows = [row for row in rows if not row["fits"]]
+    assert false_rows, "反证：f7 的候选都装不下"
+
+    reported = {21484, 521, 19023, 11215}
+    hits = [row for row in false_rows if row["candidate_type_id"] in reported]
+    assert hits, "测试员点名的 4 个候选必须还在样本里"
+
+    for row in hits:
+        assert row["cpu_free"] >= 0.0 and row["power_free"] >= 0.0
+        assert row["calibration_free"] >= 0.0, "三个主资源都够 —— 这正是要解释的怪象"
+        blocked = row["blocked_by"]
+        assert isinstance(blocked, list) and blocked, "fits=false 必须给出原因"
+        assert blocked == sorted(blocked), "原因清单要排序稳定"
+        assert all(isinstance(item, str) and item for item in blocked)
+        assert any(item not in {"cpu", "powergrid", "calibration"} for item in blocked), (
+            f"必须点名那个「不在 CPU/PG/标定里」的维度，实际 {blocked}"
+        )
+
+    assert entry["provenance"]["upgrade_space[].blocked_by"] == "assumed"
+
+
+def test_upgrade_space_fits_true_rows_do_not_carry_blocked_by(ctx_from_eft) -> None:
+    """形状口径：**只有 `fits=false` 带 `blocked_by`**（它是原因字段；true 的行没有原因）。"""
+    view = build_view("resources", ctx_from_eft(RIFTER_UPGRADE_EFT))
+    rows = view["overview"]["upgrade_space"]
+
+    assert rows, "反证：样本必须有候选"
+    fits_rows = [row for row in rows if row["fits"]]
+    assert fits_rows, "反证：样本必须有装得下的候选（否则比的是两堆 false）"
+    for row in fits_rows:
+        assert "blocked_by" not in row, "fits=true 的行不许带原因字段"
+    for row in rows:
+        if not row["fits"]:
+            assert row.get("blocked_by"), "fits=false 的行必须带原因"

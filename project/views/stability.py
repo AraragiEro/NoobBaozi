@@ -119,6 +119,8 @@ FIELD_SOURCES: dict[str, int | None] = {
     "cap_sensitivity[].stable_pct": A.ATTR_CAP_STABLE_PCT,
     "cap_sensitivity[].depletes_in_s": A.ATTR_CAP_DEPLETES_IN,
     "cap_sensitivity[].stable_delta_pct": None,
+    # `becomes_stable` 是**我方对 `stable_pct` 的判断**（>0），不是属性直读 → None（assumed）
+    "cap_sensitivity[].becomes_stable": None,
     # 外部依赖是 group 名结构判定（不来自单个属性）；`*_modules` 是命中的模块名清单（字符串数组）
     "external_dependency.remote_rep": None,
     "external_dependency.cap_transfer": None,
@@ -283,6 +285,13 @@ def _cap_sensitivity(ctx: ViewContext, fitted: list[tuple[int, dict]], stable_no
 
     用**原下标**摘除（见模块 docstring 的坑）；同一变体名带下标与 type_id，
     缓存 key 唯一且可复现。
+
+    **`becomes_stable`（T-54 追加，测试员 L2 验收提出）**：`stable_pct` 说的是「摘掉这一件
+    **之后的状态**」，不是「摘掉就稳」。实测 29 条里只有 17 条真的翻转（本来就超载的配装，
+    摘一件仍然不稳定），不给布尔的话 agent 会误以为「照它说的摘掉就能稳」。
+    口径：`becomes_stable = stable_pct > 0`；`stable_pct` 缺失（引擎没给）→ **`None`**（不知道，
+    不补 `False` —— 红线 N4）。这条与 `diagnostics.cap_sensitive` flag 互不替代：
+    flag 只在**真的翻转**时命中（它的文案才敢写「由不稳定转为稳定」），本字段是逐模块的事实表。
     """
     ranked = sorted(
         ((position, item, _cap_use(item)) for position, item in fitted),
@@ -307,6 +316,8 @@ def _cap_sensitivity(ctx: ViewContext, fitted: list[tuple[int, dict]], stable_no
                 "type_id": item.get("type_id"),
                 "cap_use_gj_s": _fmt(use),
                 "stable_pct": _fmt(stable_after),
+                # 摘掉后是否真的稳定：>0 才算稳；不知道就给 None（不补 False）
+                "becomes_stable": None if stable_after is None else stable_after > 0.0,
                 # 同一口径：摘掉这个模块后若电容稳定，引擎仍给哨兵 -1.0 → None（D6）
                 "depletes_in_s": shared.depletes_in_s(
                     stable_after, _number(after, A.ATTR_CAP_DEPLETES_IN)

@@ -416,6 +416,8 @@ FIELD_SOURCES: dict[str, int | None] = {
     "upgrade_space[].power_free": A.ATTR_POWER_FREE,
     "upgrade_space[].calibration_free": A.ATTR_CALIBRATION_FREE,
     "upgrade_space[].fits": None,
+    # `blocked_by` 是**原因清单**（资源维度名 / 规则类型，字符串数组），合成值 → None
+    "upgrade_space[].blocked_by": None,
 }
 """overview 点路径 → 来源属性 ID（渲染层据此打 provenance）。
 
@@ -740,6 +742,16 @@ def _upgrade_space(ctx: ViewContext, fitted: list[tuple[int, dict]]) -> list[dic
     「装得下」= 引擎在该变体上**没有 `resource` 类违规**（CPU / PG / 标定的 used ≤ available
     由引擎自己判，不是我方阈值）；三个余量值一并回显便于溯源。
 
+    **`blocked_by`（T-54 追加，测试员 L2 验收提出）**：`fits=false` 的行带一个**原因清单**
+    （资源维度名，如 `["drone_bandwidth", "launched_drones"]`）。为什么必须有它：实测 f7 有 4 例
+    `fits=false` 但 `cpu_free` / `power_free` / `calibration_free` **都 ≥ 0** —— 卡它们的是
+    `drone_bandwidth` / `launched_drones` 这种**不在那三个数里的资源维度**，只给 `fits=false`
+    的话 agent 会得出「资源够却装不下」的矛盾结论。
+    形状口径：**只有 `fits=false` 才带**（它是原因字段；`true` 的行没有「被什么挡住」可言）。
+    注意它报的是**该变体上的**违规，其中可能包含配装**原本就有**的（例如本来就超带宽），
+    不是候选「额外造成」的 —— 要区分「候选的代价」与「配装的老毛病」，得再和基础配装比一次
+    （当前未做，已登记为待办）。
+
     没有索引库时返回 `[]`（字段规格 §4 允许：候选来源必须是自建索引，不能伪造）。
     """
     if ctx.index is None:
@@ -774,22 +786,36 @@ def _upgrade_space(ctx: ViewContext, fitted: list[tuple[int, dict]]) -> list[dic
                 continue  # 尺寸/槽位就不对，不是候选
 
             after = ship_attributes(calculation)
-            results.append(
+            # 资源类违规的**维度**（cpu / powergrid / calibration / drone_bandwidth /
+            # launched_drones / …）。实测 f7 有 4 例 `fits=false` 但 cpu/pg/calibration 都 ≥0：
+            # 卡的是 `drone_bandwidth` / `launched_drones` 这类**不在那三个数里的资源维度** ——
+            # 不给原因，agent 只能看到「资源够却装不下」，一定会误读。
+            blocked_by = sorted(
                 {
-                    "slot": item.get("slot_type"),
-                    "module": item.get("name"),
-                    "module_type_id": plan["type_id"],
-                    "candidate": candidate.get("name"),
-                    "candidate_type_id": int(candidate["type_id"]),
-                    "meta_level_now": plan["meta_now"],
-                    "meta_level": int(candidate.get("meta_level") or 0),
-                    "cpu_free": _fmt(after.get(A.ATTR_CPU_FREE)),
-                    "power_free": _fmt(after.get(A.ATTR_POWER_FREE)),
-                    "calibration_free": _fmt(after.get(A.ATTR_CALIBRATION_FREE)),
-                    # 只看有没有资源类违规：有 = 装不下；没有 = 装得下（引擎判定）
-                    "fits": not any(rule.get("type") == "resource" for rule in rules),
+                    str(rule.get("resource") or rule.get("type") or "unknown")
+                    for rule in rules
+                    if rule.get("type") == "resource"
                 }
             )
+            row: dict[str, object] = {
+                "slot": item.get("slot_type"),
+                "module": item.get("name"),
+                "module_type_id": plan["type_id"],
+                "candidate": candidate.get("name"),
+                "candidate_type_id": int(candidate["type_id"]),
+                "meta_level_now": plan["meta_now"],
+                "meta_level": int(candidate.get("meta_level") or 0),
+                "cpu_free": _fmt(after.get(A.ATTR_CPU_FREE)),
+                "power_free": _fmt(after.get(A.ATTR_POWER_FREE)),
+                "calibration_free": _fmt(after.get(A.ATTR_CALIBRATION_FREE)),
+                # 只看有没有资源类违规：有 = 装不下；没有 = 装得下（引擎判定）
+                "fits": not blocked_by,
+            }
+            if blocked_by:
+                # **`fits=false` 才带**（原因字段）：`true` 的行没有「被什么挡住」可言，
+                # 带一个空列表只会让形状看起来像「查过了、没原因」。
+                row["blocked_by"] = blocked_by
+            results.append(row)
     return results
 
 

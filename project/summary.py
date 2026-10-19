@@ -1155,6 +1155,12 @@ def render_view(ctx: ViewContext, view_name: str) -> dict:
         `confidence` / `flags`（`provenance` 与 `unknown_reasons` 都是稀疏语法，
         `confidence` 缺省 `A` 不写出——与渲染层同一口径）。
 
+    **没有 `meta`**（T-54 追加，测试员 L2 验收指出）：三层里 `meta` 只在两处出现 ——
+    L0 的 `result.meta`（压缩版，含 `skill_tier.hash`）与**所有入口**信封的 `meta`；
+    detail 的信封 `meta` 额外多带 `assumptions`（512 条完整技能表）。
+    所以「去 L1 找 `skill_tier` / `assumptions`」是找不到的：技能档看信封 `meta.skill_tier`，
+    完整技能表只在 `fit_detail` 的信封 `meta.assumptions`。
+
     Raises:
         ValueError: 视角名未注册（消息里列出可用视角，便于调用方纠正）。
     """

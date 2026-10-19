@@ -163,6 +163,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from typing import AbstractSet, Callable, Mapping
 
 from noobbaozi.config import attributes as _a
@@ -265,6 +266,22 @@ TRUNCATE_TO: int = 5
 
 ARRAY_MARKER: str = "[]"
 """数组元素约定里的标记：`cap_by_module[].cap_use_gj_s`。"""
+
+INDEX_FORM_RE = re.compile(r"^(?P<key>[^.\[\]]+)\[(?P<index>\d+)\]$")
+"""`weapons[0]` 形态的路径段：取**具体下标**（与 `[]` 的「逐元素」约定并列）。
+
+为什么要有它：`get_path()` 明文档着支持 `constraints.tier_violations[0].kind`，
+而 `render_detail` 的 `fields` 原先只认 `[]` —— 同一个路径语言在 L1 与 L2 上分叉，
+agent 把 `fit_get` 用过的路径原样交给 `fit_detail` 会掉进 `missing`。**两条入口必须同语言。**
+"""
+
+INDEX_SEGMENT_RE = re.compile(r"\[(\d+)\]")
+"""`[0]` → `[]` 的**段内**归一（`INDEX_FORM_RE` 是整段锚定的，归一要能作用在任意位置）。"""
+
+
+def _element_form(field: str) -> str:
+    """把路径里的 `[N]` 归一成 `[]`：provenance 的键空间只使用元素约定。"""
+    return INDEX_SEGMENT_RE.sub(ARRAY_MARKER, field)
 
 PROVENANCE_STATES: tuple[str, ...] = ("measured", "assumed", "unknown")
 """三态取值（与 `contracts.Provenance` 同源，这里只为自检与文档）。"""
@@ -929,7 +946,7 @@ def _apply_budget(views: dict[str, dict], residual: list[dict], modes: list) -> 
 
 
 def _resolve(node: object, path: str) -> tuple[bool, object]:
-    """按点路径取值；段尾的 `[]` 表示「对列表每个元素套用余下路径」。"""
+    """按点路径取值；段尾的 `[]` 表示「对列表每个元素套用余下路径」，`[N]` 取具体下标。"""
     return _walk(node, path.split("."))
 
 
@@ -953,13 +970,28 @@ def _walk(node: object, parts: list[str]) -> tuple[bool, object]:
             values.append(value)
         return True, values
 
+    match = INDEX_FORM_RE.match(head)
+    if match is not None:
+        key = match.group("key")
+        index = int(match.group("index"))
+        if not isinstance(node, dict) or key not in node:
+            return False, None
+        items = node[key]
+        if not isinstance(items, list) or not 0 <= index < len(items):
+            return False, None
+        return _walk(items[index], rest)
+
     if isinstance(node, dict) and head in node:
         return _walk(node[head], rest)
     return False, None
 
 
 def _merge(target: dict, parts: list[str], value: object) -> None:
-    """把 `_resolve` 取到的值按同一套路径装回（多字段请求时合并不冲突）。"""
+    """把 `_resolve` 取到的值按同一套路径装回（多字段请求时合并不冲突）。
+
+    `[]` 段按元素逐个装回；`[N]` 段**保位置**——未请求的元素用 `{}` 占位，
+    否则「下标 2 的那个元素」会被摆到位置 0，形状骗人。
+    """
     head, rest = parts[0], parts[1:]
     if not rest:
         target[head] = copy.deepcopy(value)  # 深拷贝：调用方拿到的不是视角内部对象
@@ -980,6 +1012,21 @@ def _merge(target: dict, parts: list[str], value: object) -> None:
             _merge(bucket[index], rest, item_value)
         return
 
+    match = INDEX_FORM_RE.match(head)
+    if match is not None:
+        key = match.group("key")
+        index = int(match.group("index"))
+        bucket = target.get(key)
+        if not isinstance(bucket, list):
+            bucket = []
+            target[key] = bucket
+        while len(bucket) <= index:
+            bucket.append({})
+        if not isinstance(bucket[index], dict):
+            bucket[index] = {}
+        _merge(bucket[index], rest, value)
+        return
+
     bucket = target.get(head)
     if not isinstance(bucket, dict):
         bucket = {}
@@ -988,7 +1035,11 @@ def _merge(target: dict, parts: list[str], value: object) -> None:
 
 
 def _select(overview: dict, fields: list[str]) -> tuple[dict, list[str]]:
-    """只保留指定点路径（找不到的字段名进 `missing`，不静默忽略）。"""
+    """只保留指定点路径（找不到的字段名**原样**进 `missing`，不静默忽略）。
+
+    `missing` 里放的是**调用方传进来的字段串**（去掉视角名前缀之后的那一段），
+    用它 + 视角名就能拼回原请求。支持 `a.b` / `a[].b` / `a[0].b` 三种写法。
+    """
     picked: dict = {}
     missing: list[str] = []
     for field in fields:
@@ -1001,12 +1052,18 @@ def _select(overview: dict, fields: list[str]) -> tuple[dict, list[str]]:
 
 
 def _covered(path: str, fields: list[str]) -> bool:
-    """provenance 键是否属于被请求的字段（等于它、或挂在它下面）。"""
+    """provenance 键是否属于被请求的字段（等于它、或挂在它下面）。
+
+    `fields` 里的 `[N]` 会先归一成 `[]` 再比——provenance 的键空间一律用**元素约定**
+    `a[].b`，而请求可以写具体下标。不归一的话「按 `weapons[0].name` 取数」会拿到值、
+    却把 provenance 过滤干净（有值无三态，比不给值更糟）。
+    """
     for field in fields:
-        if path == field:
-            return True
-        if path.startswith(f"{field}.") or path.startswith(f"{field}{ARRAY_MARKER}"):
-            return True
+        for base in {field, _element_form(field)}:
+            if path == base:
+                return True
+            if path.startswith(f"{base}.") or path.startswith(f"{base}{ARRAY_MARKER}"):
+                return True
     return False
 
 
@@ -1077,9 +1134,13 @@ def render_detail(
     Args:
         ctx: 视角上下文。
         view: 视角名（必须已注册）。
-        fields: 非空时只返回这些点路径（支持 `a.b` 与 `cap_by_module[].cap_use_gj_s`）；
-            找不到的字段名原样进 `missing`，**不静默忽略**。`provenance` 与
-            `confidence` 同口径裁剪（confidence 只保留被请求字段下的**非 A 项**）。
+        fields: 非空时只返回这些点路径。三种写法都认：`a.b`（普通路径）、
+            `cap_by_module[].cap_use_gj_s`（**逐元素**）、`tier_violations[0].kind`
+            （**具体下标**，与 `get_path()` 同一套语言；未请求的元素以 `{}` 占位保位置）。
+            找不到的字段串**原样**进 `missing`，**不静默忽略**（`missing` 里是去掉视角名
+            前缀后的那一段 —— 它就是调用方传进来的 `fields` 元素本身）。
+            `provenance` 与 `confidence` 同口径裁剪（confidence 只保留被请求字段下的
+            **非 A 项**）；`[N]` 请求按元素约定 `[]` 匹配 provenance（有值就必须有三态）。
 
     Returns:
         `{"meta", "view", "overview", "provenance", "unknown_reasons", "confidence", "flags",
