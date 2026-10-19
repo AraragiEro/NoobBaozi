@@ -66,7 +66,7 @@ from typing import Mapping
 from noobbaozi.config import attributes as A
 from noobbaozi.project import summary, units
 from noobbaozi.project.views import survivability as _survivability
-from noobbaozi.project.views.base import BASE, ViewContext
+from noobbaozi.project.views.base import BASE, ViewContext, ship_attributes
 
 MAX_DEPTH: int = 2
 """深度上限（设计边界：不解释到单条 modifier 之外）。"""
@@ -138,6 +138,55 @@ _CACHE_LOCK = threading.Lock()
 def supported_metrics() -> tuple[str, ...]:
     """本模块能归因的指标路径（顺序：A → B → C；接线层可据此报可选项）。"""
     return tuple(_ADDITIVE_METRICS) + tuple(_MULTIPLICATIVE_METRICS) + tuple(_PROJECTION_METRICS)
+
+
+def metric_attribute(metric: str) -> int | None:
+    """A / B 类指标 → **引擎属性 ID**；C 类或未登记指标 → `None`。
+
+    `sensitivity`（P3 第三件）复用这张映射，避免两处各自维护「指标 → 属性」。
+    """
+    return _ADDITIVE_METRICS.get(metric) or _MULTIPLICATIVE_METRICS.get(metric)
+
+
+def projection_layer(metric: str) -> str | None:
+    """C 类指标 → 层名（`shield` / `armor` / `hull`）；其它指标 → `None`。"""
+    return _PROJECTION_METRICS.get(metric)
+
+
+def metric_combine(metric: str) -> str | None:
+    """指标的组合方式：`additive` / `multiplicative`；未登记指标 → `None`。"""
+    if metric in _ADDITIVE_METRICS:
+        return "additive"
+    if metric in _MULTIPLICATIVE_METRICS or metric in _PROJECTION_METRICS:
+        return "multiplicative"
+    return None
+
+
+def projection_value(attributes: Mapping[int, float], layer: str) -> float | None:
+    """C 类的指标值：`该层 HP ÷ 该层最大共振率`（与 `views/survivability._thinnest` 同一口径）。"""
+    hp_value = _as_float(attributes.get(_layer_hp_attribute(layer)))
+    resonances = _layer_resonances(attributes, layer)
+    if hp_value is None or resonances is None:
+        return None
+    maximum = max(resonances)
+    if maximum <= 0.0:
+        return None
+    return hp_value / maximum
+
+
+def metric_value(calculation: Mapping[str, object], metric: str) -> float | None:
+    """从一次**原始 calculation** 里取指标值（A/B 读属性、C 走投影公式）。
+
+    `sensitivity` 用它给每个变体算同一个指标，所以「基线」与「变化后」必然同一条口径。
+    """
+    attributes = ship_attributes(calculation)
+    attribute = metric_attribute(metric)
+    if attribute is not None:
+        return _as_float(attributes.get(attribute))
+    layer = projection_layer(metric)
+    if layer is None:
+        return None
+    return projection_value(attributes, layer)
 
 
 def clear_cache() -> None:
