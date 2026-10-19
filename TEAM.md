@@ -19,7 +19,10 @@ Lead 拥有：`engine/**`、`sde/**`、`contracts.py`、`docs/**`、`PROGRESS.md
 |---|---|---|---|
 | 10-19 | `dev-surface` | 1. `zkb_stats` 战报实体画像（A 段采集+契约，B 段实现 34 条测试） | **1 / 5** |
 | 10-19 | `dev-engine` | 1. 审查炮位三态 + EFT 边界（7 条硬结论、2 个真缺陷、非永真证明） | **1 / 5** |
-| 10-19 | `dev-engine` | 2. `unclassified` 拆分 / `HARDPOINT_LABELS` 去重 / `slot_usage` 的 unknown→0 | **2 / 5**（进行中） |
+| 10-19 | `dev-engine` | 2. `firepower` 单一出处 + `unclassified` 拆分 + `slot_usage` 的 unknown→0 | **2 / 5** |
+| 10-19 | `dev-surface` | 2. 文档四态同步 + 预算 20,500 + 17 处取整透传 + 错误分类共用 | **2 / 5** |
+| 10-19 | `dev-engine` | 3. EFT 模块行带回装填弹药（旧测试语义写反，已反转） | **3 / 5** |
+| 10-19 | `dev-surface` | 3. `fit_killmail` 冷路径提速（zkb 原文短路 + systems 并行 + items 三态） | **3 / 5** |
 
 > 每交付一个任务，Lead 在此表追加一行；员工到 **5/5** 时写交接摘要并退场。
 
