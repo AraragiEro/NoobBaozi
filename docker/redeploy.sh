@@ -24,7 +24,21 @@ cd "$REPO_DIR"
 : > "$LOG"
 
 say() { echo "[redeploy] $*" | tee -a "$LOG"; }
-run() { echo "+ $*" >> "$LOG"; "$@" >> "$LOG" 2>&1; }
+# run() 失败必须**喊出来**再退出：只用 set -e 的话，命令输出进了日志、终端上只剩「脚本没跑完」，
+# 操作者看不到原因（第一次部署就栽在这上面）。
+run() {
+  echo "+ $*" >> "$LOG"
+  if ! "$@" >> "$LOG" 2>&1; then
+    say "!! 失败：$*"
+    say "   最后 20 行日志："
+    tail -20 "$LOG" | sed 's/^/   /' >&2
+    exit 1
+  fi
+}
+
+# 用 sudo 跑时仓库属主是普通用户，git 会以 "dubious ownership" 拒绝一切操作。
+# 这是**部署目录**（不是开发目录），显式声明安全即可；幂等，重复执行无副作用。
+git config --global --add safe.directory "$REPO_DIR" 2>/dev/null || true
 
 say "repo: $REPO_DIR"
 say "1/5 释放端口（停掉旧版容器）"
