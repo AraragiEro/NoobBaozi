@@ -68,4 +68,64 @@ Lead 拥有：`engine/**`、`sde/**`、`contracts.py`、`docs/**`、`PROGRESS.md
 - 两名员工**不写同一文件**；跨范围需求 → 停下报告给 Lead 裁决
 - 所有 `git` 写操作只由 Lead 执行
 - 临时文件只放 `noobbaozi/.tmp/`；工作区根目录只允许 `AGENTS.md` + 项目目录
-- 交付前必须跑全量 pytest，基线为当前 `passed` 数（不得下降）
+
+## 五、开发自测 vs 节点门禁（2026-10-20 改）
+
+**原因**：原来「每个员工交付前都跑一遍全量 1500+ 条」在员工制下代价过高 ——
+一次全量约 100 秒 + 输出占上千 token，一单跑两三次就是纯浪费。全量并不需要每单都跑。
+
+### 分工
+
+| 角色 | 跑什么 | 什么时候 |
+|---|---|---|
+| **开发员工** | **只跑自己拥有的测试文件**（见「测试文件属主总表」），外加**受本次改动影响的文件** | 每次交付前 |
+| **Lead** | **全量 pytest** + 属性门禁（`check_attr_coverage`） | **节点**（见下） |
+| **`evefit-tester`** | 独立验收脚本（`acceptance/**`，含 65×43 字段级） | 节点，且与开发不同时 |
+
+### 开发员工的正确自测命令
+
+```powershell
+# 只跑自己的文件（把 a b c 换成自己的）
+uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" --with pytest `
+  python -m pytest -q noobbaozi/tests/test_views_b.py noobbaozi/tests/test_combat.py `
+  -p no:cacheprovider
+```
+
+**报告里写清**：跑了哪些文件、多少 passed、`git status` 是否只含自己的文件。
+
+### 什么算「节点」
+
+满足任一条即触发节点门禁（由 Lead 执行）：
+
+1. **一次批量交付结束**（例如「今天这一轮」所有在役员工的单都交完）
+2. **部署之前**（任何 `docker/redeploy.sh` 之前必跑一次全量）
+3. **改共享形状之后**（`api.py` 信封、`project/**` 的字段键、`TOOL_NAMES`、常数量表）——
+   这类改动会横跨多个测试文件，员工自测覆盖不到
+4. 主人要求时
+
+### 员工仍然必须做的（不许省）
+
+- **非永真证明**：改坏源码 → 自己的测试必须红（这是质量底线，不是全量测试的替代品）
+- **跨范围影响自查**：改了别人会断言的形状（如 `evidence` 全等、`PASS N/N`、术语表 allowance），
+  **必须显式报告「这会影响 X 文件，需要其属主同步」** —— 别指望节点门禁替你发现
+- `git status` 快照（只含自己的文件）
+
+### 节点门禁命令（Lead 用）
+
+```powershell
+Set-Location F:\WorkSpace\GIT\opencode_general_workspace
+$env:UV_CACHE_DIR = "$PWD\noobbaozi\spike\uvcache"
+uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" --with pytest `
+  python -m pytest -q noobbaozi/tests -p no:cacheprovider 2>&1 | Select-Object -Last 4
+uv run --python 3.13 --no-project --with "eveshipfit-dogma-engine[sde]==13.6.0" `
+  python -m noobbaozi.tools.check_attr_coverage 2>&1 | Select-Object -Last 2
+```
+
+### 已知风险与对策
+
+| 风险 | 对策 |
+|---|---|
+| 员工 A 的改动打红员工 B 的测试，直到节点才发现 | 员工**必须**在报告里写「跨范围影响」，Lead 收到后立刻转给属主 |
+| 节点时一坨红，分不清谁的责任 | 节点报告里先跑一次 `pytest -q --tb=no` 拿失败清单，再按文件属主分组 |
+| 员工自测「只跑自己的」漏了共享 fixture | 共享 fixture 变更必须广播（`tests/fixtures/**` 归 Lead） |
+
