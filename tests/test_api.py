@@ -4900,3 +4900,155 @@ def test_locale_does_not_bloat_the_envelope(eft_text: str) -> None:
     assert zh_bytes < en_bytes * 1.2, (
         f"locale=zh 把体量撑大了 {en_bytes} → {zh_bytes}（中文更短，不该涨这么多）"
     )
+
+
+# =============================================================================
+# 八、dogma 数据（T-4/5）：`sde_type` + `can_fit`
+# =============================================================================
+
+REACTIVE_ARMOR_HARDENER = 4403
+"""主人给的验证锚点：Reactive Armor Hardener。"""
+
+
+def test_sde_type_returns_the_reactive_armor_hardener_anchors() -> None:
+    """4403 的五条锚点属性 + effect 必须逐条对上（这是「dogma 真的灌进去了」的证明）。"""
+    envelope = api.sde_type(REACTIVE_ARMOR_HARDENER)
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    assert result["type"]["id"] == REACTIVE_ARMOR_HARDENER
+    assert result["type"]["name_en"] == "Reactive Armor Hardener"
+    assert result["type"]["category"] == "Module"
+
+    values = {row["id"]: row["value"] for row in result["attributes"]}
+    assert values.get(267) == 0.85, f"armorEmDamageResonance 应为 0.85：{values.get(267)}"
+    assert values.get(73) == 10000, f"duration 应为 10000（SDE 原值毫秒）：{values.get(73)}"
+    assert values.get(1849) == 6.0, f"resistanceShiftAmount 应为 6.0：{values.get(1849)}"
+    assert values.get(1544) == 1, f"maxGroupFitted 应为 1：{values.get(1544)}"
+    assert values.get(763) == 1, f"maxGroupActive 应为 1：{values.get(763)}"
+
+    effects = {row["id"]: row for row in result["effects"]}
+    assert 4928 in effects, f"缺 effect 4928：{sorted(effects)}"
+    assert effects[4928]["name"] == "adaptiveArmorHardener"
+    assert effects[4928]["duration_ms"] == 10000, "effect 的 duration 必须从属性表取到"
+
+    assert result["limits"]["max_group_fitted"] == 1
+    assert result["limits"]["max_group_active"] == 1
+    skills = {row["skill_id"]: row for row in result["required_skills"]}
+    assert 3394 in skills, f"缺 Hull Upgrades(3394)：{sorted(skills)}"
+    assert skills[3394]["level"] == 3
+    assert skills[3394]["name_en"] == "Hull Upgrades"
+
+
+def test_sde_type_attributes_assertion_is_not_vacuous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**配对证明**：把 `Index.type_attributes` 写成空数组，上一条必须不成立。"""
+    from noobbaozi.sde.index import Index
+
+    monkeypatch.setattr(Index, "type_attributes", lambda self, type_id: [])
+    envelope = api.sde_type(REACTIVE_ARMOR_HARDENER)
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    assert result["attributes"] == [], "attributes 被写空后不应还有值"
+    assert {row["id"] for row in result["attributes"]} != {267, 73, 1849, 1544, 763}
+
+
+def test_sde_type_filters_noise_but_include_all_restores_it() -> None:
+    """默认过滤「值 0 且无中文名」的噪声属性；`include="all"` 时必须能拿回来。"""
+    default = api.sde_type("Hawk")
+    assert default["ok"] is True
+    full = api.sde_type("Hawk", include="all", limit_attributes=300)
+    assert full["ok"] is True
+    default_total = default["result"]["truncated"]["total"]
+    full_total = full["result"]["truncated"]["total"]
+    assert full_total > default_total, (
+        f"include=all 应比默认多：{full_total} vs {default_total}"
+    )
+    assert all(
+        row["value"] != 0 or row["name_zh"]
+        for row in default["result"]["attributes"]
+    ), "默认模式下不该出现「值 0 且无中文名」的属性"
+
+
+def test_sde_type_truncates_attributes_explicitly() -> None:
+    """`limit_attributes` 截断时 `truncated` 必须说实话（不静默少给）。"""
+    envelope = api.sde_type("Hawk", include="all", limit_attributes=5)
+    assert envelope["ok"] is True
+    truncated = envelope["result"]["truncated"]
+    assert truncated["shown"] == 5
+    assert truncated["total"] > 5
+    assert truncated["attributes"] is True
+    assert len(envelope["result"]["attributes"]) == 5
+
+
+def test_sde_type_validates_its_arguments() -> None:
+    """认不出的类型 / 非法 include / 越界 limit → `invalid_argument` + `field`。"""
+    unknown = api.sde_type("zzzznope")
+    assert unknown["ok"] is False
+    assert unknown["error"]["kind"] == "invalid_argument"
+    assert unknown["error"]["field"] == "query"
+    assert "candidates" in unknown["error"]["hint"]
+
+    bad_include = api.sde_type("Hawk", include="some")
+    assert bad_include["error"]["kind"] == "invalid_argument"
+    assert bad_include["error"]["field"] == "include"
+
+    bad_limit = api.sde_type("Hawk", limit_attributes=0)
+    assert bad_limit["error"]["field"] == "limit_attributes"
+
+
+def test_sde_type_number_lookup_accepts_a_numeric_string() -> None:
+    """CLI / MCP 传进来的是字符串 id，`"4403"` 必须当 id 而不是名字查。"""
+    by_id = api.sde_type(REACTIVE_ARMOR_HARDENER)
+    by_text = api.sde_type("4403")
+    assert by_text["ok"] is True
+    assert by_text["result"]["type"]["id"] == by_id["result"]["type"]["id"]
+
+
+def test_can_fit_reports_the_two_anchor_blockers() -> None:
+    """Hawk 装旗舰装甲维修器：必须同时给出「资源不足」与「旗舰装备」两条（实测）。"""
+    envelope = api.can_fit("Hawk", "Capital Armor Repairer I")
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    assert result["fits"] is False
+    kinds = {blocker["kind"] for blocker in result["blockers"]}
+    assert "resource" in kinds and "capital_item" in kinds, kinds
+    resource = next(b for b in result["blockers"] if b["kind"] == "resource")
+    assert resource["resource"] == "powergrid"
+    assert resource["used"] == 125000.0
+    assert resource["available"] < resource["used"]
+    assert "能量栅格不足" in resource["detail"]
+    assert result["remaining"]["powergrid"] < 0, "超了就该是负数，不是 0"
+    assert result["slot_used"] == "low"
+
+
+def test_can_fit_says_yes_for_a_normal_module() -> None:
+    """正常组合：`fits: true`、无 blockers，且 `assumptions` 三条都在。"""
+    envelope = api.can_fit("Hawk", "Light Missile Launcher II")
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    assert result["fits"] is True
+    assert result["blockers"] == []
+    assert len(result["assumptions"]) == 3, result["assumptions"]
+    assert any("不含已装模块" in line for line in result["assumptions"]), (
+        "必须说清「探针配装不含已装模块的挤占」"
+    )
+    assert result["slot_used"] == "high"
+    assert result["remaining"]["powergrid"] > 0
+
+
+def test_can_fit_unknown_module_gives_candidates() -> None:
+    """模块认不出 → `invalid_argument` + `field="module"` + 候选（不猜一个装上）。"""
+    envelope = api.can_fit("Hawk", "definitely not a module")
+    assert envelope["ok"] is False
+    error = envelope["error"]
+    assert error["kind"] == "invalid_argument"
+    assert error["field"] == "module"
+
+
+def test_can_fit_rejects_the_same_type_twice() -> None:
+    """船和模块是同一个类型 → 直接拒（不拼一条荒唐的探针配装）。"""
+    envelope = api.can_fit("Hawk", "Hawk")
+    assert envelope["ok"] is False
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["field"] == "module"

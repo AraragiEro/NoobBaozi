@@ -1966,8 +1966,8 @@ def test_sde_search_bad_arguments_are_business_errors() -> None:
 
 
 def test_locale_is_only_exposed_on_the_name_heavy_tools() -> None:
-    """`locale` 只给 `fit_parse` / `fit_killmail` / `sde_search`；其它入口**不许**出现。"""
-    with_locale = {"fit_parse", "fit_killmail", "sde_search"}
+    """`locale` 只给 `fit_parse` / `fit_killmail` / `sde_search` / `sde_type` / `can_fit`。"""
+    with_locale = {"fit_parse", "fit_killmail", "sde_search", "sde_type", "can_fit"}
     for name in mcp_server.TOOL_NAMES:
         properties = _tool_spec(name)["inputSchema"]["properties"]
         if name in with_locale:
@@ -1980,12 +1980,146 @@ def test_locale_is_only_exposed_on_the_name_heavy_tools() -> None:
             )
 
 
-def test_tool_count_is_derived_and_instructions_cover_all_14() -> None:
-    """14 个工具；`INSTRUCTIONS` 按 `TOOL_NAMES` 顺序逐个提到（且不超 800）。"""
-    assert mcp_server.TOOL_COUNT == len(mcp_server.TOOL_NAMES) == 14
+def test_tool_count_is_derived_and_instructions_cover_all_16() -> None:
+    """16 个工具；`INSTRUCTIONS` 按 `TOOL_NAMES` 顺序逐个提到（且不超 800）。"""
+    assert mcp_server.TOOL_COUNT == len(mcp_server.TOOL_NAMES) == 16
     assert len(mcp_server.INSTRUCTIONS) <= 800
     positions = [mcp_server.INSTRUCTIONS.find(name) for name in mcp_server.TOOL_NAMES]
     assert all(position >= 0 for position in positions), (
         f"有工具没写进 INSTRUCTIONS：{[n for n, p in zip(mcp_server.TOOL_NAMES, positions) if p < 0]}"
     )
     assert positions == sorted(positions), "INSTRUCTIONS 里的顺序必须与 TOOL_NAMES 一致"
+
+
+# =============================================================================
+# 九、`sde_type` / `can_fit`（T-4/5）在 MCP 表面的契约
+# =============================================================================
+
+
+def test_sde_type_schema_has_no_fit() -> None:
+    """`sde_type`：没有 `fit`；四个参数；`required` 只有 `query`。"""
+    spec = _tool_spec("sde_type")
+    schema = spec["inputSchema"]
+    assert "fit" not in schema["properties"]
+    assert set(schema["properties"]) == {"query", "locale", "include", "limit_attributes"}
+    assert schema["required"] == ["query"]
+    assert schema["properties"]["include"]["enum"] == [api.SDE_TYPE_INCLUDE_ALL]
+    assert schema["properties"]["limit_attributes"]["maximum"] == api.SDE_TYPE_ATTRIBUTES_MAX
+
+
+def test_can_fit_schema_requires_ship_and_module() -> None:
+    """`can_fit`：`ship` + `module` 必填，没有 `fit`。"""
+    spec = _tool_spec("can_fit")
+    schema = spec["inputSchema"]
+    assert "fit" not in schema["properties"]
+    assert set(schema["properties"]) == {"ship", "module", "skill_tier", "locale"}
+    assert schema["required"] == ["ship", "module"]
+
+
+def test_sde_type_call_round_trip() -> None:
+    """`tools/call sde_type` → MCP → api → 索引库（锚点 4403）。"""
+    call_result = _call("sde_type", {"query": 4403, "limit_attributes": 300})
+    assert call_result.get("isError") is not True, call_result
+    envelope = _envelope(call_result)
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    values = {row["id"]: row["value"] for row in result["attributes"]}
+    assert values[267] == 0.85
+    assert values[73] == 10000
+    assert 4928 in {effect["id"] for effect in result["effects"]}
+
+
+def test_sde_type_unknown_query_is_a_business_error() -> None:
+    """认不出的类型 → `isError` + `invalid_argument`（业务错误，不是协议错误）。"""
+    call_result = _call("sde_type", {"query": "zzzznope"})
+    assert call_result.get("isError") is True
+    envelope = _envelope(call_result)
+    assert envelope["error"]["kind"] == "invalid_argument"
+    assert envelope["error"]["field"] == "query"
+
+
+def test_can_fit_call_round_trip() -> None:
+    """`tools/call can_fit` → 完整链路；旗舰装甲维修器必须报两条 blocker。"""
+    call_result = _call("can_fit", {"ship": "Hawk", "module": "Capital Armor Repairer I"})
+    assert call_result.get("isError") is not True, call_result
+    envelope = _envelope(call_result)
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    assert result["fits"] is False
+    assert {"resource", "capital_item"} <= {b["kind"] for b in result["blockers"]}
+    assert len(result["assumptions"]) == 3
+
+
+# -----------------------------------------------------------------------------
+# `locale` 的**穿透**测试（T-3/5 回归）：schema 里有不算数，必须真的走到 api。
+#
+# 这一组是补上「漏掉的那一环」：主人实测 `fit_parse(locale="zh")` 直调正常、**走 MCP 却
+# 和 en 一模一样** —— 原因是 handler 用 `_common_arguments()` 只透传三个共同参数，
+# `locale` 被静默丢掉。当时的测试只验了「api 支持」+「schema 有」，两条都过了。
+# -----------------------------------------------------------------------------
+
+LOCALE_PENETRATION_CASES: tuple[tuple[str, dict, str], ...] = (
+    ("fit_parse", {"fit_file": "eft"}, "ship"),
+    ("fit_killmail", {"fit_file": "killmail"}, "victim.ship"),
+    ("sde_search", {"query": "Hawk", "kind": "ship"}, "matches.0"),
+    ("sde_type", {"query": "Hawk"}, "type"),
+    ("can_fit", {"ship": "Hawk", "module": "Light Missile Launcher II"}, "ship"),
+)
+"""`(工具名, 参数模板, 取名字的路径)` —— **凡是 schema 声明了 `locale` 的工具都要在这里**。"""
+
+
+def _dig(node: object, path: str) -> object:
+    current = node
+    for part in path.split("."):
+        if isinstance(current, list):
+            current = current[int(part)]
+        elif isinstance(current, dict):
+            current = current[part]
+        else:  # pragma: no cover - 路径写错时直接报出来
+            raise AssertionError(f"路径 {path} 取不到：{type(current).__name__}")
+    return current
+
+
+def test_every_locale_declaring_tool_actually_forwards_it(
+    monkeypatch: pytest.MonkeyPatch, eft_text: str
+) -> None:
+    """**穿透**：凡是 schema 有 `locale` 的工具，zh 与 en 的**名字必须不同**。
+
+    循环遍历 `TOOL_NAMES` 里声明了 `locale` 的每一个工具（不手抄），逐个断言：
+    ① `locale=zh` 的名字是中文；② 与 `locale=en` 不同；③ 工具确实出现在预期集合里。
+    """
+    _offline_system(monkeypatch)
+    killmail_text = KILLMAIL_ZKB_PATH.read_text(encoding="utf-8")
+    templates = {
+        "eft": eft_text,
+        "killmail": killmail_text,
+    }
+
+    declared = {
+        name
+        for name in mcp_server.TOOL_NAMES
+        if "locale" in _tool_spec(name)["inputSchema"]["properties"]
+    }
+    expected = {case[0] for case in LOCALE_PENETRATION_CASES}
+    assert declared == expected, (
+        f"声明了 locale 的工具集合变了：多出 {sorted(declared - expected)}，"
+        f"少了 {sorted(expected - declared)} —— 请同步补穿透用例"
+    )
+
+    for name, arguments, path in LOCALE_PENETRATION_CASES:
+        payload = dict(arguments)
+        if "fit_file" in payload:
+            payload["fit"] = templates[payload.pop("fit_file")]
+        zh = _envelope(_call(name, {**payload, "locale": "zh"}))
+        en = _envelope(_call(name, {**payload, "locale": "en"}))
+        assert zh["ok"] is True and en["ok"] is True, (name, zh.get("error"), en.get("error"))
+        zh_name = _dig(zh["result"], path)
+        en_name = _dig(en["result"], path)
+        assert zh_name and en_name, (name, zh_name, en_name)
+        assert zh_name != en_name, (
+            f"{name} 的 locale 没穿透：zh 与 en 都拿到 {zh_name!r}"
+            f"（schema 有、api 支持，但 handler 没把参数传下去）"
+        )
+        assert any("\u4e00" <= char <= "\u9fff" for char in str(zh_name)), (
+            f"{name} 的 zh 名字不是中文：{zh_name!r}"
+        )

@@ -74,6 +74,11 @@ REQUIRED_MEMBERS: Final[tuple[str, ...]] = (
     "categories.jsonl",
     "dogmaAttributes.jsonl",
     "dogmaUnits.jsonl",
+    # v2（T-4/5）：dogma 数据。缺一个就建不出完整库，所以一并列为**必需**（不静默降级）。
+    "typeDogma.jsonl",
+    "dogmaEffects.jsonl",
+    "typeBonus.jsonl",
+    "dbuffCollections.jsonl",
 )
 
 #: 包内自带 build 信息的成员，用于交叉校验缓存版本。
@@ -105,8 +110,27 @@ _INSERT_UNITS: Final[str] = (
     "INSERT INTO units(unit_id, name, display_name) VALUES (?, ?, ?)"
 )
 _INSERT_ATTRIBUTES: Final[str] = (
-    "INSERT INTO attributes(attribute_id, name, display_name, description, unit_id,"
-    " high_is_good, default_value, published) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    "INSERT INTO attributes(attribute_id, name, display_name, display_name_zh, description,"
+    " unit_id, high_is_good, default_value, published)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+_INSERT_TYPE_ATTRIBUTES: Final[str] = (
+    "INSERT INTO type_attributes(type_id, attribute_id, value) VALUES (?, ?, ?)"
+)
+_INSERT_EFFECTS: Final[str] = (
+    "INSERT INTO effects(effect_id, name, display_name_zh, duration_attribute_id,"
+    " discharge_attribute_id, is_offensive, is_assistance, published)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+)
+_INSERT_TYPE_EFFECTS: Final[str] = (
+    "INSERT INTO type_effects(type_id, effect_id, is_default) VALUES (?, ?, ?)"
+)
+_INSERT_TYPE_BONUSES: Final[str] = (
+    "INSERT INTO type_bonuses(type_id, skill_type_id, bonus_type, value, text_en, text_zh)"
+    " VALUES (?, ?, ?, ?, ?, ?)"
+)
+_INSERT_BUFFS: Final[str] = (
+    "INSERT INTO buffs(buff_id, name, name_zh) VALUES (?, ?, ?)"
 )
 
 
@@ -321,19 +345,161 @@ def _unit_rows(
 
 def _attribute_rows(
     handle: zipfile.ZipFile, member: str
-) -> Iterator[tuple[int, str | None, str | None, str | None, int | None, int, float, int]]:
+) -> Iterator[tuple[int, str | None, str | None, str | None, str | None, int | None, int, float, int]]:
     for record in _iter_jsonl(handle, member):
         name = record.get("name")
         description = record.get("description")
+        # `displayName` 可能整个缺失（实测 2871 条里 1,620 条没有）—— 别对 None 取下标。
+        display = record.get("displayName") or {}
         yield (
             int(record["_key"]),
             name,
-            _localized(record.get("displayName")) or name,
+            _localized(display, "en") or name,
+            _localized(display, "zh"),
             description if isinstance(description, str) else None,
             None if record.get("unitID") is None else _as_int(record["unitID"]),
             int(bool(record.get("highIsGood", False))),
             _as_float(record.get("defaultValue"), 0.0),
             int(bool(record.get("published", False))),
+        )
+
+
+# ---- v2（T-4/5）：dogma 数据 -------------------------------------------------
+#
+# 结构实测（SDE build 3607705）：
+#   typeDogma.jsonl      {_key: type_id, dogmaAttributes: [{attributeID, value}],
+#                         dogmaEffects: [{effectID, isDefault}]}
+#   dogmaEffects.jsonl   {_key: effect_id, name, durationAttributeID, dischargeAttributeID,
+#                         isOffensive, isAssistance, published}   ← **没有 displayName**
+#   typeBonus.jsonl      {_key: 集合 id, roleBonuses: [{bonus, bonusText{en,zh}, ...}],
+#                         types: [{_key: type_id, _value: [{bonus, bonusText{en,zh}, ...}]}]}
+#   dbuffCollections.jsonl {_key: buff_id, name?, displayName{en,zh}, ...}
+
+
+def _type_attribute_rows(
+    handle: zipfile.ZipFile, member: str
+) -> Iterator[tuple[int, int, float]]:
+    """`typeDogma.dogmaAttributes` → `type_attributes` 行（SDE 原值，不换算）。"""
+    for record in _iter_jsonl(handle, member):
+        type_id = _as_int(record.get("_key"), -1)
+        if type_id < 0:
+            continue
+        for entry in record.get("dogmaAttributes") or []:
+            if not isinstance(entry, dict):
+                continue
+            attribute_id = _as_int(entry.get("attributeID"), -1)
+            if attribute_id < 0:
+                continue
+            yield (type_id, attribute_id, _as_float(entry.get("value"), 0.0))
+
+
+def _type_effect_rows(
+    handle: zipfile.ZipFile, member: str
+) -> Iterator[tuple[int, int, int]]:
+    """`typeDogma.dogmaEffects` → `type_effects` 行（含 `isDefault`）。"""
+    for record in _iter_jsonl(handle, member):
+        type_id = _as_int(record.get("_key"), -1)
+        if type_id < 0:
+            continue
+        for entry in record.get("dogmaEffects") or []:
+            if not isinstance(entry, dict):
+                continue
+            effect_id = _as_int(entry.get("effectID"), -1)
+            if effect_id < 0:
+                continue
+            yield (type_id, effect_id, int(bool(entry.get("isDefault", False))))
+
+
+def _effect_rows(
+    handle: zipfile.ZipFile, member: str
+) -> Iterator[tuple[int, str | None, str | None, int | None, int | None, int, int, int]]:
+    """`dogmaEffects` → `effects` 行。
+
+    `display_name_zh` **恒为 NULL**：SDE 的 effect 记录里没有 `displayName`
+    （实测字段表里压根没有这个键）。不编中文名。
+    """
+    for record in _iter_jsonl(handle, member):
+        display = record.get("displayName")  # 目前不存在；存在时自动用上
+        yield (
+            int(record["_key"]),
+            record.get("name") if isinstance(record.get("name"), str) else None,
+            _localized(display, "zh") if isinstance(display, dict) else None,
+            None
+            if record.get("durationAttributeID") is None
+            else _as_int(record["durationAttributeID"]),
+            None
+            if record.get("dischargeAttributeID") is None
+            else _as_int(record["dischargeAttributeID"]),
+            int(bool(record.get("isOffensive", False))),
+            int(bool(record.get("isAssistance", False))),
+            int(bool(record.get("published", False))),
+        )
+
+
+def _type_bonus_rows(
+    handle: zipfile.ZipFile, member: str
+) -> Iterator[tuple[int, int | None, str, float, str | None, str | None]]:
+    """`typeBonus` → `type_bonuses` 行。
+
+    **结构读准**（实测 build 3607705，别搞反）：
+    `_key` 是**船**的 `type_id`，`types[]` 里每项的 `_key` 才是**技能** `type_id`：
+
+    ```json
+    {"_key": 11379,                     // ← 船：Hawk
+     "roleBonuses": [{"bonus": 50, "bonusText": {...}}],
+     "types": [{"_key": 3330,           // ← 技能：Caldari Frigate
+                "_value": [{"bonus": 10, "bonusText": {...}}]}]}
+    ```
+
+    - `bonus_type="role"`：角色加成，`skill_type_id` 为 `NULL`（不挂技能）；
+    - `bonus_type="type"`：**每级**加成，`skill_type_id` = 那个技能的 `type_id`
+      （`value` 是「每级 +N」，**不是**乘过技能等级的终值 —— 本库只存 SDE 原值）。
+    """
+    for record in _iter_jsonl(handle, member):
+        type_id = _as_int(record.get("_key"), -1)
+        if type_id < 0:
+            continue
+        for entry in record.get("roleBonuses") or []:
+            if not isinstance(entry, dict):
+                continue
+            text = entry.get("bonusText")
+            yield (
+                type_id,
+                None,
+                "role",
+                _as_float(entry.get("bonus"), 0.0),
+                _localized(text, "en") if isinstance(text, dict) else None,
+                _localized(text, "zh") if isinstance(text, dict) else None,
+            )
+        for skill_entry in record.get("types") or []:
+            if not isinstance(skill_entry, dict):
+                continue
+            skill_type_id = _as_int(skill_entry.get("_key"), -1)
+            for entry in skill_entry.get("_value") or []:
+                if not isinstance(entry, dict):
+                    continue
+                text = entry.get("bonusText")
+                yield (
+                    type_id,
+                    None if skill_type_id < 0 else skill_type_id,
+                    "type",
+                    _as_float(entry.get("bonus"), 0.0),
+                    _localized(text, "en") if isinstance(text, dict) else None,
+                    _localized(text, "zh") if isinstance(text, dict) else None,
+                )
+
+
+def _buff_rows(
+    handle: zipfile.ZipFile, member: str
+) -> Iterator[tuple[int, str | None, str | None]]:
+    """`dbuffCollections` → `buffs` 行（buff 编号 → 中英文名）。"""
+    for record in _iter_jsonl(handle, member):
+        display = record.get("displayName") if isinstance(record.get("displayName"), dict) else {}
+        name = record.get("name")
+        yield (
+            int(record["_key"]),
+            _localized(display, "en") or (name if isinstance(name, str) else None),
+            _localized(display, "zh"),
         )
 
 
@@ -344,15 +510,29 @@ _ROW_BUILDERS: Final[dict[str, Any]] = {
     "types.jsonl": _type_rows,
     "dogmaUnits.jsonl": _unit_rows,
     "dogmaAttributes.jsonl": _attribute_rows,
+    "typeDogma.attributes": _type_attribute_rows,
+    "typeDogma.effects": _type_effect_rows,
+    "dogmaEffects.jsonl": _effect_rows,
+    "typeBonus.jsonl": _type_bonus_rows,
+    "dbuffCollections.jsonl": _buff_rows,
 }
 
 #: (中文标签, 表名, zip 成员 basename, 插入语句)；顺序即写入顺序。
+#:
+#: **同一个 zip 成员喂两张表**（`typeDogma.jsonl` → `type_attributes` + `type_effects`）：
+#: 多读一遍 26 MB 是**故意**的取舍 —— 比把 `_populate` 的循环改成「一个成员产出多表」
+#: 简单得多，实测多花约 3 s（见构建日志）。
 _INSERTS: Final[tuple[tuple[str, str, str, str], ...]] = (
     ("分类", "categories", "categories.jsonl", _INSERT_CATEGORIES),
     ("组", "groups", "groups.jsonl", _INSERT_GROUPS),
     ("类型", "types", "types.jsonl", _INSERT_TYPES),
     ("单位", "units", "dogmaUnits.jsonl", _INSERT_UNITS),
     ("属性", "attributes", "dogmaAttributes.jsonl", _INSERT_ATTRIBUTES),
+    ("类型属性", "type_attributes", "typeDogma.attributes", _INSERT_TYPE_ATTRIBUTES),
+    ("类型效果", "type_effects", "typeDogma.effects", _INSERT_TYPE_EFFECTS),
+    ("效果", "effects", "dogmaEffects.jsonl", _INSERT_EFFECTS),
+    ("加成", "type_bonuses", "typeBonus.jsonl", _INSERT_TYPE_BONUSES),
+    ("增益", "buffs", "dbuffCollections.jsonl", _INSERT_BUFFS),
 )
 
 
@@ -377,17 +557,23 @@ def _populate(
     release: str | None,
     source_url: str,
 ) -> dict[str, int]:
-    """把 zip 里的 5 个成员 + 模式映射写进已建好 schema 的连接，返回各表行数。"""
+    """把 zip 里的成员 + 模式映射写进已建好 schema 的连接，返回各表行数。
+
+    v2 起 `_INSERTS` 里的「成员」可以是 `typeDogma.attributes` 这种**伪成员**
+    （`<真实成员>.<表>`）：同一个 zip 成员喂两张表，见 `_INSERTS` 上的注释。
+    """
     counts: dict[str, int] = {}
     with zipfile.ZipFile(archive) as handle:
         members = _resolve_members(handle)
-        for label, table, member_basename, statement in _INSERTS:
+        for label, table, member_key, statement in _INSERTS:
             started = time.perf_counter()
-            builder = _ROW_BUILDERS[member_basename]
+            # `categories.jsonl` → `categories.jsonl`；`typeDogma.attributes` → `typeDogma.jsonl`
+            member_basename = member_key.split(".")[0] + ".jsonl"
+            builder = _ROW_BUILDERS[member_key]
             conn.executemany(statement, builder(handle, members[member_basename]))
             counts[table] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             _log(
-                f"  {label} {table:10s} {counts[table]:6d} 行  "
+                f"  {label} {table:14s} {counts[table]:7d} 行  "
                 f"{time.perf_counter() - started:.2f}s"
             )
 
@@ -401,7 +587,7 @@ def _populate(
         "sde_build": str(build),
         "sde_release_date": release or "",
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "schema_version": "1",
+        "schema_version": "2",
         "source_url": source_url,
         "source_zip": archive.name,
         "builder": "noobbaozi.sde.ingest",
@@ -415,7 +601,10 @@ def _populate(
 def _table_counts(conn: sqlite3.Connection) -> dict[str, int]:
     return {
         table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-        for table in ("types", "groups", "categories", "attributes", "units", "modes")
+        for table in (
+            "types", "groups", "categories", "attributes", "units", "modes",
+            "type_attributes", "effects", "type_effects", "type_bonuses", "buffs",
+        )
     }
 
 

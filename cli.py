@@ -1237,6 +1237,8 @@ _HUMAN: dict[str, Callable[[dict, dict], str]] = {
     "stats": _human_stats,
     "related": _human_related,
     "sde": _human_sde,
+    "sde-type": _human_sde_type,
+    "can-fit": _human_can_fit,
 }
 
 

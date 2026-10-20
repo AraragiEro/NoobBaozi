@@ -279,6 +279,8 @@ python -c "from noobbaozi import mcp_server as m; print(m.INSTRUCTIONS); [print(
 | `zkb_stats` | 实体画像（角色 / 公司 / 联盟）：战斗总量 + zkb 风格指标 + 7 天活动 + 6 类榜单；**公式未公开的指标只转述，不给威胁判词** |
 | `zkb_related` | 星系交火总览：一个星系 + 一个时间点 → 双方阵营 / 舰船构成 / ISK / **killmail 清单**；**唯一能查任意历史窗口的入口**（见 §4.14） |
 | `sde_search` | **名字反查**：用户口语里的名字（中英文都认）→ `type_id` / 中英文名 / 组 / 类别；`ambiguous` 与 `did_you_mean` 让 agent 知道自己**不确定**（见 §4.15） |
+| `sde_type` | 类型详情：dogma 属性 / effect / 装配限制 / 技能要求 / 船体加成（**SDE 原值**，见 §4.16） |
+| `can_fit` | 能不能装：探针配装 + 引擎违规 → `fits` / `blockers` / `remaining` / **`assumptions`**（见 §4.16） |
 
 每个工具的「何时用 / 返回什么 / 限制」、每个参数的含义与默认值，都写在它的
 `description` / `inputSchema` 里 —— **别在这份 README 里补第二份**（复制就会漂移；
@@ -1109,6 +1111,63 @@ duration_s=None, points=6)`。**`distance_m` 必填** —— 距离与角速度�
 
 `fit_index` / `fit_view` / `fit_get` / `fit_explain` / `fit_detail` 本单**不加** `locale`
 （它们主要返回数字）。
+
+### 4.16 SDE dogma 数据 + `sde_type` + `can_fit`（2026-10-20，schema v2）
+
+#### 索引库现在灌了 dogma（`schema_version = 2`）
+
+| 表 | 行数 | 来源 | 说明 |
+|---|---:|---|---|
+| `type_attributes` | **648,726** | `typeDogma.jsonl`（26.4 MB） | 类型 → 属性值，**SDE 原值** |
+| `effects` | **3,427** | `dogmaEffects.jsonl` | effect 定义（`duration_attribute_id` 等） |
+| `type_effects` | **54,307** | `typeDogma.jsonl` | 类型 → effect（含 `isDefault`） |
+| `type_bonuses` | **3,571** | `typeBonus.jsonl` | 船体加成；**1,682 条挂技能** |
+| `buffs` | **277** | `dbuffCollections.jsonl` | 增益编号 → 中英文名 |
+| `attributes.display_name_zh` | 1,251 / 2,871 | `dogmaAttributes.jsonl` | 新增列（**允许 NULL**） |
+
+**重建成本**（本机，`build_index(force=True)`）：**3.9 s**、库 **45.3 MB**（v1 是 15.0 MB）。
+NAS 上按同一个脚本重跑即可；`PRAGMA user_version` 从 1 → **2**，旧库必须重建（不是加列迁移）。
+
+> **两个 SDE 结构要点**（都实测过，容易读反）：
+> 1. `typeBonus` 的 `_key` 是**船**，`types[]._key` 才是**技能** —— 所以「每级 +N%」的
+>    `skill_type_id` 拿得到，不要写成 NULL。
+> 2. `dogmaEffects` **没有** `displayName` —— effect 的中文名 SDE 不给，`name_zh` 恒为
+>    `null`（列留着，等 SDE 补）。
+
+#### `sde_type(query, *, locale="zh", include=None, limit_attributes=None)`
+
+**锚点**（type 4403 Reactive Armor Hardener，已写成测试）：
+
+```
+armorEmDamageResonance(267) = 0.85 · duration(73) = 10000 · resistanceShiftAmount(1849) = 6.0
+maxGroupFitted(1544) = 1 · maxGroupActive(763) = 1 · effect 4928 = adaptiveArmorHardener
+required_skills: Hull Upgrades(3394) 3 级
+```
+
+- **默认只给「值非 0 或 有中文名」的属性**（过滤噪声）；`include="all"` 给全量；
+- `limit_attributes` 默认 **60**、上限 **300**，被截时 `truncated.attributes=true`；
+- `bonuses[].kind`：`type` = **每级**加成（值 = 每级 +N，**没乘技能等级**）、`role` = 角色加成（不挂技能）；
+- 数值全是 **SDE 原值**（毫秒不换算）。
+
+#### `can_fit(ship, module, *, locale="en")`
+
+做法：拼一条「这艘船 + 这一个模块」的探针 EFT → 走引擎归一化 + `validate` → 违规翻中文。
+
+**实测**（Hawk + Capital Armor Repairer I）：
+
+```json
+{"fits": false,
+ "blockers": [{"kind": "resource", "resource": "powergrid",
+               "used": 125000.0, "available": 56.25,
+               "detail": "能量栅格不足：需要 125000.0，可用 56.25"},
+              {"kind": "capital_item", "detail": "这是旗舰级装备，普通舰船装不上"}],
+ "remaining": {"cpu": 153.0, "powergrid": -124943.75, "calibration": null},
+ "slot_used": "low",
+ "assumptions": ["技能档 all4+min_required（…）", "探针配装：…", "**不含已装模块的挤占** …"]}
+```
+
+> **`fits: true` 只对探针成立** —— 真实配装里 CPU/PG 已被别的东西吃掉，可能更紧。
+> `fits: false` 的 `blockers` 才是确定的。**不认识的违规原样透传 `rule`、不编中文。**
 
 ## 5. 返回契约
 

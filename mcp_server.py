@@ -499,14 +499,38 @@ def _common_arguments(arguments: dict) -> dict:
 # =============================================================================
 
 
+def _locale_argument(arguments: dict) -> dict:
+    """`locale` 的透传（**只有 schema 里声明了它、且 api 接受它的工具才调本函数**）。
+
+    为什么单独一个函数、不塞进 `_common_arguments`：`fit_index` / `fit_view` 等入口的 api
+    **不接受** `locale`，混进共同参数会让它们直接 `TypeError`。所以「共同参数」只装真的
+    所有配装工具都认的三个，`locale` 按工具单独透传。
+
+    为什么不在这里给默认值：`api` 的默认是 `en`，缺省就该交给它 —— 本层不替它决定策略；
+    但**显式给了就必须传下去**（`locale` 曾经在 `_common_arguments` 里被静默丢掉，
+    表现为「schema 有、api 支持、走 MCP 却毫无变化」）。
+    """
+    if "locale" not in arguments:
+        return {}
+    return {"locale": arguments["locale"]}
+
+
 def _tool_fit_parse(arguments: dict) -> dict:
-    """`fit_parse` → `api.parse_fit()`。"""
-    return _api().parse_fit(_fit_argument(arguments), **_common_arguments(arguments))
+    """`fit_parse` → `api.parse_fit()`（含 `locale` 透传）。"""
+    return _api().parse_fit(
+        _fit_argument(arguments),
+        **_common_arguments(arguments),
+        **_locale_argument(arguments),
+    )
 
 
 def _tool_fit_killmail(arguments: dict) -> dict:
     """`fit_killmail` → `api.fit_killmail()`（**只接受战报**；EFT 会得到 not_a_killmail）。"""
-    return _api().fit_killmail(_fit_argument(arguments), **_common_arguments(arguments))
+    return _api().fit_killmail(
+        _fit_argument(arguments),
+        **_common_arguments(arguments),
+        **_locale_argument(arguments),
+    )
 
 
 def _tool_fit_index(arguments: dict) -> dict:

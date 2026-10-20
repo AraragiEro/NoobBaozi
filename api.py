@@ -6074,7 +6074,9 @@ def _resolve_probe_type(value: object, field: str, *, kind: str) -> dict:
         _ApiFailure: `invalid_argument`（查不到 / 有歧义），带 `field` 与候选。
     """
     index = get_index()
-    identifier = _as_int(value) if not isinstance(value, bool) else None
+    # `_related_int` 收「整数或纯数字串」—— CLI / MCP 传进来的 id 往往是字符串，
+    # 用 `_as_int` 会静默当成「名字」去搜，然后 0 命中。
+    identifier = None if isinstance(value, bool) else _related_int(value)
     if identifier is not None:
         row = index.get_type(identifier)
         if row is None:

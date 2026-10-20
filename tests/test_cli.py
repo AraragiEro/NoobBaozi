@@ -1466,3 +1466,72 @@ def test_module_entry_point_knows_sde() -> None:
     assert completed.returncode == 0, completed.stderr
     for token in ("--kind", "--limit", "--locale", "--json"):
         assert token in completed.stdout, f"--help 里应提到 {token}：\n{completed.stdout}"
+
+
+# =============================================================================
+# `sde-type` / `can-fit`（T-4/5）
+# =============================================================================
+
+
+def test_sde_type_json_is_the_api_envelope(capsys: pytest.CaptureFixture[str]) -> None:
+    """`sde-type 4403 --json` → 信封原样；锚点属性必须在。"""
+    code, out, err = _run_cli(
+        ["sde-type", "4403", "--limit-attributes", "300", "--json"], capsys
+    )
+    assert code == cli.EXIT_OK, err
+    envelope = json.loads(out)
+    assert envelope["ok"] is True
+    values = {row["id"]: row["value"] for row in envelope["result"]["attributes"]}
+    assert values[267] == 0.85 and values[73] == 10000
+
+
+def test_sde_type_human_output_shows_the_anchors(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """人话：类型头 / 属性 / effects / 技能 / 截断提示都要有。"""
+    code, out, err = _run_cli(
+        ["sde-type", "4403", "--limit-attributes", "3"], capsys
+    )
+    assert code == cli.EXIT_OK, err
+    assert "反应式装甲增强器" in out, f"中文类型名应在：\n{out}"
+    assert "capacitorNeed" in out
+    assert "effects:" in out and "adaptiveArmorHardener" in out
+    assert "技能:" in out and "船体加固理论" in out
+    assert "属性被截断" in out, f"截断必须说出来：\n{out}"
+
+
+def test_can_fit_human_output_prints_assumptions(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """人话必须把**假设**印出来（否则会被当成真实配装结论）。"""
+    code, out, err = _run_cli(
+        ["can-fit", "Hawk", "Capital Armor Repairer I"], capsys
+    )
+    assert code == cli.EXIT_OK, err
+    assert "装不上" in out
+    assert "能量栅格不足" in out and "旗舰" in out
+    assert "假设:" in out and "不含已装模块的挤占" in out
+
+
+def test_can_fit_json_has_the_full_contract(capsys: pytest.CaptureFixture[str]) -> None:
+    """`--json`：fits / blockers / remaining / slot_used / assumptions 一个不少。"""
+    code, out, err = _run_cli(
+        ["can-fit", "Hawk", "Light Missile Launcher II", "--json"], capsys
+    )
+    assert code == cli.EXIT_OK, err
+    result = json.loads(out)["result"]
+    assert result["fits"] is True
+    assert set(result) >= {"fits", "blockers", "remaining", "slot_used", "assumptions"}
+    assert result["slot_used"] == "high"
+
+
+def test_module_entry_point_knows_sde_type_and_can_fit() -> None:
+    """真起子进程：两个新子命令的 `--help` 都得能起来。"""
+    for command, tokens in (
+        ("sde-type", ("--include", "--limit-attributes", "--locale", "--json")),
+        ("can-fit", ("--skill-tier", "--locale", "--json")),
+    ):
+        completed = _subprocess_cli([command, "--help"])
+        assert completed.returncode == 0, completed.stderr
+        for token in tokens:
+            assert token in completed.stdout, f"{command} --help 里应提到 {token}"
