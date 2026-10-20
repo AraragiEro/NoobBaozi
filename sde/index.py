@@ -27,10 +27,11 @@
 
 from __future__ import annotations
 
+import functools
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Final
+from typing import Final, Sequence
 
 from noobbaozi.contracts import AttributeRow, IndexStats, TypeRow
 from noobbaozi.sde.attribute_dict import scale_of
@@ -43,6 +44,7 @@ DEFAULT_SCALE: Final[float] = 1.0
 _TYPES_SELECT: Final[str] = """
     SELECT t.type_id   AS type_id,
            t.name      AS name,
+           t.name_zh   AS name_zh,
            t.group_id  AS group_id,
            g.name      AS group_name,
            t.meta_level AS meta_level,
@@ -52,21 +54,26 @@ _TYPES_SELECT: Final[str] = """
       LEFT JOIN groups g ON g.group_id = t.group_id
 """
 
-#: 精确优先 + 前缀 + 包含 的三级匹配；LIKE 的 `% _ \\` 由调用方转义并指定 ESCAPE。
-_SEARCH_SQL: Final[str] = (
-    _TYPES_SELECT
-    + """
-     WHERE t.name_lower = :q
-        OR t.name_lower LIKE :prefix ESCAPE '\\'
-        OR t.name_lower LIKE :contains ESCAPE '\\'
-        OR t.name_zh = :raw
-        OR t.name_zh LIKE :zh_prefix ESCAPE '\\'
-        OR t.name_zh LIKE :zh_contains ESCAPE '\\'
+#: 前三级：精确 → 前缀 → 包含。英文名（`name_lower`）与中文名（`name_zh`）**同权**。
+#: 第四级「query 的每个词都出现在名字里（AND）」由 `_search_sql()` 按词数动态拼 ——
+#: 词数是不定的，SQLite 又没有数组参数，所以只能拼子句；**值全部走绑定参数**。
+_SEARCH_WHERE_BASE: Final[tuple[str, ...]] = (
+    "t.name_lower = :q",
+    "t.name_lower LIKE :prefix ESCAPE '\\'",
+    "t.name_lower LIKE :contains ESCAPE '\\'",
+    "t.name_zh = :raw",
+    "t.name_zh LIKE :zh_prefix ESCAPE '\\'",
+    "t.name_zh LIKE :zh_contains ESCAPE '\\'",
+)
+
+_SEARCH_ORDER: Final[str] = """
      ORDER BY CASE
                 WHEN t.name_lower = :q OR t.name_zh = :raw THEN 0
                 WHEN t.name_lower LIKE :prefix ESCAPE '\\'
                   OR t.name_zh LIKE :zh_prefix ESCAPE '\\' THEN 1
-                ELSE 2
+                WHEN t.name_lower LIKE :contains ESCAPE '\\'
+                  OR t.name_zh LIKE :zh_contains ESCAPE '\\' THEN 2
+                ELSE 3
               END,
               t.published DESC,
               t.meta_level DESC,
@@ -74,7 +81,37 @@ _SEARCH_SQL: Final[str] = (
               t.type_id ASC
      LIMIT :limit
 """
-)
+"""四级排序：精确(0) → 前缀(1) → 包含(2) → 全部词命中(3)，同级再按 published / meta_level /
+名字短 / type_id 小 —— 完全确定（同一个库同一个查询永远同样的顺序）。"""
+
+MAX_SEARCH_WORDS: Final[int] = 6
+"""第四级最多吃几个词。再多收益趋零，而 LIKE 子句数线性增长（每词 2 个子句）。"""
+
+
+@functools.lru_cache(maxsize=64)
+def _search_sql(words: int, categories: int) -> str:
+    """拼检索 SQL —— 按「第四级词数 + category 过滤个数」缓存（同一形状只拼一次）。
+
+    Args:
+        words: 第四级的词数；`0` = 不启用第四级（**与旧行为逐字节一致**）。
+        categories: `kind` 过滤的 category 个数；`0` = 不过滤。
+
+    返回的语句里**只有占位符**，没有任何查询文本（值一律走 `params` 绑定）。
+    """
+    clauses = list(_SEARCH_WHERE_BASE)
+    if words:
+        conjunction = " AND ".join(
+            f"(t.name_lower LIKE :w{index} ESCAPE '\\' OR t.name_zh LIKE :w{index} ESCAPE '\\')"
+            for index in range(words)
+        )
+        clauses.append(f"({conjunction})")
+    # **整组必须加括号**：`A OR B OR C AND cat` 里 `AND` 只绑最后一个子句（SQL 优先级），
+    # 过滤会静默失效 —— 实测过（`kind=module` 仍在返回涂装）。
+    where = "(" + "\n        OR ".join(clauses) + ")"
+    if categories:
+        placeholders = ", ".join(f":cat{index}" for index in range(categories))
+        where += f"\n       AND g.category_id IN ({placeholders})"
+    return f"{_TYPES_SELECT}\n     WHERE {where}\n{_SEARCH_ORDER}"
 
 
 def _escape_like(text: str) -> str:
@@ -83,10 +120,14 @@ def _escape_like(text: str) -> str:
 
 
 def _to_type_row(row: sqlite3.Row) -> TypeRow:
-    """sqlite3.Row → 契约 `TypeRow`（published 由 0/1 转 bool）。"""
+    """sqlite3.Row → 契约 `TypeRow`（published 由 0/1 转 bool）。
+
+    `name_zh` 直接透传（可能是 `None` —— 契约里允许，消费方回退到 `name`）。
+    """
     return TypeRow(
         type_id=row["type_id"],
         name=row["name"],
+        name_zh=row["name_zh"],
         group_id=row["group_id"],
         group_name=row["group_name"],
         meta_level=row["meta_level"],
@@ -170,12 +211,22 @@ class Index:
 
     # ---- 查询 -------------------------------------------------------------
 
-    def search_types(self, query: str, limit: int = 10) -> list[TypeRow]:
-        """按名搜类型：精确优先 → 前缀 → 包含，大小写不敏感。
+    def search_types(
+        self,
+        query: str,
+        limit: int = 10,
+        *,
+        category_ids: Sequence[int] | None = None,
+    ) -> list[TypeRow]:
+        """按名搜类型：精确 → 前缀 → 包含 → **全部词都出现（AND）**，大小写不敏感。
 
-        - 英文名（`types.name_lower`）与中文名（`types.name_zh`）同时参与；
+        - 英文名（`types.name_lower`）与中文名（`types.name_zh`）**同权参与**；
+        - **第四级**只在 query 有 ≥2 个词时启用：按空格切词，**每个词都要出现**（顺序不限）。
+          例：`"autocannon vulcan 220"` → `220mm Vulcan AutoCannon II`（前三级命中 0 条）；
         - 同级内排序：`published` 优先 → `meta_level` 高优先 → 名字短优先 → `type_id` 小优先，
           完全确定（同样的库同样的查询永远给同样的顺序）；
+        - `%` / `_` 按**字面**匹配（`_escape_like` 转义 + `ESCAPE`）；
+        - `category_ids` 非空时按 `groups.category_id` 过滤（`kind` 用，**不靠名字猜**）；
         - 空查询或 `limit <= 0` 返回空列表。
 
         Examples:
@@ -186,7 +237,10 @@ class Index:
         if not needle or limit <= 0:
             return []
         escaped = _escape_like(needle)
-        params = {
+        words = [word for word in needle.lower().split() if word]
+        word_count = min(len(words), MAX_SEARCH_WORDS) if len(words) >= 2 else 0
+        categories = tuple(int(value) for value in (category_ids or ()))
+        params: dict[str, object] = {
             "q": needle.lower(),
             "raw": needle,
             "prefix": f"{escaped}%",
@@ -195,7 +249,13 @@ class Index:
             "zh_contains": f"%{escaped}%",
             "limit": limit,
         }
-        rows = self._connection().execute(_SEARCH_SQL, params).fetchall()
+        for index in range(word_count):
+            params[f"w{index}"] = f"%{_escape_like(words[index])}%"
+        for index, category_id in enumerate(categories):
+            params[f"cat{index}"] = category_id
+        rows = self._connection().execute(
+            _search_sql(word_count, len(categories)), params
+        ).fetchall()
         return [_to_type_row(row) for row in rows]
 
     def get_type(self, type_id: int) -> TypeRow | None:
@@ -216,6 +276,100 @@ class Index:
             (group_id,),
         ).fetchall()
         return [_to_type_row(row) for row in rows]
+
+    def type_attributes(self, type_id: int) -> list[dict]:
+        """`type_id` 的全部 dogma 属性（**SDE 原值**，不换算），按 `attribute_id` 升序。
+
+        每行 = `{attribute_id, name, display_name, display_name_zh, value, unit_id, unit,
+        high_is_good, published}`。`display_name_zh` / `unit` 可能是 `None`（SDE 就这样）。
+        """
+        rows = self._connection().execute(
+            """
+            SELECT a.attribute_id AS attribute_id,
+                   a.name         AS name,
+                   a.display_name AS display_name,
+                   a.display_name_zh AS display_name_zh,
+                   ta.value       AS value,
+                   a.unit_id      AS unit_id,
+                   u.name         AS unit,
+                   a.high_is_good AS high_is_good,
+                   a.published    AS published
+              FROM type_attributes ta
+              JOIN attributes a ON a.attribute_id = ta.attribute_id
+              LEFT JOIN units u ON u.unit_id = a.unit_id
+             WHERE ta.type_id = ?
+             ORDER BY ta.attribute_id ASC
+            """,
+            (int(type_id),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def type_effects(self, type_id: int) -> list[dict]:
+        """`type_id` 的 effect 列表（`effects` 左连，`duration_attribute_id` 等原样）。"""
+        rows = self._connection().execute(
+            """
+            SELECT e.effect_id     AS effect_id,
+                   e.name          AS name,
+                   e.display_name_zh AS display_name_zh,
+                   e.duration_attribute_id  AS duration_attribute_id,
+                   e.discharge_attribute_id AS discharge_attribute_id,
+                   e.is_offensive  AS is_offensive,
+                   e.is_assistance AS is_assistance,
+                   te.is_default   AS is_default
+              FROM type_effects te
+              JOIN effects e ON e.effect_id = te.effect_id
+             WHERE te.type_id = ?
+             ORDER BY e.effect_id ASC
+            """,
+            (int(type_id),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def type_bonuses(self, type_id: int) -> list[dict]:
+        """`type_id` 的加成（`role` = 不挂技能 / `type` = 每级加成，`skill_type_id` 是技能）。"""
+        rows = self._connection().execute(
+            """
+            SELECT tb.bonus_type    AS bonus_type,
+                   tb.value         AS value,
+                   tb.skill_type_id AS skill_type_id,
+                   s.name           AS skill_name,
+                   s.name_zh        AS skill_name_zh,
+                   tb.text_en       AS text_en,
+                   tb.text_zh       AS text_zh
+              FROM type_bonuses tb
+              LEFT JOIN types s ON s.type_id = tb.skill_type_id
+             WHERE tb.type_id = ?
+             ORDER BY tb.bonus_type ASC, tb.skill_type_id ASC
+            """,
+            (int(type_id),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def buff(self, buff_id: int) -> dict | None:
+        """buff 编号 → `{buff_id, name, name_zh}`（`fit_project` 的 `{id:15}` 用它翻译）。"""
+        row = self._connection().execute(
+            "SELECT buff_id, name, name_zh FROM buffs WHERE buff_id = ?", (int(buff_id),)
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def category_name(self, group_id: int | None) -> str | None:
+        """`group_id` → 所属 **category 名**（`groups.category_id` → `categories.name`）。
+
+        `kind` 过滤要用它（`Ship` / `Module` / `Charge` …）。查不到给 `None`（不编）。
+        走主键，单次查询 <0.1 ms。
+        """
+        if not isinstance(group_id, int):
+            return None
+        row = self._connection().execute(
+            """
+            SELECT c.name AS name
+              FROM groups g
+              JOIN categories c ON c.category_id = g.category_id
+             WHERE g.group_id = ?
+            """,
+            (group_id,),
+        ).fetchone()
+        return None if row is None else row["name"]
 
     def modes_for_ship(self, ship_type_id: int) -> list[TypeRow]:
         """某艘船可切换的模式（T3D/T3C）。无模式返回空列表。

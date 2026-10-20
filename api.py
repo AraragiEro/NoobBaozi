@@ -1232,19 +1232,73 @@ def _execute(
 # =============================================================================
 
 
-def _ship_block(ctx: ViewContext) -> dict:
-    """`{type_id, name, group}`（名字 / 组名走 SDE 索引；查不到给 `None`，不编）。"""
+LOCALE_EN: str = "en"
+"""英文（默认）：名字就是 SDE 的 `types.name`，即 EFT / ESI 口径。"""
+LOCALE_ZH: str = "zh"
+"""官方中文：名字取 SDE 的 `types.name_zh`（实测 53,288/53,288 全填）。"""
+LOCALES: tuple[str, ...] = (LOCALE_EN, LOCALE_ZH)
+"""`locale` 的合法取值（**只这两个**；别把 `zh-CN` / `zh_CN` 悄悄当 `zh` —— 不做宽松解析）。"""
+
+
+def _check_locale(value: object) -> str:
+    """校验 `locale`，返回规范值。
+
+    Raises:
+        _ApiFailure: `invalid_argument` + `field="locale"` + 合法取值列表。
+    """
+    if value is None:
+        return LOCALE_EN
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in LOCALES:
+            return normalized
+    raise _ApiFailure(
+        "invalid_argument",
+        f"locale 只支持 {' / '.join(LOCALES)}，收到 {value!r}",
+        field="locale",
+        hint={"allowed": list(LOCALES), "default": LOCALE_EN},
+    )
+
+
+def _localized_type_name(row: object, locale: str) -> tuple[str | None, str | None]:
+    """TypeRow → `(name, name_en)`。
+
+    - `locale="en"`：`(英文名, None)` —— **不追加 `name_en`**，默认返回体形状与以前逐字节相同；
+    - `locale="zh"`：`(中文名, 英文名)`，中文缺失时**回退英文**（契约允许 `name_zh=None`）。
+
+    玩家 / 军团 / 联盟名**不走这里**：那是人名，不是 SDE 类型，永远不译。
+    """
+    if not isinstance(row, dict):
+        return None, None
+    english = row.get("name")
+    if locale != LOCALE_ZH:
+        return english, None
+    chinese = row.get("name_zh")
+    if isinstance(chinese, str) and chinese.strip():
+        return chinese, english
+    return english, english
+
+
+def _ship_block(ctx: ViewContext, *, locale: str = LOCALE_EN) -> dict:
+    """`{type_id, name, group}`（名字 / 组名走 SDE 索引；查不到给 `None`，不编）。
+
+    `locale="zh"` 时多一个 `name_en`（英文原名，便于核对），`name` 是官方中文。
+    """
     fit = ctx.fit if isinstance(ctx.fit, dict) else {}
     ship = fit.get("ship") if isinstance(fit.get("ship"), dict) else {}
     type_id = ship.get("type_id")
     row = None
     if isinstance(type_id, int) and ctx.index is not None:
         row = ctx.index.get_type(type_id)
-    return {
+    name, name_en = _localized_type_name(row, locale)
+    block = {
         "type_id": type_id,
-        "name": (row or {}).get("name"),
+        "name": name,
         "group": (row or {}).get("group_name"),
     }
+    if locale == LOCALE_ZH:
+        block["name_en"] = name_en
+    return block
 
 
 def _module_counts(fit: dict) -> dict:
@@ -1276,6 +1330,7 @@ def parse_fit(
     skill_tier: str = SKILL_TIER_ALL4,
     damage_profile: str = DAMAGE_PROFILE_UNIFORM,
     state_policy: str = STATE_POLICY_ENGINE_DEFAULT,
+    locale: object = LOCALE_EN,
 ) -> dict:
     """把输入（EFT / DNA / killmail）归一化成结构，并回显「我读懂了什么」。
 
@@ -1284,6 +1339,10 @@ def parse_fit(
         skill_tier: `all4+min_required`（默认）/ `all5`。
         damage_profile: 只支持 `uniform`（见模块 docstring「已知边界」）。
         state_policy: 只支持 `engine_default`。
+        locale: `en`（默认）/ `zh`。`zh` 时 `ship.name` 给**官方中文**并多一个
+            `name_en`（英文原名，便于核对）；`en` 时返回体与以前**逐字节相同**。
+            **玩家 / 军团 / 联盟名永远不译**（那是人名，不是 SDE 类型）。
+            非 `en`/`zh` → `invalid_argument` + `field="locale"`。
 
     Returns:
         成功时 `result` 是：
@@ -1314,6 +1373,11 @@ def parse_fit(
         `engine/normalize.py` 模块 docstring 第 4 条）。
     """
 
+    try:
+        resolved_locale = _check_locale(locale)
+    except _ApiFailure as exc:
+        return _failure(exc.payload())
+
     def compute(ctx: ViewContext, parsed: dict) -> tuple[object, bool]:
         assumptions = ctx.assumptions if isinstance(ctx.assumptions, dict) else {}
         warnings = list(parsed.get("warnings") or [])
@@ -1331,7 +1395,7 @@ def parse_fit(
             "fit": parsed["fit"],
             "eft": eft_text,
             "warnings": warnings,
-            "ship": _ship_block(ctx),
+            "ship": _ship_block(ctx, locale=resolved_locale),
             "modules": _module_counts(parsed["fit"]),
             "skills": _skill_tier_block(
                 str(assumptions.get("skill_tier_name")),
@@ -1343,7 +1407,7 @@ def parse_fit(
     return _execute(
         "parse",
         fit,
-        (),
+        (resolved_locale,),
         skill_tier=skill_tier,
         damage_profile=damage_profile,
         state_policy=state_policy,
@@ -3050,17 +3114,24 @@ def fetch_killmail_report(
 # ---- 十二之二：战报块的组装（只整理，不判断）--------------------------------
 
 
-def _type_block(type_id: object, index: Index | None) -> dict:
-    """`type_id` → `{type_id, name, group}`（名字 / 组名走本地 SDE；查不到给 `null`）。"""
+def _type_block(type_id: object, index: Index | None, *, locale: str = LOCALE_EN) -> dict:
+    """`type_id` → `{type_id, name, group}`（名字 / 组名走本地 SDE；查不到给 `null`）。
+
+    `locale="zh"` 时 `name` 换成官方中文，并多一个 `name_en` 便于核对。
+    """
     identifier = _as_int(type_id)
     row = None
     if identifier is not None and index is not None:
         row = index.get_type(identifier)
-    return {
+    name, name_en = _localized_type_name(row, locale)
+    block = {
         "type_id": _as_int(type_id),
-        "name": (row or {}).get("name"),
+        "name": name,
         "group": (row or {}).get("group_name"),
     }
+    if locale == LOCALE_ZH:
+        block["name_en"] = name_en
+    return block
 
 
 # ---- 十二之一半：身份（驾驶员 / 军团 / 联盟）的名字解析 ------------------------
@@ -3271,6 +3342,8 @@ def _pilot_buckets(
     damage_total: int | None,
     index: Index | None,
     names: dict[int, str],
+    *,
+    locale: str = LOCALE_EN,
 ) -> list[dict]:
     """按**驾驶员**聚合 → `[{character, corporation, alliance, ship, damage, …}]`（伤害降序前 10）。
 
@@ -3289,7 +3362,7 @@ def _pilot_buckets(
         if bucket is None:
             bucket = grouped[key] = {
                 "identity": _identity_blocks(attacker, names),
-                "ship": _type_block(attacker.get("ship_type_id"), index),
+                "ship": _type_block(attacker.get("ship_type_id"), index, locale=locale),
                 "damage": 0,
                 "final_blow": None,
                 "security_status": None,
@@ -3328,6 +3401,8 @@ def _attacker_block(
     victim_damage: int | None,
     index: Index | None,
     names: dict[int, str],
+    *,
+    locale: str = LOCALE_EN,
 ) -> dict:
     """`attackers` 块：人数 / 有伤害人数 / 零伤害人数 / 蛋人数 / 总伤害 / 校验 / 三个分桶。"""
     damage_total = sum(_as_int(attacker.get("damage_done")) or 0 for attacker in attackers)
@@ -3351,8 +3426,8 @@ def _attacker_block(
             "character": _id_name_block(final.get("character_id"), names),
             "corporation": _id_name_block(final.get("corporation_id"), names),
             "alliance": _id_name_block(final.get("alliance_id"), names),
-            "ship": _type_block(final.get("ship_type_id"), index),
-            "weapon": _type_block(final.get("weapon_type_id"), index),
+            "ship": _type_block(final.get("ship_type_id"), index, locale=locale),
+            "weapon": _type_block(final.get("weapon_type_id"), index, locale=locale),
             "security_status": _as_float(final.get("security_status")),
         }
 
@@ -3372,7 +3447,7 @@ def _attacker_block(
         "damage_total": damage_total,
         "damage_check": damage_check,
         "final_blow": final_block,
-        "by_pilot": _pilot_buckets(attackers, damage_total, index, names),
+        "by_pilot": _pilot_buckets(attackers, damage_total, index, names, locale=locale),
         "by_ship_group": _buckets(
             attackers,
             lambda a: _type_block(a.get("ship_type_id"), index)["group"],
@@ -3468,6 +3543,7 @@ def _killmail_report(
     killmail_origin: str = KILLMAIL_ORIGIN_LOCAL,
     system_prefetched: "dict | None" = None,
     system_error: str | None = None,
+    locale: str = LOCALE_EN,
 ) -> dict:
     """原始 killmail + `ViewContext` + 批量查好的 `names` → `result`（形状见 `fit_killmail`）。
 
@@ -3505,7 +3581,7 @@ def _killmail_report(
             f"{untracked} 个攻击者的 weapon_type_id 与自己的 ship_type_id 相同"
             "（ESI 没有记录武器）：这些按 other 计入 by_weapon_family"
         )
-    attacker_block = _attacker_block(attackers, victim_damage, index, names)
+    attacker_block = _attacker_block(attackers, victim_damage, index, names, locale=locale)
     if attacker_block["capsule_count"]:
         warnings.append(
             CAPSULE_ATTACKER_WARNING.format(count=attacker_block["capsule_count"])
@@ -3514,7 +3590,7 @@ def _killmail_report(
         "killmail": _killmail_block(killmail, system),
         "victim": {
             "damage_taken": victim_damage,
-            "ship": _type_block(victim.get("ship_type_id"), index),
+            "ship": _type_block(victim.get("ship_type_id"), index, locale=locale),
             **_identity_blocks(victim, names),
         },
         "attackers": attacker_block,
@@ -3609,6 +3685,7 @@ def _execute_killmail(
     skill_tier: object,
     damage_profile: object,
     state_policy: object,
+    locale: str = LOCALE_EN,
 ) -> dict:
     """`fit_killmail` 的执行骨架（与 `_execute()` 同构，只是载荷是**原始 killmail**）。
 
@@ -3619,12 +3696,13 @@ def _execute_killmail(
     """
     try:
         _check_params(skill_tier, damage_profile, state_policy)
+        locale = _check_locale(locale)
 
         kind, content_key, payload = _killmail_descriptor(fit)
         cache_key = (
             None
             if content_key is None
-            else (KILLMAIL_OP, (), content_key, skill_tier, damage_profile, state_policy)
+            else (KILLMAIL_OP, (locale,), content_key, skill_tier, damage_profile, state_policy)
         )
         if cache_key is not None:
             hit = _cache_get(cache_key)
@@ -3684,6 +3762,7 @@ def _execute_killmail(
             killmail_origin=killmail_origin,
             system_prefetched=system_prefetch["info"],
             system_error=system_prefetch["error"],
+            locale=locale,
         )
         meta = _meta(
             ctx,
@@ -3717,6 +3796,7 @@ def fit_killmail(
     skill_tier: str = SKILL_TIER_ALL4,
     damage_profile: str = DAMAGE_PROFILE_UNIFORM,
     state_policy: str = STATE_POLICY_ENGINE_DEFAULT,
+    locale: object = LOCALE_EN,
 ) -> dict:
     """**战报上下文**：谁打的、损失多少、挨了多少伤害（一项都不是配装数值的复述）。
 
@@ -3729,6 +3809,10 @@ def fit_killmail(
         skill_tier: 同其它入口（只影响 `context.ehp_mixed`）。
         damage_profile: 只支持 `uniform`。
         state_policy: 只支持 `engine_default`。
+        locale: `en`（默认）/ `zh`。`zh` 时**所有 SDE 类型名**（`victim.ship`、
+            `attackers.final_blow.ship` / `.weapon`、`attackers.by_pilot[*].ship`）
+            给官方中文并多一个 `name_en`；**玩家 / 军团 / 联盟名永远不译**
+            （`_id_name_block` 走的是 ESI 名字，不是 SDE 类型）。
 
     Returns:
         成功时 `result` 是（形状固定）：
@@ -3818,6 +3902,7 @@ def fit_killmail(
         skill_tier=skill_tier,
         damage_profile=damage_profile,
         state_policy=state_policy,
+        locale=locale,
     )
 
 
@@ -5669,6 +5754,755 @@ def zkb_related(
         )
 
 
+# =============================================================================
+# 十六、名字反查（T-3/5）：`sde_search` —— 中英文都能搜的 SDE 类型检索
+# =============================================================================
+#
+# 为什么要有它：agent 经常只拿到用户口语里的名字（「损伤控制 II」/「vulcan 220」），
+# 不知道确切英文名就调不了 `fit_parse`（那是 EFT 口径）。本工具把「人类说法 → type_id」
+# 这件事变成本地一步，而不是让 agent 猜。
+#
+# 实测（本机索引库 noobbaozi-3607705.sqlite3）：
+#
+# - `types.name_zh` **53,288/53,288 全填**（占位类型也带中文，`CharacterType` 一族同理）；
+# - 四级检索：`"autocannon vulcan 220"` 前三级 **0 命中**、第四级（词全命中）命中
+#   `220mm Vulcan AutoCannon II`（2897）；
+# - `kind` 按 `groups.category_id` 过滤（Ship=6 / Module=7 / Charge=8）：
+#   `"Hawk"` → `kind=ship` 只有 `Hawk` / `Nighthawk`（涂装与蓝图被正确排除，**不靠名字猜**）。
+
+SDE_SEARCH_KIND_ALL: str = "all"
+"""`kind` 默认值：不过滤。"""
+
+SDE_SEARCH_KINDS: dict[str, tuple[int, ...]] = {
+    "ship": (6,),  # SDE category `Ship`
+    "module": (7,),  # `Module`
+    "charge": (8,),  # `Charge`
+}
+"""`kind` → SDE **category id**（`categories` 表实测：6 Ship / 7 Module / 8 Charge）。
+
+**按 category 过滤，不靠名字猜**：名字里带 `Hawk` 的还有涂装（SKINs）和蓝图（Blueprint），
+靠关键字筛会把它们当成船。
+"""
+
+SDE_SEARCH_LIMIT_DEFAULT: int = 10
+SDE_SEARCH_LIMIT_MAX: int = 50
+"""`limit` 的默认值与上限（上限 50：再多对 agent 没意义，只会把 context 撑爆）。"""
+
+SDE_SEARCH_DID_YOU_MEAN_CHARS: int = 4
+"""0 命中时把每个词截成前 N 字符再试（`autocannon vulcan 220` → `auto vulc 220`）。"""
+
+
+def _sde_kind_categories(kind: object) -> tuple[int, ...] | None:
+    """校验 `kind` → category id 元组（`all`/None → 不过滤）。
+
+    Raises:
+        _ApiFailure: `invalid_argument` + `field="kind"` + 合法取值。
+    """
+    if kind is None:
+        return None
+    if not isinstance(kind, str):
+        raise _ApiFailure(
+            "invalid_argument",
+            f"kind 必须是字符串，收到 {type(kind).__name__}",
+            field="kind",
+            hint={"allowed": [SDE_SEARCH_KIND_ALL, *SDE_SEARCH_KINDS]},
+        )
+    normalized = kind.strip().lower()
+    if normalized in ("", SDE_SEARCH_KIND_ALL):
+        return None
+    categories = SDE_SEARCH_KINDS.get(normalized)
+    if categories is None:
+        raise _ApiFailure(
+            "invalid_argument",
+            f"kind 只支持 {SDE_SEARCH_KIND_ALL} / {' / '.join(SDE_SEARCH_KINDS)}，收到 {kind!r}",
+            field="kind",
+            hint={"allowed": [SDE_SEARCH_KIND_ALL, *SDE_SEARCH_KINDS]},
+        )
+    return categories
+
+
+def _sde_match_rank(row: dict, needle: str) -> int:
+    """0 = 精确 / 1 = 前缀 / 2 = 其它（第四级或无命中前缀）。用于 `ambiguous` 判定。"""
+    lowered = needle.strip().lower()
+    for value in (row.get("name"), row.get("name_zh")):
+        if isinstance(value, str) and value.strip():
+            candidate = value.strip().lower()
+            if candidate == lowered:
+                return 0
+            if candidate.startswith(lowered):
+                return 1
+    return 2
+
+
+def _sde_match_row(row: dict, index: Index | None, locale: str) -> dict:
+    """一行 `TypeRow` → `sde_search` 的 match 形状（含 category 与三态无关的元信息）。"""
+    name, name_en = _localized_type_name(row, locale)
+    block = {
+        "type_id": row.get("type_id"),
+        "name": name,
+        "name_zh": row.get("name_zh"),
+        "group": row.get("group_name"),
+        "category": index.category_name(row.get("group_id")) if index else None,
+        "meta_level": row.get("meta_level"),
+        "published": row.get("published"),
+    }
+    if locale == LOCALE_ZH:
+        block["name_en"] = name_en
+    return block
+
+
+def sde_search(
+    query: object,
+    *,
+    kind: object = None,
+    limit: object = SDE_SEARCH_LIMIT_DEFAULT,
+    locale: object = LOCALE_EN,
+) -> dict:
+    """**名字反查**：自由文本（中英文都认）→ SDE 类型（`type_id` / 中英文名 / 组 / 类别）。
+
+    为什么需要它：agent 常只拿到用户口语里的名字（「损伤控制 II」/「vulcan 220」），
+    不知道确切英文名就调不了 `fit_parse`。本工具把「人类说法 → `type_id`」变成本地一步。
+
+    Args:
+        query: 自由文本。**中英文都认**、大小写不敏感、`%` / `_` 按**字面**匹配。
+            多词查询按「**每个词都出现**」（顺序不限）匹配 —— `"autocannon vulcan 220"`
+            能命中 `220mm Vulcan AutoCannon II`。
+            **纯数字**时按 `type_id` 精确查（拿到 id 后想知道中文名时用）。
+        kind: `all`（默认）/ `ship` / `module` / `charge`。按 SDE **category** 过滤
+            （6 / 7 / 8），**不靠名字猜** —— 名字带 `Hawk` 的还有涂装和蓝图，关键字筛会误判。
+            无人机 / 植入体等用 `kind=all`（本参数只覆盖这三类）。
+        limit: 1..50，默认 10。
+        locale: `en`（默认）/ `zh`。`zh` 时 `matches[].name` 是官方中文并多一个 `name_en`；
+            `name_zh` **两种 locale 都给**（它是「中文名」这个字段本身，不是 locale 的产物）。
+
+    Returns:
+        成功时 `result`：
+
+        ```json
+        {"query": "损伤控制",
+         "count": 3,
+         "matches": [{"type_id": 2048, "name": "Damage Control II",
+                      "name_zh": "损伤控制 II", "group": "Damage Control",
+                      "category": "Module", "meta_level": 5, "published": true}],
+         "ambiguous": false,
+         "notes": ["…"]}
+        ```
+
+        - **`ambiguous: true`** = 有多于一个候选是**精确或前缀**命中 → 该追问用户，别挑第一个；
+        - **0 命中**时给 `did_you_mean`（每个词截前 4 字符重试的结果，显式标注「近似结果，非精确」）；
+        - `notes` 至少三条口径（中文名来源 / kind 口径 / ambiguous 语义）。
+
+    失败时 `error.kind` ∈ `invalid_argument`（`query` 空、`kind` 非法、`locale` 非法、
+    `limit` 越界）/ `index_unavailable`（索引库没就绪）。
+    """
+    try:
+        index = get_index()
+        if not isinstance(query, str) or not query.strip():
+            raise _ApiFailure(
+                "invalid_argument",
+                "query 必须是非空字符串（中英文都行，如 '损伤控制' 或 'Damage Control II'）",
+                field="query",
+                hint={"examples": ["损伤控制", "Damage Control II", "autocannon vulcan 220"]},
+            )
+        needle = query.strip()
+        resolved_kind = _sde_kind_categories(kind)
+        resolved_locale = _check_locale(locale)
+        resolved_limit = _zkb_integer(
+            "limit",
+            limit,
+            default=SDE_SEARCH_LIMIT_DEFAULT,
+            minimum=1,
+            maximum=SDE_SEARCH_LIMIT_MAX,
+        )
+        kind_label = SDE_SEARCH_KIND_ALL if resolved_kind is None else next(
+            name for name, ids in SDE_SEARCH_KINDS.items() if ids == resolved_kind
+        )
+        meta = {
+            "spec_version": SPEC_VERSION,
+            "kind": kind_label,
+            "locale": resolved_locale,
+            "limit": resolved_limit,
+            "note": "sde_search 只查本地 SDE 索引，不联网",
+        }
+
+        # 纯数字 → 按 type_id 精确查（拿到 id 想知道中文名 / 类别时用）。
+        if needle.isdigit():
+            row = index.get_type(int(needle))
+            matches = [] if row is None else [_sde_match_row(dict(row), index, resolved_locale)]
+            return _success(
+                {
+                    "query": needle,
+                    "count": len(matches),
+                    "matches": matches,
+                    "ambiguous": False,
+                    "notes": [
+                        f"query 是纯数字 → 按 type_id={int(needle)} 精确查（不是名字检索）。",
+                        "中文名来自 SDE `types.name_zh`（本机索引 53,288/53,288 全填）。",
+                        "id 不存在时 count=0 —— **不是**名字没匹配到，别混淆。",
+                    ],
+                },
+                meta,
+            )
+
+        rows = index.search_types(needle, resolved_limit, category_ids=resolved_kind)
+        matches = [_sde_match_row(dict(row), index, resolved_locale) for row in rows]
+        ranks = [_sde_match_rank(dict(row), needle) for row in rows]
+        prefix_hits = sum(1 for rank in ranks if rank <= 1)
+        ambiguous = prefix_hits > 1
+
+        notes = [
+            "中文名来自 SDE `types.name_zh`（官方译名，不是机翻）；`name` 随 locale，"
+            "`name_zh` 两种 locale 都给。",
+            "`kind` 按 SDE category 过滤（ship=6 / module=7 / charge=8），**不靠名字猜**："
+            "名字里带 `Hawk` 的还有涂装（SKINs）与蓝图（Blueprint），关键字筛会把它们当船。"
+            "无人机 / 植入体等本参数不覆盖，用 `kind=all`。",
+        ]
+        if ambiguous:
+            notes.append(
+                f"**ambiguous: true** —— {prefix_hits} 个候选都是精确/前缀命中，"
+                "该追问用户是哪一个，别挑第一个。"
+            )
+        if len(matches) >= resolved_limit:
+            notes.append(
+                f"结果达到 limit={resolved_limit}，**可能还有更多**：调大 limit 或用更具体的词。"
+            )
+
+        suggestion: dict | None = None
+        if not matches:
+            retry = " ".join(
+                word[:SDE_SEARCH_DID_YOU_MEAN_CHARS] for word in needle.lower().split()
+            )
+            if retry and retry != needle.lower():
+                retry_rows = index.search_types(
+                    retry, resolved_limit, category_ids=resolved_kind
+                )
+                if retry_rows:
+                    suggestion = {
+                        "query": retry,
+                        "count": len(retry_rows),
+                        "matches": [
+                            _sde_match_row(dict(row), index, resolved_locale)
+                            for row in retry_rows
+                        ],
+                        "note": "近似结果，非精确 —— 用户说的可能不是这些，别直接当答案。",
+                    }
+        if not matches:
+            if suggestion is not None:
+                notes.append(
+                    f"0 命中：把每个词截到 {SDE_SEARCH_DID_YOU_MEAN_CHARS} 字符重试才有结果，"
+                    "见 did_you_mean（**近似结果，非精确**）。"
+                )
+            else:
+                notes.append(
+                    "0 命中：连「每词截 4 字符」的近似重试也没有结果 —— "
+                    "这个名字可能不在 SDE 里（拼错 / 是外号 / 是玩家名，不是类型名）。"
+                )
+
+        result = {
+            "query": needle,
+            "count": len(matches),
+            "matches": matches,
+            "ambiguous": ambiguous,
+            "notes": notes,
+        }
+        if suggestion is not None:
+            result["did_you_mean"] = suggestion
+        return _success(result, meta)
+    except _ApiFailure as exc:
+        return _failure(exc.payload())
+    except Exception as exc:  # noqa: BLE001 - 边界层：任何异常都不得裸抛给 agent
+        return _failure(
+            {
+                "kind": "internal_error",
+                "message": "接口层内部异常，本次没有可用结果",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+        )
+
+
+# =============================================================================
+# 十七、类型详情与可装性（T-4/5）：`sde_type` + `can_fit`
+# =============================================================================
+#
+# 数据来自 v2 索引库的 dogma 表（`type_attributes` / `type_effects` / `effects` /
+# `type_bonuses` / `buffs`）。**本层只查、不换算**：SDE 原值进出，单位名照抄。
+#
+# 实测锚点（type 4403 Reactive Armor Hardener，已写进测试）：
+#   armorEmDamageResonance(267)=0.85 · duration(73)=10000 · resistanceShiftAmount(1849)=6.0
+#   maxGroupFitted(1544)=1 · maxGroupActive(763)=1 · effect 4928=adaptiveArmorHardener
+
+SDE_TYPE_ATTRIBUTES_DEFAULT: int = 60
+"""`sde_type` 默认最多给几条属性（SDE 里有的类型有 200+ 条，全给会把 context 撑爆）。"""
+
+SDE_TYPE_ATTRIBUTES_MAX: int = 300
+"""`limit_attributes` 上限。"""
+
+SDE_TYPE_INCLUDE_ALL: str = "all"
+"""`include="all"` = 连「值是 0 且没有中文名」的噪声属性也给。"""
+
+SDE_TYPE_REQUIRED_SKILL_ATTRS: tuple[tuple[int, int], ...] = (
+    (182, 277),  # requiredSkill1 / requiredSkill1Level
+    (183, 278),
+    (184, 279),
+    (185, 280),
+    (186, 281),
+    (187, 282),
+)
+"""`(requiredSkillN, requiredSkillNLevel)` 的属性 id —— 六级，SDE 的上限就是 6。"""
+
+SDE_TYPE_LIMIT_ATTRS: dict[str, int] = {
+    "max_group_fitted": 1544,
+    "max_group_active": 763,
+    "charge_group": 604,  # chargeGroup1（2/3/4 取第一个非零的）
+}
+"""`limits` 用到的属性 id（按 id 取，不按名字匹配 —— 名字在 SDE 里可能改）。"""
+
+CAN_FIT_PROBE_FIT_NAME: str = "noobbaozi-can_fit-probe"
+"""探针配装的 EFT 标题（只是给人看的，不参与计算）。"""
+
+CAN_FIT_ASSUMPTIONS: tuple[str, ...] = (
+    "技能档 all4+min_required（全部已发布技能 4 级，再按模块要求补高）",
+    "探针配装：只有这艘船 + 这一个模块，`quantity=1`",
+    "**不含已装模块的挤占** —— 真实配装里 CPU/PG 已被别的东西吃掉，可能更紧",
+)
+
+
+def _resolve_probe_type(value: object, field: str, *, kind: str) -> dict:
+    """`type_id` 或名字 → TypeRow（`can_fit` 的船 / 模块解析）。
+
+    Raises:
+        _ApiFailure: `invalid_argument`（查不到 / 有歧义），带 `field` 与候选。
+    """
+    index = get_index()
+    identifier = _as_int(value) if not isinstance(value, bool) else None
+    if identifier is not None:
+        row = index.get_type(identifier)
+        if row is None:
+            raise _ApiFailure(
+                "invalid_argument",
+                f"{field} 的 type_id={identifier} 不在 SDE 里",
+                field=field,
+                hint={"tip": "用 sde_search 先查名字"},
+            )
+        return dict(row)
+    if isinstance(value, str) and value.strip():
+        needle = value.strip()
+        rows = index.search_types(needle, 5)
+        exact = [
+            row for row in rows
+            if str(row.get("name", "")).casefold() == needle.casefold()
+            or str(row.get("name_zh") or "").casefold() == needle.casefold()
+        ]
+        chosen = exact[0] if len(exact) == 1 else (rows[0] if len(rows) == 1 else None)
+        if chosen is None:
+            raise _ApiFailure(
+                "invalid_argument",
+                f"{field} 认不出唯一类型：{needle!r}"
+                + (f"（{len(rows)} 个候选）" if rows else "（0 命中）"),
+                field=field,
+                hint={
+                    "candidates": [
+                        {"type_id": row.get("type_id"), "name": row.get("name"),
+                         "name_zh": row.get("name_zh")}
+                        for row in rows[:5]
+                    ],
+                    "tip": "先用 sde_search 把名字落实成 type_id，再传整数 id",
+                },
+            )
+        return dict(chosen)
+    raise _ApiFailure(
+        "invalid_argument",
+        f"{field} 必须是 type_id（整数）或名字（字符串），收到 {type(value).__name__}",
+        field=field,
+    )
+
+
+def _sde_int(value: object) -> int | None:
+    """SDE 的 id 类属性值常以 **REAL** 存（`182.0`）—— `_as_int()` 只收 `int`，会静默丢。
+
+    这个助手接受「整数值的 int/float」，其余 `None`（不猜、不四舍五入）。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return int(number) if number.is_integer() else None
+
+
+def _sde_type_noise(row: dict) -> bool:
+    """「噪声属性」判据：值为 0 **且** 没有中文名 **且** 没有英文 display_name。
+
+    默认过滤它们（SDE 里大量 `_unused` / 内部占位属性，值是 0、名字是内部标识符）；
+    `include="all"` 时不过滤。
+    """
+    value = row.get("value")
+    is_zero = not isinstance(value, (int, float)) or float(value) == 0.0
+    has_zh = bool(str(row.get("display_name_zh") or "").strip())
+    return is_zero and not has_zh
+
+
+def sde_type(
+    query: object,
+    *,
+    locale: object = LOCALE_ZH,
+    include: object = None,
+    limit_attributes: object = None,
+) -> dict:
+    """**类型详情**：属性 + effect + 装配限制 + 技能要求 + 船体加成（SDE dogma 原值）。
+
+    想知道「这个模块到底有哪些属性 / 值是多少 / 怎么装 / 要什么技能 / 船有什么加成」时用它。
+    `query` 可以是 `type_id` 或名字（名字走与 `sde_search` 同一套检索，**有歧义就报错不猜**）。
+
+    Args:
+        query: `type_id`（整数或纯数字串）或名字（中英文都认）。
+        locale: `zh`（默认，属性名 / 组名给官方中文）/ `en`。
+        include: `"all"` = 连噪声属性一起给；默认只给「值非 0 或 有中文名」的。
+        limit_attributes: 最多几条属性，默认 60、上限 300；被截时 `truncated.attributes=true`。
+
+    Returns:
+        ```json
+        {"type": {"id", "name", "name_zh", "group", "category", "meta_level", "published", "volume"},
+         "attributes": [{"id", "name", "name_zh", "value", "unit"}],
+         "effects": [{"id", "name", "name_zh", "duration_ms"}],
+         "limits": {"max_group_fitted", "max_group_active", "slot", "charge_group"},
+         "required_skills": [{"skill", "skill_id", "level"}],
+         "bonuses": [{"skill", "text", "value", "kind"}],
+         "truncated": {"attributes": false, "shown": 0, "total": 0},
+         "notes": ["…"]}
+        ```
+
+        `attributes[].value` 是 **SDE 原值**（毫秒还是毫秒，不换算）；`unit` 是 SDE 的量纲名。
+    """
+    try:
+        index = get_index()
+        resolved_locale = _check_locale(locale)
+        row = _resolve_probe_type(query, "query", kind="type")
+        type_id = int(row["type_id"])
+
+        default_limit = SDE_TYPE_ATTRIBUTES_DEFAULT
+        limit = _zkb_integer(
+            "limit_attributes",
+            default_limit if limit_attributes is None else limit_attributes,
+            default=default_limit,
+            minimum=1,
+            maximum=SDE_TYPE_ATTRIBUTES_MAX,
+        )
+        include_all = isinstance(include, str) and include.strip().lower() == SDE_TYPE_INCLUDE_ALL
+        if include is not None and not include_all:
+            raise _ApiFailure(
+                "invalid_argument",
+                f'include 只支持 "{SDE_TYPE_INCLUDE_ALL}"（或不给），收到 {include!r}',
+                field="include",
+                hint={"allowed": [None, SDE_TYPE_INCLUDE_ALL]},
+            )
+
+        raw_attributes = index.type_attributes(type_id)
+        kept = raw_attributes if include_all else [r for r in raw_attributes if not _sde_type_noise(r)]
+        shown = kept[:limit]
+
+        def pick(name: str) -> float | None:
+            for item in raw_attributes:
+                if item.get("name") == name:
+                    value = item.get("value")
+                    return value if isinstance(value, (int, float)) else None
+            return None
+
+        by_attribute_id = {item.get("attribute_id"): item for item in raw_attributes}
+        attributes = [
+            {
+                "id": item.get("attribute_id"),
+                "name": item.get("name"),
+                "name_zh": item.get("display_name_zh"),
+                "value": item.get("value"),
+                "unit": item.get("unit"),
+            }
+            for item in shown
+        ]
+
+        effects = []
+        for effect in index.type_effects(type_id):
+            duration_id = effect.get("duration_attribute_id")
+            duration_value = by_attribute_id.get(duration_id, {}).get("value")
+            effects.append(
+                {
+                    "id": effect.get("effect_id"),
+                    "name": effect.get("name"),
+                    "name_zh": effect.get("display_name_zh"),
+                    # 库里是 SDE 原值（毫秒），字段名写明单位，免得被当秒读
+                    "duration_ms": duration_value if isinstance(duration_value, (int, float)) else None,
+                }
+            )
+
+        limits = {
+            "max_group_fitted": pick("maxGroupFitted"),
+            "max_group_active": pick("maxGroupActive"),
+            "slot": pick("slot") if pick("slot") is not None else None,
+            "charge_group": next(
+                (
+                    value
+                    for value in (pick("chargeGroup1"), pick("chargeGroup2"), pick("chargeGroup3"))
+                    if value
+                ),
+                None,
+            ),
+        }
+
+        required_skills = []
+        for skill_attr, level_attr in SDE_TYPE_REQUIRED_SKILL_ATTRS:
+            skill_row = by_attribute_id.get(skill_attr)
+            if skill_row is None:
+                continue
+            skill_id = _sde_int(skill_row.get("value"))
+            level_row = by_attribute_id.get(level_attr)
+            level = _sde_int(level_row.get("value")) if level_row else None
+            skill_name = None
+            skill_name_zh = None
+            if skill_id is not None:
+                skill_type = index.get_type(skill_id)
+                if skill_type is not None:
+                    skill_name = skill_type.get("name")
+                    skill_name_zh = skill_type.get("name_zh")
+            required_skills.append(
+                {
+                    "skill": skill_name_zh if resolved_locale == LOCALE_ZH and skill_name_zh else skill_name,
+                    "skill_id": skill_id,
+                    "level": level,
+                    "name_en": skill_name,
+                }
+            )
+
+        bonuses = []
+        for bonus in index.type_bonuses(type_id):
+            text = bonus.get("text_zh") if resolved_locale == LOCALE_ZH else bonus.get("text_en")
+            skill_label = bonus.get("skill_name_zh") if resolved_locale == LOCALE_ZH else bonus.get("skill_name")
+            bonuses.append(
+                {
+                    "skill": skill_label or bonus.get("skill_name"),
+                    "skill_id": bonus.get("skill_type_id"),
+                    "value": bonus.get("value"),
+                    "kind": bonus.get("bonus_type"),
+                    "text": text or bonus.get("text_en"),
+                }
+            )
+
+        notes = [
+            "属性值 / 单位都是 **SDE 原值**（`duration` 这类是毫秒，本层不换算）。",
+            f"默认只给「值非 0 或 有中文名」的属性（过滤掉 {len(raw_attributes) - len(kept)} 条噪声）；"
+            f'要全量传 include="{SDE_TYPE_INCLUDE_ALL}"。',
+            "`bonuses` 里 `kind=type` 是**每级**加成（值 = 每级 +N，**没乘技能等级**）；"
+            "`kind=role` 是角色加成、不挂技能。",
+        ]
+        if not bonuses:
+            notes.append("SDE 的 typeBonus 里没有这个类型的加成条目（不是我们丢了）。")
+
+        result = {
+            "type": {
+                "id": type_id,
+                "name": row.get("name") if resolved_locale == LOCALE_EN else (row.get("name_zh") or row.get("name")),
+                "name_zh": row.get("name_zh"),
+                "group": row.get("group_name"),
+                "category": index.category_name(row.get("group_id")),
+                "meta_level": row.get("meta_level"),
+                "published": row.get("published"),
+                "volume": row.get("volume"),
+            },
+            "attributes": attributes,
+            "effects": effects,
+            "limits": limits,
+            "required_skills": required_skills,
+            "bonuses": bonuses,
+            "truncated": {
+                "attributes": len(kept) > limit,
+                "shown": len(shown),
+                "total": len(kept),
+            },
+            "notes": notes,
+        }
+        if resolved_locale == LOCALE_ZH:
+            result["type"]["name_en"] = row.get("name")
+        return _success(
+            result,
+            {
+                "spec_version": SPEC_VERSION,
+                "locale": resolved_locale,
+                "schema_version": "2",
+                "note": "sde_type 只查本地 SDE 索引（v2 dogma 表），不联网",
+            },
+        )
+    except _ApiFailure as exc:
+        return _failure(exc.payload())
+    except Exception as exc:  # noqa: BLE001 - 边界层：任何异常都不得裸抛给 agent
+        return _failure(
+            {
+                "kind": "internal_error",
+                "message": "接口层内部异常，本次没有可用结果",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+        )
+
+
+def _can_fit_blocker(violation: dict, locale: str) -> dict:
+    """引擎违规 → `{kind, detail}`（**认识的就翻译，不认识的原样透传 kind**）。"""
+    rule = violation.get("rule") if isinstance(violation.get("rule"), dict) else {}
+    kind = rule.get("type")
+    target = violation.get("target") if isinstance(violation.get("target"), dict) else {}
+    if kind == "resource":
+        resource = rule.get("resource")
+        used = rule.get("used")
+        available = rule.get("available")
+        name = {"cpu": "CPU", "powergrid": "能量栅格", "calibration": "校准值"}.get(
+            str(resource), str(resource)
+        )
+        detail = f"{name}不足：需要 {used}，可用 {available}"
+        return {"kind": "resource", "resource": resource, "used": used,
+                "available": available, "detail": detail}
+    if kind == "skill":
+        skill_id = rule.get("type_id")
+        required = rule.get("required")
+        skill_name = None
+        if isinstance(skill_id, int):
+            row = get_index().get_type(skill_id)
+            if row is not None:
+                skill_name = (
+                    row.get("name_zh") if locale == LOCALE_ZH and row.get("name_zh") else row.get("name")
+                )
+        detail = f"技能不足：{(skill_name or skill_id)} 需要 {required} 级"
+        return {"kind": "skill", "skill": skill_name, "skill_id": skill_id,
+                "required": required, "detail": detail}
+    if kind == "capital_item":
+        return {
+            "kind": "capital_item",
+            "detail": "这是旗舰级装备，普通舰船装不上",
+            "target": target,
+        }
+    # 不认识的规则：**原样透传**，不编中文
+    return {"kind": kind, "detail": None, "rule": rule, "target": target}
+
+
+def can_fit(
+    ship: object,
+    module: object,
+    *,
+    locale: object = LOCALE_EN,
+    skill_tier: str = SKILL_TIER_ALL4,
+) -> dict:
+    """**「这船能装这个吗」**：探针配装 → 引擎 `validate` → 把违规翻成可读原因。
+
+    做法（**假设写在返回的 `assumptions` 里，别当成真实配装结论**）：
+    拼一条只含「这艘船 + 这一个模块」的 EFT，走引擎的归一化 + 校验，
+    再把 `violations` 翻成中文；引擎给的规则类型我们不认识时**原样透传 kind**（不编）。
+
+    Args:
+        ship: 船（`type_id` 或名字）。名字走 SDE 检索，**有歧义就报错不猜**。
+        module: 模块（`type_id` 或名字）。
+        locale: `en`（默认）/ `zh` —— 影响 `blockers.detail` 与技能名。
+        skill_tier: 技能档（默认 all4+min_required）。
+
+    Returns:
+        ```json
+        {"fits": false,
+         "blockers": [{"kind": "resource", "resource": "powergrid",
+                       "used": 125000.0, "available": 56.25,
+                       "detail": "能量栅格不足：需要 125000.0，可用 56.25"}],
+         "remaining": {"cpu": 40.0, "powergrid": -124943.75, "calibration": 400.0},
+         "slot_used": "high",
+         "assumptions": ["技能档 all4+min_required（…）", "探针配装：…", "不含已装模块的挤占…"],
+         "notes": ["…"]}
+        ```
+
+        `remaining` 是**探针配装**的余量（负数 = 超了），不是真实配装的余量。
+    """
+    try:
+        _check_params(skill_tier, DAMAGE_PROFILE_UNIFORM, STATE_POLICY_ENGINE_DEFAULT)
+        resolved_locale = _check_locale(locale)
+        ship_row = _resolve_probe_type(ship, "ship", kind="ship")
+        module_row = _resolve_probe_type(module, "module", kind="module")
+        if ship_row.get("type_id") == module_row.get("type_id"):
+            raise _ApiFailure(
+                "invalid_argument",
+                "ship 与 module 是同一个类型 —— 装不了，也不该拿它当探针",
+                field="module",
+            )
+
+        eft = f"[{ship_row.get('name')}, {CAN_FIT_PROBE_FIT_NAME}]\n{module_row.get('name')}\n"
+        resources_envelope = fit_index(eft, skill_tier=skill_tier)
+        if resources_envelope.get("ok") is not True:
+            error = resources_envelope.get("error") or {}
+            raise _ApiFailure(
+                "invalid_argument",
+                f"这条探针配装引擎读不懂：{error.get('message')}",
+                field="module",
+                hint={"probe_eft": eft, "engine_kind": error.get("kind")},
+            )
+        resources = resources_envelope["result"].get("resources") or {}
+
+        def free_of(name: str) -> object:
+            block = resources.get(name)
+            return block.get("free") if isinstance(block, dict) else None
+
+        parsed = _parsed_fit({"text": eft})
+        ctx = _context(parsed["fit"], str(skill_tier))
+        violations = get_engine().validate(
+            {**parsed["fit"], "character": {"skills": ctx.assumptions["skill_tier"]}}
+        )
+        blockers = [
+            _can_fit_blocker(violation, resolved_locale)
+            for violation in violations
+            if isinstance(violation, dict)
+        ]
+        items = parsed["fit"].get("items") or []
+        slot_used = None
+        if items and isinstance(items[0].get("slot"), dict):
+            slot_used = items[0]["slot"].get("type")
+
+        notes = [
+            "`fits: true` 只代表**这个探针配装**装得下 —— 真实配装里 CPU/PG 已被别的东西吃掉，"
+            "可能装不下；反过来 `fits: false` 的 `blockers` 是确定的。",
+        ]
+        if not blockers:
+            notes.append("没有违规：引擎对这艘船 + 这一个模块的组合没有报任何问题。")
+        unknown = [b["kind"] for b in blockers if b.get("detail") is None]
+        if unknown:
+            notes.append(
+                f"有 {len(unknown)} 条违规我们**不认识**（{unknown}）—— 已原样透传 `rule`，没有翻译。"
+            )
+        return _success(
+            {
+                "ship": {"type_id": ship_row.get("type_id"),
+                         "name": ship_row.get("name_zh") if resolved_locale == LOCALE_ZH else ship_row.get("name"),
+                         "name_en": ship_row.get("name")},
+                "module": {"type_id": module_row.get("type_id"),
+                           "name": module_row.get("name_zh") if resolved_locale == LOCALE_ZH else module_row.get("name"),
+                           "name_en": module_row.get("name")},
+                "fits": not blockers,
+                "blockers": blockers,
+                "remaining": {
+                    "cpu": free_of("cpu"),
+                    "powergrid": free_of("powergrid"),
+                    "calibration": free_of("calibration"),
+                },
+                "slot_used": slot_used,
+                "assumptions": list(CAN_FIT_ASSUMPTIONS),
+                "notes": notes,
+            },
+            {
+                "spec_version": SPEC_VERSION,
+                "locale": resolved_locale,
+                "probe_eft": eft,
+                "note": "can_fit 走本地引擎 + 本地 SDE，不联网",
+            },
+        )
+    except _ApiFailure as exc:
+        return _failure(exc.payload())
+    except Exception as exc:  # noqa: BLE001 - 边界层：任何异常都不得裸抛给 agent
+        return _failure(
+            {
+                "kind": "internal_error",
+                "message": "接口层内部异常，本次没有可用结果",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+        )
+
+
 __all__ = [
     "BY_PILOT_ROWS",
     "CACHE_MAX_ENTRIES",
@@ -5694,9 +6528,17 @@ __all__ = [
     "KILLMAIL_ORIGIN_LOCAL",
     "KILLMAIL_ORIGIN_ZKILLBOARD",
     "LOWSEC_THRESHOLD",
+    "LOCALE_EN",
+    "LOCALE_ZH",
+    "LOCALES",
     "NETWORK_TIMEOUT_S",
     "NOT_A_KILLMAIL_KIND",
     "PROJECT_STRICT_STATE_DEFAULT",
+    "SDE_SEARCH_DID_YOU_MEAN_CHARS",
+    "SDE_SEARCH_KINDS",
+    "SDE_SEARCH_KIND_ALL",
+    "SDE_SEARCH_LIMIT_DEFAULT",
+    "SDE_SEARCH_LIMIT_MAX",
     "SECURITY_BAND_HIGHSEC",
     "SECURITY_BAND_LOWSEC",
     "SECURITY_BAND_NULLSEC",
@@ -5772,6 +6614,7 @@ __all__ = [
     "get_index",
     "killmail_ref_from_url",
     "parse_fit",
+    "sde_search",
     "universe_names",
     "universe_system",
     "weapon_family",

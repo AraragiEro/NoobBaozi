@@ -141,6 +141,7 @@ def test_search_returns_contract_typed_rows(ix: Index) -> None:
     assert set(row) == {
         "type_id",
         "name",
+        "name_zh",
         "group_id",
         "group_name",
         "meta_level",
@@ -309,6 +310,7 @@ def test_modes_rows_use_type_row_contract(ix: Index) -> None:
         assert set(mode) == {
             "type_id",
             "name",
+            "name_zh",
             "group_id",
             "group_name",
             "meta_level",

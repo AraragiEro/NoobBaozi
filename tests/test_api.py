@@ -4705,3 +4705,198 @@ def test_zkb_related_passes_numbers_through() -> None:
     )
     assert row["damage_taken"] == 0.5
     assert row["attacker_count"] == 2.5
+
+
+# =============================================================================
+# 七、名字反查（T-3/5）：`sde_search` + `locale`
+# =============================================================================
+
+def test_sde_search_finds_a_module_by_chinese_name() -> None:
+    """中文名检索：`损伤控制` 首位必须是 `Damage Control II`（2048），且带全套元信息。"""
+    envelope = api.sde_search("损伤控制")
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    assert result["count"] > 0
+    first = result["matches"][0]
+    assert first["type_id"] == 2048, f"首位不是 Damage Control II：{first}"
+    assert first["name"] == "Damage Control II"
+    assert first["name_zh"] == "损伤控制 II", "name_zh 必须直接来自 SDE（不是机翻）"
+    assert first["group"] == "Damage Control"
+    assert first["category"] == "Module", "category 必须按 SDE category 取，不能靠名字猜"
+    assert first["meta_level"] == 5
+    assert first["published"] is True
+
+
+def test_sde_search_chinese_lookup_is_not_vacuous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**配对证明**：把 `name_zh` 从输出里摘掉（模拟 SELECT 漏了它），上一条必须不成立。"""
+    original = api._sde_match_row
+
+    def without_zh(row: dict, index: object, locale: str) -> dict:
+        block = original(row, index, locale)
+        block["name_zh"] = None
+        return block
+
+    monkeypatch.setattr(api, "_sde_match_row", without_zh)
+    envelope = api.sde_search("损伤控制")
+    assert all(match["name_zh"] is None for match in envelope["result"]["matches"])
+
+
+def test_sde_search_fourth_tier_ignores_word_order() -> None:
+    """第四级：query 的**每个词都出现**（顺序不限）—— 前三级这条是 0 命中。"""
+    first = api.sde_search("autocannon vulcan 220")
+    assert first["ok"] is True, first
+    matches = first["result"]["matches"]
+    assert matches, "第四级没生效：'autocannon vulcan 220' 应该命中 220mm Vulcan AutoCannon II"
+    assert matches[0]["type_id"] == 2897
+    ordered = [match["type_id"] for match in matches]
+
+    # 换词序 → 同一批（顺序无关是关键，按短语包含做不到）
+    shuffled = api.sde_search("vulcan 220 autocannon")
+    assert [match["type_id"] for match in shuffled["result"]["matches"]] == ordered
+
+
+def test_sde_search_kind_filters_by_category_not_by_name() -> None:
+    """`kind` 按 SDE **category** 过滤：名字带 `Hawk` 的涂装 / 蓝图不许混进 `ship`。"""
+    ships = api.sde_search("Hawk", kind="ship")
+    assert ships["ok"] is True
+    matches = ships["result"]["matches"]
+    assert matches, "kind=ship 应该命中 Hawk"
+    assert all(match["category"] == "Ship" for match in matches), (
+        f"kind=ship 里混进了非 Ship：{[(m['name'], m['category']) for m in matches]}"
+    )
+    assert 11379 in {match["type_id"] for match in matches}, "Hawk(11379) 必须在"
+    # 涂装 / 蓝图确实存在，但被 category 挡掉了 —— 说明过滤是真在起作用
+    all_kinds = api.sde_search("Hawk", kind="all")
+    assert any(match["category"] == "SKINs" for match in all_kinds["result"]["matches"])
+
+    modules = api.sde_search("Hawk", kind="module")
+    assert modules["result"]["count"] == 0, "Hawk 不是模块，kind=module 必须为空"
+
+
+def test_sde_search_reports_ambiguity() -> None:
+    """多个候选都是精确/前缀命中 → `ambiguous: true`；无精确/前缀命中 → false。"""
+    ambiguous = api.sde_search("Hawk", limit=20)
+    assert ambiguous["result"]["ambiguous"] is True, (
+        "Hawk / Hawk Blueprint / Hawk SKIN… 都是前缀命中，必须报 ambiguous"
+    )
+    single = api.sde_search("autocannon vulcan 220")
+    assert single["result"]["ambiguous"] is False, (
+        "这批只有第四级命中（没有精确/前缀），不该报 ambiguous"
+    )
+
+
+def test_sde_search_offers_did_you_mean_on_zero_hits() -> None:
+    """0 命中时把每个词截前 4 字符重试，结果放 `did_you_mean` 并标注「非精确」。"""
+    envelope = api.sde_search("autocannonn vulcann 220mm")
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    assert result["count"] == 0, f"拼错的名字不该有精确命中：{result['matches']}"
+    suggestion = result.get("did_you_mean")
+    assert suggestion is not None, f"0 命中应给 did_you_mean：{result}"
+    assert suggestion["query"] != result["query"]
+    assert "非精确" in suggestion["note"], "近似结果必须显式标注「非精确」"
+    assert any(match["type_id"] == 2897 for match in suggestion["matches"])
+
+    # 连近似都没有 → 不编 `did_you_mean`
+    nothing = api.sde_search("zzzznotathing")
+    assert nothing["result"]["count"] == 0
+    assert "did_you_mean" not in nothing["result"]
+
+
+def test_sde_search_treats_a_numeric_query_as_type_id() -> None:
+    """纯数字 query 按 `type_id` 精确查（拿到 id 想知道中文名 / 类别时用）。"""
+    envelope = api.sde_search("2048")
+    assert envelope["ok"] is True, envelope
+    matches = envelope["result"]["matches"]
+    assert len(matches) == 1 and matches[0]["type_id"] == 2048
+    assert matches[0]["name_zh"] == "损伤控制 II"
+
+    missing = api.sde_search("999999999")
+    assert missing["result"]["count"] == 0
+
+
+def test_sde_search_validates_its_arguments() -> None:
+    """`query` 空 / `kind` 非法 / `limit` 越界 / `locale` 非法 → `invalid_argument` + `field`。"""
+    cases = (
+        ({"query": ""}, "query"),
+        ({"query": "   "}, "query"),
+        ({"query": 123}, "query"),
+        ({"query": "Hawk", "kind": "drone"}, "kind"),
+        ({"query": "Hawk", "limit": 0}, "limit"),
+        ({"query": "Hawk", "limit": 999}, "limit"),
+        ({"query": "Hawk", "locale": "zh-CN"}, "locale"),
+    )
+    for kwargs, field in cases:
+        envelope = api.sde_search(**kwargs)
+        assert envelope["ok"] is False, (kwargs, envelope)
+        error = envelope["error"]
+        assert error["kind"] == "invalid_argument", (kwargs, error)
+        assert error["field"] == field, (kwargs, error)
+
+
+def test_locale_translates_type_names_but_never_people(eft_text: str) -> None:
+    """`locale="zh"`：船名给官方中文 + `name_en`；**玩家 / 军团 / 联盟名永远不译**。"""
+    api.clear_caches()
+    english = api.parse_fit(eft_text)["result"]
+    api.clear_caches()
+    chinese = api.parse_fit(eft_text, locale="zh")["result"]
+
+    assert english["ship"]["name"] == "Hecate"
+    assert "name_en" not in english["ship"], "locale=en 不许凭空多出 name_en（向后兼容）"
+    assert chinese["ship"]["name"] == "赫卡特级", f"中文船名不对：{chinese['ship']}"
+    assert chinese["ship"]["name_en"] == "Hecate"
+
+    killmail_text = (
+        NOOBBAOZI_ROOT / "tests" / "fixtures" / "killmail" / "139239127-zkb.json"
+    ).read_text(encoding="utf-8-sig")
+    api.clear_caches()
+    killmail = api.fit_killmail(killmail_text, locale="zh")["result"]
+    assert killmail["victim"]["ship"]["name"] == "萨拉希尔"
+    assert killmail["victim"]["ship"]["name_en"] == "Sarathiel"
+    weapon = killmail["attackers"]["final_blow"]["weapon"]
+    assert weapon["name"] == "六联2500mm频射加农炮 II"
+    # 人名不译（这是本单的红线之一）
+    assert killmail["victim"]["character"]["name"] == "Warlock Industries Event", (
+        "驾驶员名不许翻译 —— 那是人名，不是 SDE 类型"
+    )
+    assert "name_en" not in killmail["victim"]["character"]
+
+
+def test_locale_assertion_is_not_vacuous(
+    monkeypatch: pytest.MonkeyPatch, eft_text: str
+) -> None:
+    """**配对证明**：把本地化摘掉（永远回英文名），上一条必须不成立。"""
+    monkeypatch.setattr(
+        api,
+        "_localized_type_name",
+        lambda row, locale: ((row or {}).get("name"), None),
+    )
+    api.clear_caches()
+    envelope = api.parse_fit(eft_text, locale="zh")
+    assert envelope["result"]["ship"]["name"] == "Hecate", "本地化被摘掉后仍应是英文名"
+
+
+def test_locale_is_strict_about_legal_values(eft_text: str) -> None:
+    """`locale` 只认 `en` / `zh`（`zh-CN` / `zh_CN` 一律拒绝，不宽松解析）。"""
+    for bad in ("zh-CN", "zh_CN", "japanese", 123):
+        envelope = api.parse_fit(eft_text, locale=bad)
+        assert envelope["ok"] is False, bad
+        assert envelope["error"]["kind"] == "invalid_argument"
+        assert envelope["error"]["field"] == "locale"
+    # 大小写不敏感（`ZH` 归一成 `zh`）
+    assert api.parse_fit(eft_text, locale="ZH")["ok"] is True
+
+
+def test_locale_does_not_bloat_the_envelope(eft_text: str) -> None:
+    """体量实测的守卫：中文名更短，但多一个 `name_en`；净增必须很小（< 20%）。"""
+    api.clear_caches()
+    english = api.parse_fit(eft_text)["result"]
+    api.clear_caches()
+    chinese = api.parse_fit(eft_text, locale="zh")["result"]
+    en_bytes = len(json.dumps(english, ensure_ascii=False).encode("utf-8"))
+    zh_bytes = len(json.dumps(chinese, ensure_ascii=False).encode("utf-8"))
+    assert zh_bytes < en_bytes * 1.2, (
+        f"locale=zh 把体量撑大了 {en_bytes} → {zh_bytes}（中文更短，不该涨这么多）"
+    )

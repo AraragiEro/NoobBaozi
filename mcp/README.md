@@ -278,6 +278,7 @@ python -c "from noobbaozi import mcp_server as m; print(m.INSTRUCTIONS); [print(
 | `zkb_search` | 战报列表检索（先筛 killmail_id，再对那条调 `fit_killmail`）；**每行带受害者驾驶员 / 军团 / 联盟名字** |
 | `zkb_stats` | 实体画像（角色 / 公司 / 联盟）：战斗总量 + zkb 风格指标 + 7 天活动 + 6 类榜单；**公式未公开的指标只转述，不给威胁判词** |
 | `zkb_related` | 星系交火总览：一个星系 + 一个时间点 → 双方阵营 / 舰船构成 / ISK / **killmail 清单**；**唯一能查任意历史窗口的入口**（见 §4.14） |
+| `sde_search` | **名字反查**：用户口语里的名字（中英文都认）→ `type_id` / 中英文名 / 组 / 类别；`ambiguous` 与 `did_you_mean` 让 agent 知道自己**不确定**（见 §4.15） |
 
 每个工具的「何时用 / 返回什么 / 限制」、每个参数的含义与默认值，都写在它的
 `description` / `inputSchema` 里 —— **别在这份 README 里补第二份**（复制就会漂移；
@@ -1047,6 +1048,67 @@ duration_s=None, points=6)`。**`distance_m` 必填** —— 距离与角速度�
 星系名认不出 → `unknown_entity`；`{"error": …}` 的归类走**共用**的 `_zkb_error_kind()`
 （`Invalid type or id` → `unknown_entity`；限流词 → `rate_limited`；其余 → `network_failed`）。
 **判成败只能看正文** —— zkb 的错误体也是 HTTP 200。
+
+### 4.15 `sde_search` + `locale`：把「人类说法」落成 `type_id`（2026-10-20）
+
+**为什么加**：agent 常只拿到用户口语里的名字（「损伤控制 II」/「vulcan 220」），不知道确切
+英文名就调不了 `fit_parse`（那是 EFT 口径），于是只能**猜**。本工具把这一步变成一次本地查询。
+
+#### `sde_search(query, *, kind=None, limit=10, locale="en")`
+
+**检索是四级**（同一份 SQL，按 `type_id` 排序稳定）：
+
+| 级 | 判据 | 例 |
+|---|---|---|
+| 0 | 精确（英文名或中文名） | `Hawk` → `Hawk` |
+| 1 | 前缀 | `Hecat` → `Hecate…` |
+| 2 | 包含 | `ecate` → `Hecate` |
+| **3** | **每个词都出现（AND，顺序不限）** | `autocannon vulcan 220` → `220mm Vulcan AutoCannon II` |
+
+> 第四级是这次新加的：前三级对 `"autocannon vulcan 220"` 是 **0 命中**（词序与名字里的
+> 顺序不一致，短语包含匹配不到）。第四级按空格切词，**每个词都要在名字里出现**，顺序不限。
+
+**`kind` 按 SDE category 过滤，不靠名字猜**：
+
+| `kind` | category id | 说明 |
+|---|---|---|
+| `all`（默认） | — | 不过滤 |
+| `ship` | 6 | `Ship` |
+| `module` | 7 | `Module` |
+| `charge` | 8 | `Charge` |
+
+> 实测必要性：名字里带 `Hawk` 的还有**涂装**（`SKINs`）和**蓝图**（`Blueprint`）。
+> 靠关键字筛会把它们当成船；按 category 过滤后 `kind=ship` 只剩 `Hawk` / `Nighthawk`。
+> 无人机 / 植入体等本参数不覆盖，用 `kind=all`。
+
+**`ambiguous`**：有**多于一个**候选是精确/前缀命中 → `true`。含义是「**该追问**，别挑第一个」。
+**`did_you_mean`**：0 命中时把每个词截前 4 字符重试（`autocannonn vulcann 220mm` →
+`auto vulc 220m`），命中则放进 `did_you_mean` 并显式标注「**近似结果，非精确**」。
+连近似都没有时**不给这个键**（不编）。
+
+**纯数字 query** 按 `type_id` 精确查（`query="2048"`）—— 拿到 id 想知道中文名 / 类别时用。
+
+#### `locale`：只覆盖名字最多的三个入口
+
+`fit_parse` / `fit_killmail` / `sde_search` 接受 `locale: "en" | "zh"`（默认 `en`，**向后兼容**）。
+
+- `locale="en"`：返回体**逐字节不变**（不会凭空多出 `name_en`）；
+- `locale="zh"`：**船名 / 模块名 / 弹药名**给官方中文（SDE `types.name_zh`），并多一个
+  `name_en` 便于核对；
+- **玩家 / 军团 / 联盟名永远不译** —— 那是人名，不是 SDE 类型。
+- `zh-CN` / `zh_CN` 一律 `invalid_argument`（`field: "locale"`）—— **不做宽松解析**。
+
+**体量实测**（同一份 Hecate 配装 / 同一条战报）：
+
+| 入口 | `locale=en` | `locale=zh` | 变化 |
+|---|---:|---:|---:|
+| `fit_parse` | 5,002 B | 5,029 B | **+27 B（+0.5%）**（中文名更短，`name_en` 又加回来） |
+| `fit_killmail` | 7,788 B | 8,166 B | **+378 B（+4.9%）**（战报里类型名更多） |
+
+> 中文**没有**把体量撑大 —— 每个中文名省下的字节刚好抵消 `name_en` 的开销。
+
+`fit_index` / `fit_view` / `fit_get` / `fit_explain` / `fit_detail` 本单**不加** `locale`
+（它们主要返回数字）。
 
 ## 5. 返回契约
 

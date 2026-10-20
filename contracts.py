@@ -44,6 +44,9 @@ class TypedValue(TypedDict):
 class TypeRow(TypedDict):
     type_id: int
     name: str
+    name_zh: str | None     # 官方中文名（SDE `types.name_zh`）。实测 53,288/53,288 全填，
+                            # 但**允许 None**：占位类型（`CharacterType` 一族）与将来裁剪的
+                            # 语种都可能没有；消费方必须回退到 `name`，不得把 None 当空串。
     group_id: int | None
     group_name: str | None
     meta_level: int

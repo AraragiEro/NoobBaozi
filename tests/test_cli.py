@@ -1388,3 +1388,81 @@ def test_module_entry_point_knows_related() -> None:
     assert completed.returncode == 0, completed.stderr
     for token in ("--url", "--system", "--time", "--limit", "--json"):
         assert token in completed.stdout, f"--help 里应提到 {token}：\n{completed.stdout}"
+
+
+# =============================================================================
+# `sde`（T-3/5）：名字反查；以及 `parse --locale zh`
+# =============================================================================
+
+
+def test_sde_json_is_the_api_envelope(capsys: pytest.CaptureFixture[str]) -> None:
+    """`sde <中文名> --json` → stdout 就是 `api.sde_search` 的信封原样，退出码 0。"""
+    code, out, err = _run_cli(["sde", "损伤控制", "--json"], capsys)
+    assert code == cli.EXIT_OK, err
+    assert err == ""
+    envelope = json.loads(out)
+    assert envelope["ok"] is True
+    result = envelope["result"]
+    assert result["query"] == "损伤控制"
+    assert result["matches"][0]["type_id"] == 2048
+    assert result["matches"][0]["name_zh"] == "损伤控制 II"
+
+
+def test_sde_human_output_shows_names_type_and_publish_state(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """人话：中英文名 + 类型 + group + 是否 published（这几样是主人点名要的）。"""
+    code, out, err = _run_cli(["sde", "Hawk", "--kind", "ship"], capsys)
+    assert code == cli.EXIT_OK, err
+    assert "Hawk" in out and "战鹰级" in out, f"必须同时给中英文名：\n{out}"
+    assert "Ship/" in out, f"必须给类型（category/group）：\n{out}"
+    assert "已发布" in out, f"必须给 published 状态：\n{out}"
+
+
+def test_sde_human_flags_ambiguity(capsys: pytest.CaptureFixture[str]) -> None:
+    """有歧义时人话里要提示「该追问」—— 这正是 `ambiguous` 的用途。"""
+    code, out, err = _run_cli(["sde", "Hawk", "--limit", "20"], capsys)
+    assert code == cli.EXIT_OK, err
+    assert "ambiguous" in out, f"歧义必须在人话里出现：\n{out}"
+
+
+def test_sde_kind_and_locale_options(capsys: pytest.CaptureFixture[str]) -> None:
+    """`--kind module` 与 `--locale zh` 都要真的传到 api（不只是被 argparse 吃掉）。"""
+    code, out, err = _run_cli(["sde", "Hawk", "--kind", "module", "--json"], capsys)
+    assert code == cli.EXIT_OK, err
+    assert json.loads(out)["result"]["count"] == 0, "Hawk 不是模块，kind=module 必须为空"
+
+    code, out, err = _run_cli(
+        ["sde", "Hawk", "--kind", "ship", "--locale", "zh", "--json"], capsys
+    )
+    assert code == cli.EXIT_OK, err
+    first = json.loads(out)["result"]["matches"][0]
+    assert first["name"] == "战鹰级", "locale=zh 时 name 应是官方中文"
+    assert first["name_en"] == "Hawk"
+
+
+def test_sde_rejects_a_bad_kind_at_the_parser() -> None:
+    """`--kind drone` → argparse 用法错误（退出码 2），**不发请求**。"""
+    completed = _subprocess_cli(["sde", "Hawk", "--kind", "drone"])
+    assert completed.returncode == cli.EXIT_USAGE
+
+
+def test_parse_locale_zh_gives_the_chinese_ship_name(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`parse --locale zh`：人话里出现中文船名（证明 `--locale` 真的传到了 api）。"""
+    code, out, err = _run_cli(
+        ["parse", "--fit-file", str(EFT_PATH), "--locale", "zh", "--json"], capsys
+    )
+    assert code == cli.EXIT_OK, err
+    ship = json.loads(out)["result"]["ship"]
+    assert ship["name"] == "赫卡特级", ship
+    assert ship["name_en"] == "Hecate"
+
+
+def test_module_entry_point_knows_sde() -> None:
+    """真起子进程：`python -m noobbaozi.cli sde --help` 里能看到这一组选项。"""
+    completed = _subprocess_cli(["sde", "--help"])
+    assert completed.returncode == 0, completed.stderr
+    for token in ("--kind", "--limit", "--locale", "--json"):
+        assert token in completed.stdout, f"--help 里应提到 {token}：\n{completed.stdout}"

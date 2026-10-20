@@ -754,6 +754,7 @@ def test_fit_killmail_schema_and_wording() -> None:
         "skill_tier",
         "damage_profile",
         "state_policy",
+        "locale",  # T-3/5：名字最多的两个入口带 locale（zh 时给官方中文）
     }
 
 
@@ -1909,3 +1910,82 @@ def test_zkb_related_rejects_a_foreign_path(related_offline: list[str]) -> None:
     assert envelope["error"]["kind"] == "invalid_argument"
     assert envelope["error"]["field"] == "url"
     assert related_offline == [], "路径不对不该发请求"
+
+
+# =============================================================================
+# 八、`sde_search`（T-3/5）与 `locale` 在 MCP 表面的契约
+# =============================================================================
+
+
+def test_sde_search_schema_has_no_fit() -> None:
+    """`sde_search`：**没有 `fit`**；四个参数；`required` 只有 `query`。"""
+    spec = _tool_spec("sde_search")
+    assert "反查" in spec["title"]
+    schema = spec["inputSchema"]
+    assert "fit" not in schema["properties"], "sde_search 不是配装工具"
+    assert set(schema["properties"]) == {"query", "kind", "limit", "locale"}
+    assert schema["required"] == ["query"]
+    assert schema["properties"]["kind"]["enum"] == [
+        api.SDE_SEARCH_KIND_ALL,
+        *api.SDE_SEARCH_KINDS,
+    ]
+    assert schema["properties"]["limit"]["maximum"] == api.SDE_SEARCH_LIMIT_MAX
+
+
+def test_sde_search_description_pins_the_traps() -> None:
+    """description 必须点名四件 agent 只在这里能看到的事。"""
+    description = _tool_spec("sde_search")["description"]
+    assert "ambiguous" in description, "歧义语义"
+    assert "did_you_mean" in description and "非精确" in description, "近似结果要标注"
+    assert "每个词都出现" in description, "第四级（词全命中、顺序不限）"
+    assert "category" in description, "kind 按 category 过滤（不是按名字猜）"
+    assert "type_id" in description and "纯数字" in description, "数字 query 的口径"
+
+
+def test_sde_search_call_round_trip() -> None:
+    """`tools/call sde_search` → MCP → api → 本地索引（全链路，不联网）。"""
+    call_result = _call("sde_search", {"query": "损伤控制", "limit": 3})
+    assert call_result.get("isError") is not True, call_result
+    envelope = _envelope(call_result)
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    assert result["query"] == "损伤控制"
+    assert result["matches"][0]["type_id"] == 2048
+    assert result["matches"][0]["name_zh"] == "损伤控制 II"
+    assert result["matches"][0]["category"] == "Module"
+
+
+def test_sde_search_bad_arguments_are_business_errors() -> None:
+    """坏 `kind` / 空 `query` → `isError`（业务错误），**不是** JSON-RPC 协议错误。"""
+    for arguments in ({"query": "Hawk", "kind": "drone"}, {"query": "  "}):
+        call_result = _call("sde_search", arguments)
+        assert call_result.get("isError") is True, arguments
+        envelope = _envelope(call_result)
+        assert envelope["error"]["kind"] == "invalid_argument"
+        assert envelope["error"]["field"] in ("kind", "query")
+
+
+def test_locale_is_only_exposed_on_the_name_heavy_tools() -> None:
+    """`locale` 只给 `fit_parse` / `fit_killmail` / `sde_search`；其它入口**不许**出现。"""
+    with_locale = {"fit_parse", "fit_killmail", "sde_search"}
+    for name in mcp_server.TOOL_NAMES:
+        properties = _tool_spec(name)["inputSchema"]["properties"]
+        if name in with_locale:
+            assert "locale" in properties, f"{name} 应该有 locale"
+            assert properties["locale"]["enum"] == list(api.LOCALES)
+            assert properties["locale"]["default"] == api.LOCALE_EN
+        else:
+            assert "locale" not in properties, (
+                f"{name} 本单不该有 locale（它主要返回数字，见 _LOCALE_TOOLS 的注释）"
+            )
+
+
+def test_tool_count_is_derived_and_instructions_cover_all_14() -> None:
+    """14 个工具；`INSTRUCTIONS` 按 `TOOL_NAMES` 顺序逐个提到（且不超 800）。"""
+    assert mcp_server.TOOL_COUNT == len(mcp_server.TOOL_NAMES) == 14
+    assert len(mcp_server.INSTRUCTIONS) <= 800
+    positions = [mcp_server.INSTRUCTIONS.find(name) for name in mcp_server.TOOL_NAMES]
+    assert all(position >= 0 for position in positions), (
+        f"有工具没写进 INSTRUCTIONS：{[n for n, p in zip(mcp_server.TOOL_NAMES, positions) if p < 0]}"
+    )
+    assert positions == sorted(positions), "INSTRUCTIONS 里的顺序必须与 TOOL_NAMES 一致"

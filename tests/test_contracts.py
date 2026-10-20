@@ -39,6 +39,7 @@ EXPECTED_TYPEDDICTS: dict[str, tuple[str, ...]] = {
     "TypeRow": (
         "type_id",
         "name",
+        "name_zh",
         "group_id",
         "group_name",
         "meta_level",

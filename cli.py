@@ -1062,6 +1062,101 @@ def _human_engagement_fleet(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _human_sde_type(result: dict, _meta: dict) -> str:
+    """`sde-type` 的人话：类型头 + 属性 + effect + 限制 + 技能 + 加成。"""
+    info = result.get("type") if isinstance(result.get("type"), dict) else {}
+    truncated = result.get("truncated") if isinstance(result.get("truncated"), dict) else {}
+    lines = [
+        f"type {info.get('id')} · {info.get('name')} ({info.get('name_en') or info.get('name')})"
+        f" · {info.get('category')}/{info.get('group')} · meta={info.get('meta_level')}"
+        f" · {'已发布' if info.get('published') else '**未发布**'}"
+    ]
+    for row in result.get("attributes") or []:
+        if isinstance(row, dict):
+            lines.append(
+                f"{_INDENT}{row.get('id'):>5}  {row.get('name')}  = {row.get('value')}"
+                f"  {row.get('unit') or ''}  {('· ' + row['name_zh']) if row.get('name_zh') else ''}"
+            )
+    if truncated.get("attributes"):
+        lines.append(f"{_INDENT}… 属性被截断：显示 {truncated.get('shown')} / 共 {truncated.get('total')}")
+    effects = result.get("effects") or []
+    if effects:
+        lines.append(f"{_INDENT}effects: " + "、".join(
+            f"{e.get('name')}({e.get('id')})" for e in effects if isinstance(e, dict)
+        ))
+    limits = {k: v for k, v in (result.get("limits") or {}).items() if v is not None}
+    if limits:
+        lines.append(f"{_INDENT}limits: {limits}")
+    skills = result.get("required_skills") or []
+    if skills:
+        lines.append(f"{_INDENT}技能: " + "、".join(
+            f"{s.get('skill') or s.get('skill_id')} {s.get('level')} 级" for s in skills if isinstance(s, dict)
+        ))
+    bonuses = result.get("bonuses") or []
+    if bonuses:
+        lines.append(f"{_INDENT}加成:")
+        for bonus in bonuses[:8]:
+            if isinstance(bonus, dict):
+                who = bonus.get("skill") or ("角色加成" if bonus.get("kind") == "role" else "-")
+                lines.append(f"{_INDENT * 2}[{who}] {bonus.get('value')} · {bonus.get('text')}")
+    for note in result.get("notes") or []:
+        lines.append(f"{_INDENT}note: {note}")
+    return "\n".join(lines)
+
+
+def _human_can_fit(result: dict, _meta: dict) -> str:
+    """`can-fit` 的人话：结论 + 卡在哪 + 探针余量 + 假设（假设必须印出来）。"""
+    ship = result.get("ship") if isinstance(result.get("ship"), dict) else {}
+    module = result.get("module") if isinstance(result.get("module"), dict) else {}
+    remaining = result.get("remaining") if isinstance(result.get("remaining"), dict) else {}
+    lines = [
+        f"can-fit · {ship.get('name')} + {module.get('name')} → "
+        + ("**装得上**" if result.get("fits") else "**装不上**")
+        + f"（slot={result.get('slot_used')}）"
+    ]
+    for blocker in result.get("blockers") or []:
+        if isinstance(blocker, dict):
+            lines.append(f"{_INDENT}✗ [{blocker.get('kind')}] {blocker.get('detail') or '(未翻译，见 JSON)'}")
+    lines.append(
+        f"{_INDENT}探针余量: cpu={remaining.get('cpu')} / pg={remaining.get('powergrid')}"
+        f" / cal={remaining.get('calibration')}"
+    )
+    for assumption in result.get("assumptions") or []:
+        lines.append(f"{_INDENT}假设: {assumption}")
+    for note in result.get("notes") or []:
+        lines.append(f"{_INDENT}note: {note}")
+    return "\n".join(lines)
+
+
+def _human_sde(result: dict, _meta: dict) -> str:
+    """`sde` 的人话：中英文名 + 类型 + group + 是否 published（+ 歧义 / 近似提示）。"""
+    matches = result.get("matches") if isinstance(result.get("matches"), list) else []
+    lines = [
+        f"sde · {result.get('query')!r} · {result.get('count')} 条"
+        + ("（**ambiguous**：多个候选都是精确/前缀命中，该追问）" if result.get("ambiguous") else "")
+    ]
+    for row in matches:
+        if not isinstance(row, dict):
+            continue
+        published = "已发布" if row.get("published") else "**未发布**"
+        lines.append(
+            f"{_INDENT}{row.get('type_id')}  {row.get('name')}  |  {row.get('name_zh')}"
+            f"  |  {row.get('category')}/{row.get('group')}  · meta={row.get('meta_level')}"
+            f"  · {published}"
+        )
+    suggestion = result.get("did_you_mean")
+    if isinstance(suggestion, dict):
+        lines.append(f"{_INDENT}0 命中 → 近似结果（**非精确**）：{suggestion.get('query')!r}")
+        for row in (suggestion.get("matches") or [])[:5]:
+            if isinstance(row, dict):
+                lines.append(
+                    f"{_INDENT * 2}{row.get('type_id')}  {row.get('name')}  |  {row.get('name_zh')}"
+                )
+    for note in result.get("notes") or []:
+        lines.append(f"{_INDENT}note: {note}")
+    return "\n".join(lines)
+
+
 def _human_related(result: dict, meta: dict) -> str:
     """`related` 的人话摘要：星系 / 时间窗 → 双方人数·舰船构成·ISK·kill 数 → killmail id。
 
@@ -1141,6 +1236,7 @@ _HUMAN: dict[str, Callable[[dict, dict], str]] = {
     "search": _human_search,
     "stats": _human_stats,
     "related": _human_related,
+    "sde": _human_sde,
 }
 
 
@@ -1228,6 +1324,19 @@ def _pick_fit(args: argparse.Namespace) -> tuple[object | None, str | None]:
 # =============================================================================
 
 
+def _add_locale(parser: argparse.ArgumentParser) -> None:
+    """`--locale`（只加给 `parse` / `killmail`：其它入口主要返回数字，本单不加）。"""
+    parser.add_argument(
+        "--locale",
+        choices=api.LOCALES,
+        default=api.LOCALE_EN,
+        help=(
+            "名字语言：en（默认，SDE 英文名 = EFT/ESI 口径）/ zh（官方中文）；"
+            "zh 时船 / 模块 / 弹药名给中文并多一个 name_en；玩家 / 军团 / 联盟名永远不译"
+        ),
+    )
+
+
 def _add_common(parser: argparse.ArgumentParser) -> None:
     """配装类子命令共用的选项（来源 / 三个共同参数 / `--json`，§10.2）。
 
@@ -1279,11 +1388,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     parse_cmd = subparsers.add_parser("parse", help="把输入归一化成结构（确认读懂了没有）")
     _add_common(parse_cmd)
+    _add_locale(parse_cmd)
 
     killmail_cmd = subparsers.add_parser(
         "killmail", help="战报上下文（谁打的、损失多少、挨了多少伤害）"
     )
     _add_common(killmail_cmd)
+    _add_locale(killmail_cmd)
 
     index_cmd = subparsers.add_parser("index", help="六维度摘要（L0，默认入口）")
     _add_common(index_cmd)
@@ -1553,6 +1664,81 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="输出机器可读 JSON（api 返回值原样）"
     )
 
+    sde_cmd = subparsers.add_parser(
+        "sde",
+        help="名字反查（中英文名 → type_id / 组 / 类别）；**不是** zkb 的 search",
+        description=(
+            "把用户口语里的名字落实成 SDE 类型。中英文都认、大小写不敏感、"
+            "多词按「每个词都出现」匹配（顺序不限）；纯数字按 type_id 精确查。"
+        ),
+    )
+    sde_cmd.add_argument("query", metavar="QUERY", help="中英文都行，如「损伤控制」或 Damage Control II")
+    sde_cmd.add_argument(
+        "--kind",
+        choices=(api.SDE_SEARCH_KIND_ALL, *api.SDE_SEARCH_KINDS),
+        default=api.SDE_SEARCH_KIND_ALL,
+        help="按 SDE category 过滤（不靠名字猜）；无人机 / 植入体用 all",
+    )
+    sde_cmd.add_argument(
+        "--limit",
+        type=int,
+        default=api.SDE_SEARCH_LIMIT_DEFAULT,
+        metavar="N",
+        help=f"最多几条（默认 {api.SDE_SEARCH_LIMIT_DEFAULT}，上限 {api.SDE_SEARCH_LIMIT_MAX}）",
+    )
+    sde_cmd.add_argument(
+        "--locale",
+        choices=api.LOCALES,
+        default=api.LOCALE_EN,
+        help="名字语言：en（默认）/ zh（官方中文）",
+    )
+    sde_cmd.add_argument(
+        "--json", action="store_true", help="输出机器可读 JSON（api 返回值原样）"
+    )
+
+    sde_type_cmd = subparsers.add_parser(
+        "sde-type",
+        help="类型详情（dogma 属性 / effect / 装配限制 / 技能要求 / 船体加成）",
+    )
+    sde_type_cmd.add_argument("query", metavar="QUERY", help="type_id 或名字")
+    sde_type_cmd.add_argument(
+        "--include",
+        choices=(api.SDE_TYPE_INCLUDE_ALL,),
+        default=None,
+        help='传 "all" 连噪声属性一起给（默认过滤「值 0 且无中文名」的）',
+    )
+    sde_type_cmd.add_argument(
+        "--limit-attributes",
+        type=int,
+        default=api.SDE_TYPE_ATTRIBUTES_DEFAULT,
+        metavar="N",
+        help=f"最多几条属性（默认 {api.SDE_TYPE_ATTRIBUTES_DEFAULT}，上限 {api.SDE_TYPE_ATTRIBUTES_MAX}）",
+    )
+    sde_type_cmd.add_argument(
+        "--locale", choices=api.LOCALES, default=api.LOCALE_ZH, help="名字语言（默认 zh）"
+    )
+    sde_type_cmd.add_argument(
+        "--json", action="store_true", help="输出机器可读 JSON（api 返回值原样）"
+    )
+
+    can_fit_cmd = subparsers.add_parser(
+        "can-fit", help="这船能装这个吗（探针配装 + 引擎违规）"
+    )
+    can_fit_cmd.add_argument("ship", metavar="SHIP", help="船（type_id 或名字）")
+    can_fit_cmd.add_argument("module", metavar="MODULE", help="模块（type_id 或名字）")
+    can_fit_cmd.add_argument(
+        "--skill-tier",
+        choices=api.SKILL_TIERS,
+        default=api.SKILL_TIER_ALL4,
+        help="技能档（默认 all4+min_required）",
+    )
+    can_fit_cmd.add_argument(
+        "--locale", choices=api.LOCALES, default=api.LOCALE_EN, help="名字语言（默认 en）"
+    )
+    can_fit_cmd.add_argument(
+        "--json", action="store_true", help="输出机器可读 JSON（api 返回值原样）"
+    )
+
     return parser
 
 
@@ -1564,9 +1750,9 @@ def _dispatch(args: argparse.Namespace, fit: object) -> dict:
         "state_policy": args.state_policy,
     }
     if args.command == "parse":
-        return api.parse_fit(fit, **params)
+        return api.parse_fit(fit, locale=getattr(args, "locale", api.LOCALE_EN), **params)
     if args.command == "killmail":
-        return api.fit_killmail(fit, **params)
+        return api.fit_killmail(fit, locale=getattr(args, "locale", api.LOCALE_EN), **params)
     if args.command == "index":
         return api.fit_index(fit, **params)
     if args.command == "view":
@@ -1708,6 +1894,37 @@ def _dispatch_related(args: argparse.Namespace) -> dict:
     )
 
 
+def _dispatch_sde(args: argparse.Namespace) -> dict:
+    """`sde` → 一次 `api.sde_search()`（**本文件不做任何逻辑**）。
+
+    `query` 空 / `kind` 非法 / `limit` 越界 / `locale` 非法全在 api 层判 ——
+    那里给得出 `field` + `hint`。
+    """
+    return api.sde_search(
+        args.query,
+        kind=args.kind,
+        limit=args.limit,
+        locale=args.locale,
+    )
+
+
+def _dispatch_sde_type(args: argparse.Namespace) -> dict:
+    """`sde-type` → `api.sde_type()`（本文件不做任何逻辑）。"""
+    return api.sde_type(
+        args.query,
+        locale=args.locale,
+        include=args.include,
+        limit_attributes=args.limit_attributes,
+    )
+
+
+def _dispatch_can_fit(args: argparse.Namespace) -> dict:
+    """`can-fit` → `api.can_fit()`（本文件不做任何逻辑）。"""
+    return api.can_fit(
+        args.ship, args.module, locale=args.locale, skill_tier=args.skill_tier
+    )
+
+
 def _pick_stats(args: argparse.Namespace) -> tuple[dict | None, str | None]:
     """从 `--character` / `--corporation` / `--alliance` 里挑**恰好一个**。
 
@@ -1793,6 +2010,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "related":
         # 同理：`related` 的输入是「星系 + 时间窗」或一条 related 链接
         return _report(args, _dispatch_related(args))
+
+    if args.command == "sde":
+        # 同理：`sde` 没有配装输入（它是名字反查）
+        return _report(args, _dispatch_sde(args))
+
+    if args.command == "sde-type":
+        return _report(args, _dispatch_sde_type(args))
+
+    if args.command == "can-fit":
+        return _report(args, _dispatch_can_fit(args))
 
     fit, problem = _pick_fit(args)
     if problem is not None:

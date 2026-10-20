@@ -138,6 +138,9 @@ TOOL_NAMES: tuple[str, ...] = (
     "zkb_search",
     "zkb_stats",
     "zkb_related",
+    "sde_search",
+    "sde_type",
+    "can_fit",
 )
 """**工具清单的唯一真源**（单数真理）：`tools/list`、`/health` 的 `tools`、客户端冒烟、
 验收测试全部从这里派生 —— 本文件之外**不许再出现工具名清单或工具条数的字面量**。
@@ -154,7 +157,11 @@ TOOL_NAMES: tuple[str, ...] = (
 8. `zkb_search` —— 先按条件筛出 `killmail_id`，再回头对具体那条用 `fit_killmail`；
 9. `zkb_stats` —— 看一个实体（角色 / 公司 / 联盟）的画像：值不值得往下翻战报；
 10. `zkb_related` —— 一个星系 + 一个时间点 → 那场交火的双方阵营与 killmail 清单
-    （**唯一能查任意历史窗口的入口**：列表接口的 `startTime` 已被 zkb 停用）。
+    （**唯一能查任意历史窗口的入口**：列表接口的 `startTime` 已被 zkb 停用）；
+11. `sde_search` —— **名字反查**：把用户口语里的名字（中英文都认）落实成 `type_id`，
+    调 `fit_*` 之前先把名字定下来，别猜；
+12. `sde_type` —— 一个类型的**详情**：dogma 属性 / effect / 装配限制 / 技能要求 / 船体加成；
+13. `can_fit` —— **这船能装这个吗**：探针配装 + 引擎违规（假设写在返回里）。
 
 加工具的正确姿势：往这个元组里加一个名字、在 `_HANDLERS` 里加实现、在
 `_TOOL_DESCRIPTIONS` 里加文案、(必要时) 在 `_schema_for()` 里加 schema ——
@@ -699,6 +706,31 @@ def _tool_zkb_related(arguments: dict) -> dict:
     return _api().zkb_related(**params)
 
 
+def _tool_sde_search(arguments: dict) -> dict:
+    """`sde_search` → `api.sde_search(**arguments)`（**不做任何加工**）。
+
+    `query` 空、`kind` 非法、`limit` 越界、`locale` 非法 —— 全在 api 层判（给得出
+    `field` + `hint`）。本层不做任何参数筛选。
+    """
+    return _api().sde_search(**arguments)
+
+
+def _tool_sde_type(arguments: dict) -> dict:
+    """`sde_type` → `api.sde_type(**arguments)`（**不做任何加工**）。
+
+    `query` 认不出 / `include` 非法 / `limit_attributes` 越界全在 api 层判。
+    """
+    return _api().sde_type(**arguments)
+
+
+def _tool_can_fit(arguments: dict) -> dict:
+    """`can_fit` → `api.can_fit(**arguments)`（**不做任何加工**）。
+
+    船 / 模块认不出、二选一有歧义时由 api 报 `invalid_argument` + 候选列表。
+    """
+    return _api().can_fit(**arguments)
+
+
 _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "fit_parse": _tool_fit_parse,
     "fit_killmail": _tool_fit_killmail,
@@ -713,6 +745,9 @@ _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "zkb_search": _tool_zkb_search,
     "zkb_stats": _tool_zkb_stats,
     "zkb_related": _tool_zkb_related,
+    "sde_search": _tool_sde_search,
+    "sde_type": _tool_sde_type,
+    "can_fit": _tool_can_fit,
 }
 """工具名 → 实现（键集合必须与 `TOOL_NAMES` 一致，`_build_tool_specs()` 会核对）。"""
 
@@ -887,6 +922,44 @@ _TOOL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
         "exHours 是**窗口半径**、窗口不对称、不等于整场战斗；complete 只是 zkb 的判断；"
         "相邻星系不包含；逐 kill 明细按 limit 截断（killmail_ids 不受它限制）。",
     ),
+    "sde_search": (
+        "名字反查（人类说法 → type_id，中英文都认）",
+        "名字反查：**想知道用户说的那个东西到底叫什么 / 叫什么 id 时用它**"
+        "（把口语里的名字落实成 type_id，调 fit_* 之前先把名字定下来）。"
+        "返回 {query, count, matches:[{type_id, name, name_zh, group, category, "
+        "meta_level, published}], ambiguous, notes}。"
+        "**ambiguous: true** = 多个候选都是精确/前缀命中 → 追问用户是哪一个，别挑第一个；"
+        "0 命中给 did_you_mean（**近似结果，非精确**）。"
+        "多词查询按「每个词都出现」（顺序不限）匹配："
+        "'autocannon vulcan 220' 能命中 220mm Vulcan AutoCannon II。"
+        "限制：kind 只覆盖 ship / module / charge"
+        "（按 SDE category 过滤，不靠名字猜；无人机 / 植入体用 all）；"
+        "纯数字 query 按 type_id 精确查；locale=zh 时 name 给官方中文 + name_en；"
+        "只查本地 SDE，不联网。",
+    ),
+    "sde_type": (
+        "类型详情（dogma 属性 / effect / 装配限制 / 技能 / 加成）",
+        "想知道「这个模块/船到底有哪些属性、值是多少、怎么装、要什么技能、船有什么加成」时用它。"
+        "返回 type（id / name / name_zh / group / category / meta_level / published / volume）、"
+        "attributes（id / name / name_zh / **SDE 原值** / unit）、"
+        "effects（id / name / duration_ms）、"
+        "limits（max_group_fitted / max_group_active / slot / charge_group）、"
+        "required_skills（skill / level）、bonuses（kind=type 是**每级**加成、kind=role 不挂技能）。"
+        "限制：query 认不出或有歧义 → invalid_argument + 候选（先用 sde_search 落实）；"
+        "默认只给「值非 0 或有中文名」的属性（include=\"all\" 给全量）；"
+        "limit_attributes 默认 60 上限 300，被截时 truncated.attributes=true；"
+        "数值是 SDE 原值（毫秒不换算）；SDE 没有 effect 的中文名（name_zh 为 null）。",
+    ),
+    "can_fit": (
+        "能不能装（探针配装 + 引擎违规）",
+        "想知道「这艘船能装这个模块吗 / 装不下是卡在哪」时用它。"
+        "返回 fits（布尔）、blockers（kind / detail，如 resource 的 used 与 available、"
+        "capital_item、skill 的 required）、remaining（探针配装的 cpu / powergrid / calibration 余量，"
+        "负数=超了）、slot_used、以及 **assumptions**（技能档 / 只装这一件 / 不含已装模块挤占）。"
+        "限制：fits=true 只对**探针配装**成立 —— 真实配装可能更紧，别当结论；"
+        "fits=false 的 blockers 是确定的；不认识的违规**原样透传 rule**、不编中文；"
+        "ship / module 认不出或有歧义 → invalid_argument + 候选。",
+    ),
 }
 
 _TOOL_ANNOTATIONS: dict[str, Any] = {
@@ -895,6 +968,14 @@ _TOOL_ANNOTATIONS: dict[str, Any] = {
     "openWorldHint": True,
 }
 """`openWorldHint: true` 是真的：`fit` 传 killmail 链接 / id+hash 时会联网取数。"""
+
+_LOCALE_TOOLS: frozenset[str] = frozenset({"fit_parse", "fit_killmail"})
+"""带 `locale` 参数的**配装类**工具（本单只覆盖名字最多的两个）。
+
+`fit_index` / `fit_view` / `fit_get` / `fit_explain` / `fit_detail` 主要返回数字，
+本单**不加** `locale`（`fit_detail` 的 upgrade 候选名留到下一单）。`sde_search` 自己那份
+schema 里也带 `locale`，但它不在这里（它不是配装工具）。
+"""
 
 
 def _common_properties() -> dict:
@@ -1407,14 +1488,135 @@ def _engagement_input_schema() -> dict:
     }
 
 
+def _sde_search_input_schema() -> dict:
+    """`sde_search` 的 `inputSchema`（**没有 `fit`**：它不是配装工具）。
+
+    `kind` 给 enum（**这是取值域，不是业务判断**）：只有 `all` / `ship` / `module` / `charge`。
+    非法值由 api 层判并给 `hint`，不在这里提前拒绝（否则错误信息会更模糊）。
+    """
+    api = _api()
+    return {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "自由文本，中英文都认、大小写不敏感、`%`/`_` 按字面。"
+                    "多词查询按「每个词都出现」（顺序不限）匹配。"
+                    "**纯数字**时按 type_id 精确查（拿到 id 想知道中文名 / 类别时用）。"
+                ),
+            },
+            "kind": {
+                "type": "string",
+                "enum": [api.SDE_SEARCH_KIND_ALL, *api.SDE_SEARCH_KINDS],
+                "default": api.SDE_SEARCH_KIND_ALL,
+                "description": (
+                    "按 SDE category 过滤：ship=6 / module=7 / charge=8，"
+                    "**不靠名字猜**（名字带 Hawk 的还有涂装与蓝图）。"
+                    "无人机 / 植入体等本参数不覆盖，用 all。"
+                ),
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": api.SDE_SEARCH_LIMIT_MAX,
+                "default": api.SDE_SEARCH_LIMIT_DEFAULT,
+                "description": "最多几条（默认 10，上限 50）。达到上限会在 notes 里提示「可能还有更多」。",
+            },
+            "locale": _locale_property(),
+        },
+        "required": ["query"],
+    }
+
+
+def _locale_property() -> dict:
+    """`locale` 参数（只给 `fit_parse` / `fit_killmail` / `sde_search` 三个入口）。"""
+    api = _api()
+    return {
+        "type": "string",
+        "enum": list(api.LOCALES),
+        "default": api.LOCALE_EN,
+        "description": (
+            "名字语言：en（默认，SDE `types.name`，即 EFT/ESI 口径）/ zh（官方中文 "
+            "`types.name_zh`）。zh 时**船 / 模块 / 弹药名**给中文并多一个 `name_en` 便于核对；"
+            "**玩家 / 军团 / 联盟名永远不译**（那是人名）。只影响名字，不影响任何数值。"
+        ),
+    }
+
+
+def _sde_type_input_schema() -> dict:
+    """`sde_type` 的 `inputSchema`（**没有 `fit`**）。"""
+    api = _api()
+    return {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": ["string", "integer"],
+                "description": (
+                    "type_id（整数或纯数字串）或名字（中英文都认）。"
+                    "名字走与 sde_search 同一套检索；**有歧义就报错并给候选**，不猜。"
+                ),
+            },
+            "locale": _locale_property(),
+            "include": {
+                "type": "string",
+                "enum": [api.SDE_TYPE_INCLUDE_ALL],
+                "description": (
+                    '传 "all" = 连「值为 0 且无中文名」的噪声属性一起给；不给则过滤掉它们。'
+                ),
+            },
+            "limit_attributes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": api.SDE_TYPE_ATTRIBUTES_MAX,
+                "default": api.SDE_TYPE_ATTRIBUTES_DEFAULT,
+                "description": (
+                    f"最多几条属性（默认 {api.SDE_TYPE_ATTRIBUTES_DEFAULT}，"
+                    f"上限 {api.SDE_TYPE_ATTRIBUTES_MAX}）；被截时 truncated.attributes=true。"
+                ),
+            },
+        },
+        "required": ["query"],
+    }
+
+
+def _can_fit_input_schema() -> dict:
+    """`can_fit` 的 `inputSchema`：船 + 模块（都可给 id 或名字）+ 与配装类共用的两个参数。"""
+    api = _api()
+    common = _common_properties()
+    return {
+        "type": "object",
+        "properties": {
+            "ship": {
+                "type": ["string", "integer"],
+                "description": "船（type_id 或名字）。名字有歧义就报错并给候选。",
+            },
+            "module": {
+                "type": ["string", "integer"],
+                "description": "模块（type_id 或名字）。与 ship 同一个类型会被拒。",
+            },
+            "skill_tier": common["skill_tier"],
+            "locale": _locale_property(),
+        },
+        "required": ["ship", "module"],
+    }
+
+
 def _schema_for(name: str) -> dict:
-    """工具 → `inputSchema`（`zkb_*` 不是配装工具，各走自己那一套）。"""
+    """工具 → `inputSchema`（非配装工具各走自己那一套）。"""
     if name == "zkb_search":
         return _zkb_input_schema()
     if name == "zkb_stats":
         return _stats_input_schema()
     if name == "zkb_related":
         return _related_input_schema()
+    if name == "sde_search":
+        return _sde_search_input_schema()
+    if name == "sde_type":
+        return _sde_type_input_schema()
+    if name == "can_fit":
+        return _can_fit_input_schema()
     if name == "fit_explain":
         return _explain_input_schema()
     if name == "fit_sensitivity":
@@ -1423,10 +1625,13 @@ def _schema_for(name: str) -> dict:
         return _project_input_schema()
     if name == "fit_engagement":
         return _engagement_input_schema()
-    return _input_schema(
+    schema = _input_schema(
         view={"fit_view": "required", "fit_detail": "optional"}.get(name, "none"),
         path={"fit_get": "required", "fit_detail": "optional"}.get(name, "none"),
     )
+    if name in _LOCALE_TOOLS:
+        schema["properties"]["locale"] = _locale_property()
+    return schema
 
 
 _SPECS_CACHE: tuple[dict, ...] | None = None
@@ -1466,24 +1671,20 @@ def _build_tool_specs() -> tuple[dict, ...]:
 
 INSTRUCTIONS: str = (
     "noobbaozi 配装分析（EVE Online）。按这个顺序用：\n"
-    "① fit_parse 先确认读懂了；\n"
+    "① fit_parse 读懂了吗；\n"
     "② fit_killmail 战报上下文；\n"
-    "③ fit_index 默认入口：六维度摘要；\n"
-    "④ fit_view 展开可疑维度；⑤ fit_get 只取一个数（带 provenance）；\n"
-    "⑥ fit_detail 深挖，很大，按需；\n"
-    "⑦ fit_explain 归因：为什么这么大；\n"
-    "⑧ fit_sensitivity 灵敏度：改输入看指标变多少；\n"
-    "⑨ fit_project 投射：船给船什么（一给一）；\n"
-    "⑩ fit_engagement 交战：命中 / 有效 DPS / 击穿 / 编队；\n"
-    "⑪ zkb_search 先找战报：筛 id 再回 ②。\n"
-    "⑫ zkb_stats 实体画像：决定用⑪翻哪些战报。\n"
-    "⑬ zkb_related 一场交火：星系+时间窗 → 双方阵营 / killmail id（唯一能查任意历史窗口）。\n"
+    "③ fit_index 六维度摘要 → ④ fit_view 展开 → ⑤ fit_get 取一个数 → ⑥ fit_detail 深挖；\n"
+    "⑦ fit_explain 归因；⑧ fit_sensitivity 灵敏度；⑨ fit_project 投射（一给一）；\n"
+    "⑩ fit_engagement 交战：命中/有效 DPS/击穿/编队；\n"
+    "⑪ zkb_search 找战报：筛 id 再回 ②；⑫ zkb_stats 实体画像；\n"
+    "⑬ zkb_related 星系交火：双方阵营 + killmail id（唯一查历史窗口）；\n"
+    "⑭ sde_search 名字反查：中英文名 → type_id；\n"
+    "⑮ sde_type 类型详情：属性/effect/限制/技能/加成；⑯ can_fit 能不能装。\n"
     "三条判读纪律：\n"
     "1) unknown 不是 0：provenance=unknown 别用常识补数，看 unknown_reasons"
     "（not_applicable=不适用、input_incomplete=输入不足、ambiguous=无唯一答案）。\n"
-    "2) 顶层数值可能是不可达的叠加值：多推进同时启用时 speed_mps/signature_radius_m "
-    "叠加，用 mobility.propulsion_states.single 看单个推进的真实值；"
-    "state_exclusive flag 会提示。\n"
+    "2) 顶层数值可能是不可达叠加：多推进同时开时 speed_mps/signature_radius_m "
+    "叠加，看 mobility.propulsion_states.single；state_exclusive flag 会提示。\n"
     "3) 别自己开 zkillboard/ESI 网页：战报上下文找 fit_killmail，列表检索找 zkb_search。\n"
     "业务失败是 isError=true 的正常响应，读 error.kind；术语见 meta.glossary。"
 )
