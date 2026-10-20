@@ -810,3 +810,39 @@ failed to solve: failed to compute cache key: "/__init__.py": not found
 15. `explain.value` 是全精度，L1 显示 3 位小数 —— 刻意如此，舍入会破坏 rel 1e-9 的加和判据。
 16. **本地 SDE 的 T3C 模式为 0 条**（Legion/Tengu/Proteus/Loki 的 `*Mode*` 类型缺失）→ T3C 模式维度**不可测**，是数据缺口。
 17. `fit_explain(firepower.dps.base)` 在无可用齐射的样本上返回 `None`（指标不适用），不是缺陷。
+### 2026-10-20 · 中文名与 SDE 图鉴层（1631 passed，MCP 16 个工具）
+
+**起因**：主人发现「中文物品描述像机翻」。查证结果 —— **数据早就有，是展示层断了**：
+`types.name_zh` 53,288/53,288 全填（`Damage Control II` → `损伤控制 II`、`Hawk` → `战鹰级`），
+但它**只用于检索、从不进返回体**，agent 只能自己翻英文名。
+
+**这一轮落地的**
+
+| 能力 | 内容 |
+|---|---|
+| `locale="en"\|"zh"` | `fit_parse` / `fit_killmail`（en 时返回体逐字节不变）；玩家/军团/联盟名永不译 |
+| `sde_search`（14） | 四级检索：精确 → 前缀 → 包含 → **每个词都出现(AND，顺序无关)**；`kind` 按 SDE category 过滤不靠名字猜；`ambiguous` 标记；0 命中给 `did_you_mean` 并标「非精确」；纯数字走 type_id |
+| **索引库 v2** | `user_version 1→2`，8 表 → **13 表**：`type_attributes 648,726` / `effects 3,427` / `type_effects 54,307` / `type_bonuses 3,571` / `buffs 277`；`attributes` 增 `display_name_zh`；15.0 MB → **45.3 MB**，重建 **3.9 s** |
+| `sde_type`（15） | 查任意 type 的属性/效果/装配限制/技能要求/船体加成，全带中文 |
+| `can_fit`（16） | 探针配装 + 引擎 validate → `fits` / `blockers` / `remaining` / `slot` + 三条假设；不认识的违规**原样透传 rule** |
+
+**实拍**（type 4403 Reactive Armor Hardener，主人的原问题）
+```
+duration 10000（作用时间/单次运转时间）· armorEmDamageResonance 0.85（装甲电磁伤害抗性）
+resistanceShiftAmount 6.0 · maxGroupFitted 1 · maxGroupActive 1
+effect 4928 adaptiveArmorHardener · 船体加固理论 3 级
+```
+
+**本轮的三条教训（都是流程级）**
+
+18. **数据有了不等于能力有了**。`name_zh` 在库里躺了很久，只差「进返回体」这一步。
+    以后加字段要问一句：**它进输出吗？进哪个入口？**
+19. **分层验证才能发现"声明了但没接通"**。`locale` 的 schema 有、`api` 支持、**MCP handler 静默丢掉** ——
+    node 门禁全绿，因为测试是分别验的。**规则：跨层参数必须有「穿透测试」（走真实传输，断言两端输出不同）。**
+20. **SDE 的两处结构陷阱**：`typeBonus._key` 是**船**、`types[]._key` 才是**技能**；
+    `dogmaEffects` **没有任何 displayName**（所以 effect 中文名只能 null）。
+    另有 1,620 个属性连英文 displayName 都没有 —— **不许手写映射表**，那会在 SDE 更新后悄悄过期。
+
+**已知不完整**
+- 部分属性 `name_zh` 为 null（SDE 本身没有），靠 `notes` 说明，不编。
+- `fit_project` 的 buff 名翻译在收尾单里做。
