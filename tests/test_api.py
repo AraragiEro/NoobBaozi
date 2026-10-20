@@ -5052,3 +5052,100 @@ def test_can_fit_rejects_the_same_type_twice() -> None:
     assert envelope["ok"] is False
     assert envelope["error"]["kind"] == "invalid_argument"
     assert envelope["error"]["field"] == "module"
+
+
+# =============================================================================
+# 九、buff 名字 + 属性缺中文名的诚实处理（T-5/5）
+# =============================================================================
+
+def test_fit_project_buffs_carry_their_names(eft_text: str) -> None:
+    """`applied.buffs[]` 必须带 `name` / `name_zh`，同时**保留** `id` / `value`。
+
+    形状是「只加不删」：`id` / `value` 有既有消费方（README、测试、agent 的读法）。
+    """
+    api.clear_caches()
+    envelope = api.fit_project(
+        eft_text, None, None, [{"id": 15, "value": -15.68}, {"id": 13, "value": 15.68}]
+    )
+    assert envelope["ok"] is True, envelope
+    buffs = {entry["id"]: entry for entry in envelope["result"]["applied"]["buffs"]}
+
+    assert set(buffs) == {13, 15}
+    for buff_id, entry in buffs.items():
+        assert "id" in entry and "value" in entry, f"{buff_id} 丢了 id/value：{entry}"
+        assert entry.get("name"), f"{buff_id} 没有英文名：{entry}"
+        assert entry.get("name_zh"), f"{buff_id} 没有中文名：{entry}"
+
+    # 名字取自 buffs 表（**不按猜测硬编**：15 是「装甲值」不是「护盾容量」）
+    assert buffs[15]["name_zh"] == "装甲值加成", buffs[15]
+    assert buffs[15]["name"] == "Armor HP Bonus"
+    assert buffs[13]["name_zh"] == "装甲抗性加成"
+    assert buffs[15]["value"] == -15.68, "数值必须原样保留"
+
+
+def test_fit_project_buff_names_assertion_is_not_vacuous(
+    monkeypatch: pytest.MonkeyPatch, eft_text: str
+) -> None:
+    """**配对证明**：把查表摘掉（`Index.buff` 恒 `None`），上一条必须不成立。"""
+    from noobbaozi.sde.index import Index
+
+    monkeypatch.setattr(Index, "buff", lambda self, buff_id: None)
+    api.clear_caches()
+    envelope = api.fit_project(eft_text, None, None, [{"id": 15, "value": -15.68}])
+    assert envelope["ok"] is True, envelope
+    entry = envelope["result"]["applied"]["buffs"][0]
+    assert "name" not in entry and "name_zh" not in entry, (
+        f"查表被摘掉后不该还有名字：{entry}"
+    )
+
+
+def test_fit_project_unknown_buff_keeps_id_and_warns(eft_text: str) -> None:
+    """SDE 不认识的 buff id：**不报错、不编名**，原样保留 `id`/`value` 并写一条 warning。"""
+    api.clear_caches()
+    envelope = api.fit_project(eft_text, None, None, [{"id": 99999, "value": 1.5}])
+    assert envelope["ok"] is True, envelope
+    entry = envelope["result"]["applied"]["buffs"][0]
+    assert entry["id"] == 99999 and entry["value"] == 1.5
+    assert "name" not in entry and "name_zh" not in entry
+    assert any("99999" in warning for warning in envelope["result"]["warnings"]), (
+        f"不认识的 id 必须写进 warnings：{envelope['result']['warnings']}"
+    )
+
+
+def test_sde_type_explains_why_name_zh_can_be_null() -> None:
+    """`sde_type` 的 `notes` 必须解释「`name_zh` 为 null 不是我们漏了」。"""
+    envelope = api.sde_type(REACTIVE_ARMOR_HARDENER, include="all", limit_attributes=300)
+    assert envelope["ok"] is True, envelope
+    result = envelope["result"]
+    joined = "\n".join(result["notes"])
+    assert "name_zh" in joined and "null" in joined, f"缺 null 的说明：{joined}"
+    assert "不是我们漏了" in joined
+    assert "displayName" in joined
+    assert "不维护任何手写中文映射表" in joined, "必须写明不做手写映射表（会过期）"
+
+    # 事实层面确实存在这种属性（maxGroupActive 连英文 displayName 都没有）
+    nulls = [row for row in result["attributes"] if row["name_zh"] is None]
+    assert nulls, "这条样本里本该有 name_zh 为 null 的属性"
+    assert any(row["name"] == "maxGroupActive" for row in nulls), (
+        f"maxGroupActive 的 name_zh 应为 null：{[r['name'] for r in nulls]}"
+    )
+
+
+def test_sde_type_null_name_zh_note_is_not_vacuous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**配对证明**：把那条说明从 notes 里删掉，上一条必须不成立。"""
+    original = api.sde_type
+
+    def without_note(*args: object, **kwargs: object) -> dict:
+        envelope = original(*args, **kwargs)
+        if envelope.get("ok"):
+            envelope["result"]["notes"] = [
+                note for note in envelope["result"]["notes"] if "不是我们漏了" not in note
+            ]
+        return envelope
+
+    monkeypatch.setattr(api, "sde_type", without_note)
+    envelope = api.sde_type(REACTIVE_ARMOR_HARDENER, include="all")
+    joined = "\n".join(envelope["result"]["notes"])
+    assert "不是我们漏了" not in joined

@@ -889,6 +889,23 @@ warnings[]}`。
 - `applied.effects[]` / `applied.buffs[]`：合并后的投射内容，每条带 `from`（谁给的）；
   `buffs` 按 `id` 取 **max**（引擎自己也取 max，顺序无关）。
 
+**`buffs` 现在带名字**（T-5/5，取自索引库的 `buffs` 表 —— 也就是 SDE 的 `dbuffCollections`）：
+
+```json
+{"id": 15, "name": "Armor HP Bonus", "name_zh": "装甲值加成", "value": -15.68,
+ "from": [{"kind": "explicit", "source": null}]}
+```
+
+- **形状只加不删**：`id` / `value` / `from` 原样保留（既有消费方依赖它们），
+  新加的只有 `name`（英文，camelCase 风格的 SDE 名）与 `name_zh`；
+- `name_zh` **可能是 `null`** —— `dbuffCollections` 不是每条都有中文译名，**不编**；
+- **id 不在表里**（SDE 新增 / 拼错）：不报错，原样给 `id`/`value`，并在 `warnings` 里加一条
+  `buffs 里有 SDE 的 dbuffCollections 不认识的 id（…）—— 原样保留 id/value，不编名字`；
+- 实测对照：`13` = `Armor Resistance Bonus` / 装甲抗性加成，`14` = 装甲维修装备：持续时间和
+  电容消耗加成，`15` = `Armor HP Bonus` / **装甲值**加成。
+- `delta.attributes[].attributed_to[]` **目前不带 buff id**（只有 `effect_index` / `operator` /
+  `value` / `penalty` / `source`）；若将来带 `buff_id`，组装层会一并翻（防御性分支）。
+
 **错误归属**（四条，各有测试）：
 
 | 情形 | `error.kind` | 带什么 |

@@ -2020,6 +2020,81 @@ def _project_source_items(sources: object) -> list[tuple[int, object, str | None
     return rows
 
 
+UNKNOWN_BUFF_ID_WARNING: str = (
+    "buffs 里有 SDE 的 dbuffCollections 不认识的 id（{ids}）—— 原样保留 id/value，不编名字"
+)
+"""buff 名查不到时的 warning 模板（**翻译失败不报错**，但要说出来）。"""
+
+
+def _buff_name_block(buff_id: object, index: Index | None) -> dict | None:
+    """buff id → `{name, name_zh}`；查不到 / 没有索引 → `None`（**不编**）。"""
+    identifier = _related_int(buff_id)
+    if identifier is None or index is None:
+        return None
+    row = index.buff(identifier)
+    if row is None:
+        return None
+    return {"name": row.get("name"), "name_zh": row.get("name_zh")}
+
+
+def _decorate_buffs(result: dict, index: Index | None) -> dict:
+    """给 buff 条目补上 `name` / `name_zh`（**形状只加不删**）。
+
+    为什么在 api 层做：`project/projection.py` 只负责算，不认识 SDE 的名字；翻译属于
+    **组装层**的活，而且这样 `project/**` 一行都不用改。
+
+    覆盖两处（都在真实返回里核对过）：
+    1. `applied.buffs[]` = `{id, value, from}` → 追加 `name` / `name_zh`；
+    2. `delta.attributes[].attributed_to[]` **如果**某行带 `buff_id` 也一并翻
+       （当前版本那里只有 `effect_index` / `operator` / `value` / `penalty` / `source`，
+       **没有 buff id** —— 所以这是防御性分支，不是主路径）。
+
+    `id` / `value` / `from` 一个都不动：测试、README、agent 的既有读法都依赖它们。
+    查不到名字时不加键、不报错，只在 `warnings` 里说一句。
+    """
+    applied = result.get("applied")
+    buffs = applied.get("buffs") if isinstance(applied, dict) else None
+    unknown: list[int] = []
+
+    def decorate(entry: dict) -> None:
+        named = _buff_name_block(entry.get("id"), index)
+        if named is None:
+            identifier = _related_int(entry.get("id"))
+            if identifier is not None:
+                unknown.append(identifier)
+            return
+        entry["name"] = named["name"]
+        entry["name_zh"] = named["name_zh"]
+
+    if isinstance(buffs, list):
+        for entry in buffs:
+            if isinstance(entry, dict) and "id" in entry:
+                decorate(entry)
+
+    delta = result.get("delta")
+    attributes = delta.get("attributes") if isinstance(delta, dict) else None
+    if isinstance(attributes, list):
+        for attribute in attributes:
+            if not isinstance(attribute, dict):
+                continue
+            attribution = attribute.get("attributed_to")
+            if not isinstance(attribution, list):
+                continue
+            for row in attribution:
+                if isinstance(row, dict) and "buff_id" in row:
+                    named = _buff_name_block(row.get("buff_id"), index)
+                    if named is not None:
+                        row["name"] = named["name"]
+                        row["name_zh"] = named["name_zh"]
+
+    if unknown:
+        warning = UNKNOWN_BUFF_ID_WARNING.format(ids=sorted(set(unknown)))
+        warnings = result.get("warnings")
+        if isinstance(warnings, list):
+            warnings.append(warning)
+    return result
+
+
 def fit_project(
     target: object,
     sources: object = None,
@@ -2156,12 +2231,15 @@ def fit_project(
                 entry["label"] = spec["label"]
             project_sources.append(entry)
 
-        result = _projection.project(
-            target_ctx,
-            project_sources,
-            effects,
-            buffs,
-            strict_state=strict_state,
+        result = _decorate_buffs(
+            _projection.project(
+                target_ctx,
+                project_sources,
+                effects,
+                buffs,
+                strict_state=strict_state,
+            ),
+            target_ctx.index,
         )
         envelope = _success(
             result,
@@ -6290,6 +6368,10 @@ def sde_type(
             "属性值 / 单位都是 **SDE 原值**（`duration` 这类是毫秒，本层不换算）。",
             f"默认只给「值非 0 或 有中文名」的属性（过滤掉 {len(raw_attributes) - len(kept)} 条噪声）；"
             f'要全量传 include="{SDE_TYPE_INCLUDE_ALL}"。',
+            "部分属性的 `name_zh` 为 **null**：SDE 的 `dogmaAttributes` 本身就没有该属性的 "
+            "displayName（连英文 `display_name` 都没有，实测 1,620/2,871 条如此），"
+            "**不是我们漏了** —— 这时请用 `name`（camelCase 内部名，如 `maxGroupActive`）"
+            "判断含义，别把 null 当空串。本层**不维护任何手写中文映射表**（SDE 一更新就会过期）。",
             "`bonuses` 里 `kind=type` 是**每级**加成（值 = 每级 +N，**没乘技能等级**）；"
             "`kind=role` 是角色加成、不挂技能。",
         ]

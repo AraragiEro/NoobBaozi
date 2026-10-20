@@ -2123,3 +2123,23 @@ def test_every_locale_declaring_tool_actually_forwards_it(
         assert any("\u4e00" <= char <= "\u9fff" for char in str(zh_name)), (
             f"{name} 的 zh 名字不是中文：{zh_name!r}"
         )
+
+
+# -----------------------------------------------------------------------------
+# `fit_project` 的 buff 现在带名字（T-5/5）：走 MCP 也要能拿到。
+# -----------------------------------------------------------------------------
+
+
+def test_fit_project_buffs_carry_names_over_mcp(eft_text: str) -> None:
+    """`tools/call fit_project` 的 `applied.buffs[]` 必须带 `name` / `name_zh`。"""
+    call_result = _call(
+        "fit_project",
+        {"target": eft_text, "buffs": [{"id": 15, "value": -15.68}]},
+    )
+    assert call_result.get("isError") is not True, call_result
+    envelope = _envelope(call_result)
+    assert envelope["ok"] is True, envelope
+    entry = envelope["result"]["applied"]["buffs"][0]
+    assert entry["id"] == 15 and entry["value"] == -15.68, "id/value 必须保留"
+    assert entry["name"] == "Armor HP Bonus"
+    assert entry["name_zh"] == "装甲值加成"
